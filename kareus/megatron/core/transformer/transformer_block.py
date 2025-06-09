@@ -211,107 +211,6 @@ class TransformerBlock(MegatronModule):
     def _get_mlp_layer(self, layer_number: int):
         return self.mlp_layers[layer_number]
 
-    def _checkpointed_forward(
-        self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor,
-        context_mask: Tensor,
-        rotary_pos_emb: Tensor,
-        attention_bias: Tensor,
-        packed_seq_params: PackedSeqParams,
-    ):
-        """Forward method with activation checkpointing."""
-
-        def custom(start: int, end: int):
-            def custom_forward(
-                hidden_states, attention_mask, context, context_mask, rotary_pos_emb
-            ):
-                for index in range(start, end):
-                    attention_layer = self._get_attention_layer(index)
-                    mlp_layer = self._get_mlp_layer(index)
-                    
-                    # Forward through attention layer
-                    pre_mlp_layernorm_output, residual, context = attention_layer(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        attention_bias=attention_bias,
-                        inference_context=None,
-                        packed_seq_params=packed_seq_params,
-                    )
-                    
-                    # Forward through MLP layer
-                    hidden_states = mlp_layer(pre_mlp_layernorm_output, residual)
-                    
-                return hidden_states, context
-
-            return custom_forward
-
-        def checkpoint_handler(forward_func):
-            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
-            if self.config.fp8:
-                return te_checkpoint(
-                    forward_func,
-                    self.config.distribute_saved_activations,
-                    tensor_parallel.random.get_cuda_rng_tracker,
-                    parallel_state.get_tensor_model_parallel_group(),
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                )
-            else:
-                return tensor_parallel.checkpoint(
-                    forward_func,
-                    self.config.distribute_saved_activations,
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                )
-
-        if self.config.recompute_method == 'uniform':
-            # Uniformly divide the total number of Transformer layers and checkpoint
-            # the input activation of each divided chunk.
-            # A method to further reduce memory usage reducing checkpoints.
-            layer_idx = 0
-            while layer_idx < self.num_layers_per_pipeline_rank:
-                hidden_states, context = checkpoint_handler(
-                    custom(layer_idx, layer_idx + self.config.recompute_num_layers)
-                )
-
-                layer_idx += self.config.recompute_num_layers
-
-        elif self.config.recompute_method == 'block':
-            # Checkpoint the input activation of only a set number of individual
-            # Transformer layers and skip the rest.
-            # A method fully use the device memory removing redundant re-computation.
-            recompute_skip_num_layers = 0
-            for layer_idx in range(self.num_layers_per_pipeline_rank):
-                # Skip recomputation when input grad computation is not needed.
-                # Need to have at least one input tensor with gradient computation
-                # for re-enterant autograd engine.
-                if self.config.fp8 and not hidden_states.requires_grad:
-                    recompute_skip_num_layers += 1
-                if (
-                    layer_idx >= recompute_skip_num_layers
-                    and layer_idx < self.config.recompute_num_layers + recompute_skip_num_layers
-                ):
-                    hidden_states, context = checkpoint_handler(custom(layer_idx, layer_idx + 1))
-                else:
-                    hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                        hidden_states, attention_mask, context, context_mask, rotary_pos_emb
-                    )
-        else:
-            raise ValueError("Invalid activation recompute method.")
-
-        return hidden_states
-
     def set_input_tensor(self, input_tensor: Tensor):
         """Set input tensor to be used instead of forward()'s input.
 
@@ -321,6 +220,59 @@ class TransformerBlock(MegatronModule):
         used by internal code to bypass the input provided by the
         forward_step_func"""
         self.input_tensor = input_tensor
+
+    def _split_tensors_for_nanobatch(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        context: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
+        attention_bias: Optional[Tensor] = None,
+        sequence_len_offset: Optional[Tensor] = None,
+    ) -> tuple:
+        """
+        Split input tensors into two halves for nano-batch processing.
+        
+        Args:
+            hidden_states (Tensor): Main hidden states tensor to split
+            attention_mask (Optional[Tensor]): Attention mask tensor
+            context (Optional[Tensor]): Context tensor for cross-attention
+            context_mask (Optional[Tensor]): Context mask tensor
+            attention_bias (Optional[Tensor]): Attention bias tensor
+            sequence_len_offset (Optional[Tensor]): Sequence length offset tensor
+        
+        Returns:
+            tuple: Two tuples containing the split tensors for each half
+        """
+        batch_size = hidden_states.size(1)
+        if batch_size < 2:
+            raise ValueError(f"Batch size must be at least 2 for nano-batch splitting, got {batch_size}")
+        
+        mid_point = batch_size // 2
+        
+        # Split input tensors
+        hidden_states_1 = hidden_states[:, :mid_point, ...]
+        hidden_states_2 = hidden_states[:, mid_point:, ...]
+        
+        attention_mask_1 = attention_mask[:, :, :, :mid_point] if attention_mask is not None else None
+        attention_mask_2 = attention_mask[:, :, :, mid_point:] if attention_mask is not None else None
+        
+        context_1 = context[:, :mid_point, ...] if context is not None else None
+        context_2 = context[:, mid_point:, ...] if context is not None else None
+        
+        context_mask_1 = context_mask[:, :mid_point, ...] if context_mask is not None else None
+        context_mask_2 = context_mask[:, mid_point:, ...] if context_mask is not None else None
+        
+        attention_bias_1 = attention_bias[:mid_point, ...] if attention_bias is not None else None
+        attention_bias_2 = attention_bias[mid_point:, ...] if attention_bias is not None else None
+        
+        sequence_len_offset_1 = sequence_len_offset[:mid_point] if sequence_len_offset is not None else None
+        sequence_len_offset_2 = sequence_len_offset[mid_point:] if sequence_len_offset is not None else None
+        
+        return (
+            (hidden_states_1, attention_mask_1, context_1, context_mask_1, attention_bias_1, sequence_len_offset_1),
+            (hidden_states_2, attention_mask_2, context_2, context_mask_2, attention_bias_2, sequence_len_offset_2)
+        )
 
     def forward(
         self,
@@ -402,41 +354,21 @@ class TransformerBlock(MegatronModule):
         
         # print(f"hidden_dropout: {self.config.hidden_dropout}")
 
-        # Split inputs into two micro-batches
-        # Assuming batch dimension is the second dimension (seq_len, batch_size, hidden_size)
-        batch_size = hidden_states.size(1)
-        if batch_size < 2:
-            raise ValueError(f"Batch size must be at least 2 for micro-batch splitting, got {batch_size}")
-        
-        mid_point = batch_size // 2
-        
-        # Split input tensors
-        hidden_states_1 = hidden_states[:, :mid_point, ...]
-        hidden_states_2 = hidden_states[:, mid_point:, ...]
-        
-        attention_mask_1 = attention_mask[:, :, :, :mid_point] if attention_mask is not None else None
-        attention_mask_2 = attention_mask[:, :, :, mid_point:] if attention_mask is not None else None
-        
-        context_1 = context[:, :mid_point, ...] if context is not None else None
-        context_2 = context[:, mid_point:, ...] if context is not None else None
-        
-        context_mask_1 = context_mask[:, :mid_point, ...] if context_mask is not None else None
-        context_mask_2 = context_mask[:, mid_point:, ...] if context_mask is not None else None
-        
-        attention_bias_1 = attention_bias[:mid_point, ...] if attention_bias is not None else None
-        attention_bias_2 = attention_bias[mid_point:, ...] if attention_bias is not None else None
-        
-        sequence_len_offset_1 = sequence_len_offset[:mid_point] if sequence_len_offset is not None else None
-        sequence_len_offset_2 = sequence_len_offset[mid_point:] if sequence_len_offset is not None else None
+        # Split input tensors using helper function
+        (hidden_states_1, attention_mask_1, context_1, context_mask_1, attention_bias_1, sequence_len_offset_1), \
+        (hidden_states_2, attention_mask_2, context_2, context_mask_2, attention_bias_2, sequence_len_offset_2) = \
+            self._split_tensors_for_nanobatch(
+                hidden_states, attention_mask, context, context_mask, attention_bias, sequence_len_offset
+            )
 
-        # Process micro-batches with interleaved execution:
+        # Process nano-batches with interleaved execution:
         # 1. Execute attention for batch 1
         # 2. Execute attention for batch 2  
         # 3. Execute MLP for batch 1
         # 4. Execute MLP for batch 2
         
         if self.config.sequence_parallel:
-            rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
+            raise NotImplementedError("Sequence parallel not implemented")
         else:
             rng_context = nullcontext()
 
@@ -452,30 +384,10 @@ class TransformerBlock(MegatronModule):
         with rng_context, outer_fp8_context:
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
-                # For checkpointed forward, we need to process each micro-batch separately
-                # as the checkpointing mechanism expects a single input
-                hidden_states_1 = self._checkpointed_forward(
-                    hidden_states=hidden_states_1,
-                    attention_mask=attention_mask_1,
-                    context=context_1,
-                    context_mask=context_mask_1,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_bias=attention_bias_1,
-                    packed_seq_params=packed_seq_params,
-                )
-                hidden_states_2 = self._checkpointed_forward(
-                    hidden_states=hidden_states_2,
-                    attention_mask=attention_mask_2,
-                    context=context_2,
-                    context_mask=context_mask_2,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_bias=attention_bias_2,
-                    packed_seq_params=packed_seq_params,
-                )
-                context = context_1 if context_1 is not None else context_2
+                raise NotImplementedError("Activation checkpointing not implemented")
             else:
-                # Layer-by-layer execution: For each layer, process both micro-batches
-                # through attention, then both micro-batches through MLP
+                # Layer-by-layer execution: For each layer, process both nano-batches
+                # through attention, then both nano-batches through MLP
                 current_hidden_1 = hidden_states_1
                 current_hidden_2 = hidden_states_2
                 current_context_1 = context_1
@@ -492,7 +404,7 @@ class TransformerBlock(MegatronModule):
                     )
                     
                     with self.offload_context, inner_fp8_context:
-                        # Process attention for both micro-batches
+                        # Process attention for both nano-batches
                         # Micro-batch 1 attention
                         pre_mlp_output_1, residual_1, current_context_1 = attention_layer(
                             hidden_states=current_hidden_1,
@@ -523,7 +435,7 @@ class TransformerBlock(MegatronModule):
                             sequence_len_offset=sequence_len_offset_2,
                         )
                         
-                        # Process MLP for both micro-batches
+                        # Process MLP for both nano-batches
                         # Micro-batch 1 MLP
                         current_hidden_1 = mlp_layer(pre_mlp_output_1, residual_1)
                         
@@ -551,7 +463,7 @@ class TransformerBlock(MegatronModule):
                 else:
                     context = None
 
-        # Final layer norm for both micro-batches
+        # Final layer norm for both nano-batches
         if self.final_layernorm is not None:
             hidden_states_1 = self.final_layernorm(hidden_states_1)
             hidden_states_2 = self.final_layernorm(hidden_states_2)
