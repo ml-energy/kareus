@@ -74,6 +74,17 @@ from nemo.utils import logging
 from nemo.utils.import_utils import safe_import, safe_import_from
 from nemo.utils.te_utils import is_float8tensor, te_version
 
+from nemo.utils.nvtx import nvtx_range_push, nvtx_range_pop
+
+# Import classes and functions from megatron_gpt_model.py
+from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import (
+    mcore_supports_moe,
+    get_specs,
+    mcore_model_customize,
+    EmbeddingScalingMixin,
+    MegatronGPTExportableModel,
+)
+
 try:
     from megatron.core import InferenceParams, parallel_state
     from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
@@ -127,193 +138,8 @@ get_gpt_layer_with_te_and_hyena_spec, HAVE_HYENA_SPEC = safe_import_from(
 )
 HAVE_TE = HAVE_TE and HAVE_TE_MODULE and HAVE_HYENA_SPEC
 
-
-@cache
-def mcore_supports_moe() -> bool:
-    global HAVE_MEGATRON_CORE
-    if not HAVE_MEGATRON_CORE:
-        return False
-    try:
-        from megatron.core.transformer.moe.router import TopKRouter  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-# TODO: This function will not work if TE is not installed
-def get_specs(spec_name, transformer_config=None, use_te=True, hyena_cfg: Dict = None, fp8=False):
-    from nemo.collections.nlp.models.language_modeling.megatron.gemma2.gemma2_spec import get_gemma2_layer_spec
-
-    # else cases for backwards compatibility with neva
-    num_experts = transformer_config.num_moe_experts if transformer_config else None
-    moe_grouped_gemm = transformer_config.moe_grouped_gemm if transformer_config else False
-
-    if num_experts is not None:
-        assert mcore_supports_moe(), "Megatron-core >= v0.5.0 is required for MoE"
-
-    if use_te and spec_name == '':
-        spec_name = 'te_gpt'
-    name_spec_dict = {
-        "": get_gpt_layer_local_spec(num_experts, moe_grouped_gemm),
-        "te_gpt": get_gpt_layer_with_transformer_engine_spec(num_experts, moe_grouped_gemm, fp8=fp8),
-        "megatron_falcon_gpt": get_falcon_layer_spec(),
-        "megatron_gemma2": get_gemma2_layer_spec(),
-        "megatron_gpt_full_te_layer_autocast": get_gpt_full_te_layer_autocast_spec(transformer_config),
-        "modelopt": get_gpt_layer_modelopt_spec(num_experts),
-        "te_gpt_hyena": get_gpt_layer_with_te_and_hyena_spec(hyena_cfg),
-        "decoder_block_gpt": get_gpt_decoder_block_spec(transformer_config, use_te),
-    }
-    if spec_name not in name_spec_dict:
-        raise ValueError(f"Spec name '{spec_name}' is not recognized.")
-    return name_spec_dict[spec_name]
-
-
-def drop_layers(model, layers_to_drop: List[int]):
-    def noop_forward_patch(
-        hidden_states,
-        attention_mask,
-        context_mask=None,
-        context=None,
-        rotary_pos_emb=None,
-        inference_params=None,
-        packed_seq_params=None,
-    ):
-        return hidden_states.clone(), context
-
-    num_layers = len(model.decoder.layers)
-    for layer_id in layers_to_drop:
-        assert layer_id > 0 and layer_id <= num_layers, f"Layers to drop should be in range (1, {num_layers})"
-        logging.info(f"Patching layer {layer_id} to noop-layer in forward pass")
-        model.decoder.layers[layer_id - 1].forward = noop_forward_patch
-
-
-def mcore_model_customize(cfg, model):
-    if cfg.get("apply_embedding_scaling", False) and parallel_state.is_pipeline_first_stage():
-        extend_instance(model.embedding, EmbeddingScalingMixin)
-    if cfg.get("scale_positional_embedding", False):
-        model.rotary_pos_emb.inv_freq = apply_rope_scaling(
-            model.rotary_pos_emb.inv_freq,
-            scale_factor=cfg.get('scale_factor', 8),
-            low_freq_factor=cfg.get('low_freq_factor', 1),
-            high_freq_factor=cfg.get('high_freq_factor', 4),
-            old_context_len=cfg.get('old_context_len', 8192),
-        )
-    if cfg.get("mcore_customization_config", {}).get("final_logit_softcapping", 0):
-        from nemo.collections.nlp.models.language_modeling.megatron.gemma2.gemma2_modules import Gemma2OutputLayer
-
-        extend_instance(model.output_layer, Gemma2OutputLayer)
-    if cfg.get("drop_layers"):
-        assert cfg.get("skip_train", False), "Dropping layers allowed only for validation runs (forward pass)"
-        drop_layers(model, cfg.get("drop_layers"))
-
-
-class EmbeddingScalingMixin(torch.nn.Module):
-    """
-    A mixin class for scaling embeddings in Megatron GPT.
-    The scaling is applied only if the configuration (accessible via `self.config`)
-    includes `apply_embedding_scaling` set to True.
-    """
-
-    def forward(self, **kwargs):
-        """
-        Forward pass that scales the output embeddings from the `forward` method of
-        the superclass by the square root of the hidden size specified in the configuration.
-        """
-        embeddings = super().forward(**kwargs)
-        return embeddings * torch.tensor(self.config.hidden_size**0.5, dtype=embeddings.dtype)
-
-
-class MegatronGPTExportableModel(torch.nn.Module, Exportable):
-    """
-    Megatron GPT Wrapper for ONNX export
-    """
-
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        self.fp8_enabled = model.cfg.get('fp8', False)
-        self.fp8_recipe = None
-        if self.fp8_enabled and HAVE_TE:
-            self.fp8_recipe = transformer_engine.common.recipe.DelayedScaling(
-                margin=0, interval=1, fp8_format=transformer_engine.common.recipe.Format.E4M3
-            )
-
-        self.dtype = utils_funcs.torch_dtype_from_precision(model.cfg.precision)
-
-    def forward(self, tokens, position_ids, attention_mask):
-        if self.fp8_enabled and HAVE_TE:
-            with (
-                transformer_engine.pytorch.onnx_export(self.fp8_enabled),
-                transformer_engine.pytorch.fp8_autocast(enabled=self.fp8_enabled, fp8_recipe=self.fp8_recipe),
-                torch.no_grad(),
-                torch.inference_mode(),
-                torch.autocast('cuda', dtype=self.dtype),
-                warnings.catch_warnings(),
-            ):
-                warnings.filterwarnings(action='ignore', category=torch.jit.TracerWarning, module=r'.*')
-                assert tokens.shape == position_ids.shape
-                assert attention_mask.shape[2] == attention_mask.shape[3] == tokens.shape[1] == position_ids.shape[1]
-                output_tensor = self.model.forward(
-                    tokens=tokens.cuda(),
-                    text_position_ids=position_ids.cuda(),
-                    attention_mask=attention_mask.cuda(),
-                    labels=None,
-                )
-        else:
-            with (
-                torch.no_grad(),
-                torch.inference_mode(),
-                torch.autocast('cuda', dtype=self.dtype),
-                warnings.catch_warnings(),
-            ):
-                warnings.filterwarnings(action='ignore', category=torch.jit.TracerWarning, module=r'.*')
-                assert tokens.shape == position_ids.shape
-                assert attention_mask.shape[2] == attention_mask.shape[3] == tokens.shape[1] == position_ids.shape[1]
-                output_tensor = self.model.forward(
-                    tokens=tokens.cuda(),
-                    text_position_ids=position_ids.cuda(),
-                    attention_mask=attention_mask.cuda(),
-                    labels=None,
-                )
-
-        return output_tensor
-
-    def freeze(self):
-        for param in self.parameters():
-            param.requires_grad = False
-
-    def input_example(self, max_batch=1, max_dim=768, seq_len=6):
-        ids = [self.model.tokenizer.text_to_ids(text) for text in ["how is the weather on           Sunday"]]
-        id_tensors = [torch.unsqueeze(torch.LongTensor(id_list), dim=0) for id_list in ids]
-        masks_and_position_ids = [
-            get_ltor_masks_and_position_ids(id_tensor, self.model.tokenizer.eos_id, False, False, False)
-            for id_tensor in id_tensors
-        ]
-        for tokens, attn_mask_and_pos_ids in zip(id_tensors, masks_and_position_ids):
-            attn_mask, _, pos_ids = attn_mask_and_pos_ids
-            return tokens, pos_ids, attn_mask
-
-    @property
-    def input_types(self) -> Optional[Dict[str, NeuralType]]:
-        return {
-            "input_ids": NeuralType(('B', 'T'), ChannelType()),
-            "position_ids": NeuralType(('B', 'T'), ChannelType()),
-            "attention_mask": NeuralType(('D', 'D', 'T', 'T'), ChannelType()),
-        }
-
-    @property
-    def output_types(self) -> Optional[Dict[str, NeuralType]]:
-        return {"logits": NeuralType(('B', 'T', 'D'), ChannelType())}
-
-    @property
-    def input_names(self) -> List[str]:
-        return ['input_ids', 'position_ids', 'attention_mask']
-
-    @property
-    def output_names(self) -> List[str]:
-        return ['logits']
-
+from kareus.megatron.core.models.gpt import GPTModel as KCoreGPTModel
+from kareus.utils.debug import save_tensors
 
 class MegatronGPTModel(MegatronBaseModel, TextGeneration):
     """
@@ -339,6 +165,10 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         self.megatron_amp_O2 = cfg.get('megatron_amp_O2', False)
 
         self.mcore_gpt = cfg.get('mcore_gpt', False)
+        self.kareus_gpt = cfg.get('kareus_gpt', True)
+
+        self.kareus_debug = cfg.get('kareus_debug', False)
+
         self.spec_name = cfg.get('name', '')
         if cfg.get('fp8', False):
             self.prev_step_training = True
@@ -484,8 +314,30 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
     def model_provider_func(self, pre_process, post_process):
         """Model depends on pipeline paralellism."""
-        if self.mcore_gpt:
-
+        if self.kareus_gpt:
+            # logging.info("self.spec_name: %s", self.spec_name)
+            model = KCoreGPTModel(
+                config=self.transformer_config,
+                transformer_layer_spec=get_specs(
+                    self.spec_name,
+                    self.transformer_config,
+                    self.transformer_engine,
+                    self.cfg.get('hyena', None),
+                    self.cfg.get('fp8', False),
+                ),
+                vocab_size=self.cfg.get('override_vocab_size', self.padded_vocab_size),
+                max_sequence_length=self.cfg.get('encoder_seq_length', 512),
+                pre_process=pre_process,
+                post_process=post_process,
+                parallel_output=True,
+                share_embeddings_and_output_weights=self.cfg.get('share_embeddings_and_output_weights', True),
+                position_embedding_type=self.cfg.get('position_embedding_type', 'learned_absolute'),
+                rotary_percent=self.cfg.get('rotary_percentage', 1.0),
+                seq_len_interpolation_factor=self.cfg.get('seq_len_interpolation_factor', None),
+                rotary_base=self.cfg.get('rotary_base', 10000),
+            )
+            mcore_model_customize(self.cfg, model)
+        elif self.mcore_gpt:
             model = MCoreGPTModel(
                 config=self.transformer_config,
                 transformer_layer_spec=get_specs(
@@ -755,7 +607,9 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         # run forward and backwards passes for an entire global batch
         # we do this inside training_step to support pipeline parallelism
         fwd_bwd_function = get_forward_backward_func()
-
+        
+        if self.kareus_debug:
+            nvtx_range_push("fwd_bwd_function")
         # TODO @akhattar: add num_micro_batches_with_partial_activation_checkpoints when ready
         losses_reduced_per_micro_batch = fwd_bwd_function(
             forward_step_func=self.get_forward_output_and_loss_func(forward_only),
@@ -767,7 +621,12 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             micro_batch_size=self.cfg.micro_batch_size,
             first_val_step=first_val_step,
         )
+        if self.kareus_debug:
+            torch.cuda.synchronize()
+            nvtx_range_pop()
 
+        if self.kareus_debug:
+            nvtx_range_push("loss_reduction")
         # only the last stages of the pipeline return losses
         if losses_reduced_per_micro_batch:
             if (not forward_only) or self.validation_drop_last:
@@ -794,6 +653,9 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 loss_mean = []
             else:
                 loss_mean = torch.tensor(0.0).cuda()
+        if self.kareus_debug:
+            torch.cuda.synchronize()
+            nvtx_range_pop()
 
         return loss_mean
 
@@ -907,6 +769,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 ), "When you defer wgrads, this buffer should not hold stray activations"
 
         loss_mean = self.training_step_fwd_bwd_step_call(dataloader_iter, forward_only=False)
+        save_tensors(loss_mean, "loss_mean", 2)
 
         if self.cfg.get('fp8', False):
             self.prev_step_training = self.training
@@ -945,6 +808,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 self.allreduce_sequence_parallel_gradients()
                 self.megatron_timer_stop('allreduce_sequence_parallel_gradients')
 
+        if self.kareus_debug:
+            nvtx_range_push("gradient_allreduce")
         self.megatron_timer_start('gradient_allreduce', log_level=1)
         if self.use_fsdp:
             # Reduce the gradients omitted from FSDP-sharding
@@ -970,6 +835,9 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             # so we all-reduce gradients after the pipeline
             self.allreduce_gradients()  # @sangkug we think this is causing memory to blow up (hurts perf)
         self.megatron_timer_stop('gradient_allreduce')
+        if self.kareus_debug:
+            torch.cuda.synchronize()
+            nvtx_range_pop()
 
         if (
             not self.use_mcore_dist_optim
@@ -1270,6 +1138,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
     def get_forward_output_and_loss_func(self, validation_step=False, tuning=False):
         def fwd_output_and_loss_func(dataloader_iter, model, checkpoint_activations_all_layers=None):
 
+            if self.kareus_debug:
+                nvtx_range_push("get_data_batch")
             # Get data batch
             batch = self.get_batch(dataloader_iter, tuning)
 
@@ -1298,6 +1168,9 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 key: val.cuda(non_blocking=True) if key in required_keys and isinstance(val, torch.Tensor) else None
                 for key, val in batch.items()
             }
+            if self.kareus_debug:
+                torch.cuda.synchronize()
+                nvtx_range_pop()
 
             # slice batch along sequence dimension for context parallelism
             batch = self.get_batch_on_this_context_parallel_rank(batch)
@@ -1394,7 +1267,14 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                         qkv_format='thd',
                     )
 
+            if self.kareus_debug:
+                nvtx_range_push("forward_pass")
+
             output_tensor = model(**forward_args)
+
+            if self.kareus_debug:
+                torch.cuda.synchronize()
+                nvtx_range_pop()
 
             def loss_func(output_tensor):
                 # Loss for a micro-batch (ub)
@@ -1510,6 +1390,13 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             # Currently for all MCore transformer layer specs causal attention mask
             # is used so we can delegate creating it to MCore/TE and pass None below
             if (
+                isinstance(model, KCoreGPTModel)
+                or hasattr(model, "module")
+                and isinstance(model.module, KCoreGPTModel)
+            ):
+                attention_mask = None
+
+            elif (
                 isinstance(model, MCoreGPTModel)
                 or hasattr(model, "module")
                 and isinstance(model.module, MCoreGPTModel)

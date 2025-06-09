@@ -1,7 +1,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import List, Optional, Union
 
 import torch
@@ -24,6 +23,23 @@ from megatron.core.transformer.transformer_layer import (
 )
 from megatron.core.transformer.utils import sharded_state_dict_default
 from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
+
+# Import dependencies from the original transformer_block.py
+from megatron.core.transformer.transformer_block import (
+    TransformerBlockSubmodules,
+    _get_block_submodules,
+)
+
+# Import the new split layers
+from kareus.megatron.core.transformer.split_layers import (
+    AttentionLayer,
+    MLPLayer,
+    create_attention_and_mlp_layers_from_transformer_submodules,
+    create_attention_and_mlp_layers_from_module_spec,
+)
+
+from kareus.utils.debug import save_tensors
+
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -49,172 +65,36 @@ except ImportError:
         LayerNormImpl = WrappedTorchNorm
 
 
-def get_num_layers_to_build(config: TransformerConfig) -> int:
+class CombinedLayerWrapper:
     """
-    Determine the number of transformer layers to build for the current pipeline stage.
-    Args:
-        config (TransformerConfig): Configuration object containing transformer model parameters.
-
-    Returns:
-        int: The number of layers to be built for the current pipeline stage.
+    Wrapper class that combines AttentionLayer and MLPLayer to maintain
+    backward compatibility with pipeline parallel code that expects a single layer.
     """
-    if (
-        config.num_layers_in_first_pipeline_stage is not None
-        or config.num_layers_in_last_pipeline_stage is not None
-    ):
-
-        assert not (
-            config.account_for_embedding_in_pipeline_split
-            or config.account_for_loss_in_pipeline_split
-        ), " \
-        Does not support standalone embedding stage and standalone loss stage with uneven pp"
-        # Number of layers to distribute over rest of pipeline stages
-        layers_to_distribute = config.num_layers
-        # Number of pipeline stages left for distributing transformer layers
-        pipeline_stages_left = parallel_state.get_pipeline_model_parallel_world_size()
-
-        # If the uneven first (last) pipeline stage is enabled, remove the specified number
-        # of layers to calculate the number of layers on each middle pipeline stage.
-        if config.num_layers_in_first_pipeline_stage is not None:
-            layers_to_distribute -= config.num_layers_in_first_pipeline_stage
-            pipeline_stages_left -= 1
-
-        if config.num_layers_in_last_pipeline_stage is not None:
-            layers_to_distribute -= config.num_layers_in_last_pipeline_stage
-            pipeline_stages_left -= 1
-
-        assert (
-            layers_to_distribute % pipeline_stages_left == 0
-        ), "With uneven pipelineing the left over layers must be divisible by left over stages"
-        num_layers_per_pipeline_rank = layers_to_distribute // pipeline_stages_left
-
-        # If the uneven first (last) pipeline stage is enabled, return the specified number
-        # of layers for all virtual pipeline parallel stages within the first (last) pipeline
-        # parallel stage.
-        if (
-            parallel_state.is_pipeline_first_stage(ignore_virtual=True)
-            and config.num_layers_in_first_pipeline_stage is not None
-        ):
-            num_layers_per_pipeline_rank = config.num_layers_in_first_pipeline_stage
-
-        if (
-            parallel_state.is_pipeline_last_stage(ignore_virtual=True)
-            and config.num_layers_in_last_pipeline_stage is not None
-        ):
-            num_layers_per_pipeline_rank = config.num_layers_in_last_pipeline_stage
-    else:
-        # Include the embedding layer and loss layer into pipeline parallelism partition
-        num_layers = config.num_layers
-        if config.account_for_embedding_in_pipeline_split:
-            num_layers += 1
-
-        if config.account_for_loss_in_pipeline_split:
-            num_layers += 1
-
-        assert (
-            num_layers % config.pipeline_model_parallel_size == 0
-        ), "num_layers should be divisible by pipeline_model_parallel_size"
-        num_layers_per_pipeline_rank = num_layers // config.pipeline_model_parallel_size
-
-    if (
-        parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None
-        and config.pipeline_model_parallel_size > 1
-    ):
-        # Interleaved pipeline parallelism:
-        # Number of layers in each model chunk is the number of layers in the stage,
-        # divided by the number of model chunks in a stage.
-        # With 8 layers, 2 stages, and 4 model chunks, we want an assignment of
-        # layers to stages like (each list is a model chunk):
-        # Stage 0: [0]  [2]  [4]  [6]
-        # Stage 1: [1]  [3]  [5]  [7]
-        # With 8 layers, 2 stages, and 2 virtual stages, we want an assignment of
-        # layers to stages like (each list is a model chunk):
-        # Stage 0: [0, 1]  [4, 5]
-        # Stage 1: [2, 3]  [6, 7]
-        vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
-
-        assert (
-            num_layers_per_pipeline_rank % vp_size == 0
-        ), f"num_layers_per_pipeline_rank {num_layers_per_pipeline_rank} \
-            should be divisible by vp_size {vp_size}"
-        num_layers_per_virtual_rank = num_layers_per_pipeline_rank // vp_size
-
-        num_layers_to_build = num_layers_per_virtual_rank
-
-    else:
-        # Non-interleaved pipeline parallelism:
-        # Each stage gets a contiguous set of layers.
-        num_layers_to_build = num_layers_per_pipeline_rank
-
-    # The embedding (or loss) layer cannot function as a standalone transformer layer
-    # Reduce the number of layers to construct by 1 on the first (or last) stage if the
-    # embedding (or loss) layer is included in the pipeline parallelism partition and placement.
-    if parallel_state.is_pipeline_first_stage() and config.account_for_embedding_in_pipeline_split:
-        num_layers_to_build -= 1
-        assert num_layers_to_build >= 0, "Not enough layers in the first virtual pipeline stage"
-
-    if parallel_state.is_pipeline_last_stage() and config.account_for_loss_in_pipeline_split:
-        num_layers_to_build -= 1
-        assert num_layers_to_build >= 0, "Not enough layers in the last virtual pipeline stage"
-
-    return num_layers_to_build
-
-
-@dataclass
-class TransformerBlockSubmodules:
-    """
-    Dataclass for specifying the submodules of a transformer block.
-
-    This class defines the structure for configuring the layers and normalization
-    within a transformer block, allowing for flexible and customizable architecture designs.
-
-    Args:
-        layer_specs (List[ModuleSpec], optional): A list of module specifications for
-            the layers within the transformer block. Each specification typically
-            defines a complete transformer layer (e.g., self-attention, feed-forward network).
-        layer_norm (Optional[Union[ModuleSpec, torch.nn.Module]], optional): Specification
-            or instance of the layer normalization to be applied.
-    """
-
-    layer_specs: List[ModuleSpec] = None
-    layer_norm: Optional[Union[ModuleSpec, torch.nn.Module]] = None
-
-
-def _get_block_submodules(
-    config: TransformerConfig, spec: Union[TransformerBlockSubmodules, ModuleSpec]
-) -> TransformerBlockSubmodules:
-    """
-    Retrieve or construct TransformerBlockSubmodules based on the provided specification.
-
-    Args:
-        config (TransformerConfig): Configuration object for the transformer model.
-        spec (Union[TransformerBlockSubmodules, ModuleSpec]): Specification for the
-            transformer block submodules. Can be either a TransformerBlockSubmodules
-            instance or a ModuleSpec.
-
-    Returns:
-        TransformerBlockSubmodules: The submodules for the transformer block.
-    """
-
-    # Transformer block submodules.
-    if isinstance(spec, TransformerBlockSubmodules):
-        return spec
-
-    # ModuleSpec here is generally assumed to be for a transformer layer that
-    # is implemented in `transformer_layer.py` or if it subclasses
-    # `BaseTransformerLayer` from the `transformer_layer.py` file.
-    elif isinstance(spec, ModuleSpec):
-        if issubclass(spec.module, TransformerBlock):
-            return spec.submodules
-        elif issubclass(spec.module, BaseTransformerLayer):
-            num_layers = get_num_layers_to_build(config)
-            return TransformerBlockSubmodules(
-                layer_specs=[spec] * num_layers, layer_norm=LayerNormImpl
-            )
+    
+    def __init__(self, attention_layer, mlp_layer):
+        self.attention_layer = attention_layer
+        self.mlp_layer = mlp_layer
+        # Expose layer_number for pipeline parallel compatibility
+        self.layer_number = attention_layer.layer_number
+    
+    def __call__(self, *args, **kwargs):
+        """Forward pass through both attention and MLP layers."""
+        # Forward through attention layer
+        pre_mlp_layernorm_output, residual, context = self.attention_layer(*args, **kwargs)
+        
+        # Forward through MLP layer
+        hidden_states = self.mlp_layer(pre_mlp_layernorm_output, residual)
+        
+        return hidden_states, context
+    
+    def __getattr__(self, name):
+        """Delegate attribute access to attention layer first, then MLP layer."""
+        if hasattr(self.attention_layer, name):
+            return getattr(self.attention_layer, name)
+        elif hasattr(self.mlp_layer, name):
+            return getattr(self.mlp_layer, name)
         else:
-            raise Exception(f"specialize for {spec.module.__name__}.")
-    else:
-        raise Exception(f"specialize for {type(spec).__name__}.")
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 
 class TransformerBlock(MegatronModule):
@@ -265,16 +145,11 @@ class TransformerBlock(MegatronModule):
             self.config._cpu_offloading_context = None
 
         self._build_layers()
-        self.num_layers_per_pipeline_rank = len(self.layers)
+        self.num_layers_per_pipeline_rank = len(self.attention_layers)
 
     def _build_layers(self):
-        # Transformer layers.
-        # @jcasper can we improve how we deal with layer_number?
-        # currently it's only used in CoreAttention?
-        # if self.apply_query_key_layer_scaling:
-        #     coeff = self.layer_number
-        #     self.norm_factor *= coeff
-        def build_layer(layer_spec, layer_number):
+        # Build separate attention and MLP layers instead of combined transformer layers
+        def build_attention_and_mlp_layers(layer_spec, layer_number):
             global_layer_number = layer_number + get_transformer_layer_offset(
                 self.config
             )  # 1-based index
@@ -284,17 +159,38 @@ class TransformerBlock(MegatronModule):
                 layer_config = self.config
 
             fp8_init_context = get_fp8_context(layer_config, global_layer_number - 1, is_init=True)
+            
+            # Handle both ModuleSpec and TransformerLayerSubmodules
+            if isinstance(layer_spec, ModuleSpec):
+                attention_submodules, mlp_submodules = create_attention_and_mlp_layers_from_module_spec(layer_spec)
+            else:
+                # layer_spec is TransformerLayerSubmodules
+                attention_submodules, mlp_submodules = create_attention_and_mlp_layers_from_transformer_submodules(layer_spec)
+            
             with fp8_init_context:
-                module = build_module(layer_spec, config=layer_config, layer_number=layer_number)
-            return module
+                attention_layer = AttentionLayer(
+                    config=layer_config, 
+                    submodules=attention_submodules, 
+                    layer_number=layer_number
+                )
+                mlp_layer = MLPLayer(
+                    config=layer_config, 
+                    submodules=mlp_submodules, 
+                    layer_number=layer_number
+                )
+            return attention_layer, mlp_layer
 
-        # offset is implicit in TransformerLayer
-        self.layers = torch.nn.ModuleList(
-            [
-                build_layer(layer_spec, i + 1)
-                for i, layer_spec in enumerate(self.submodules.layer_specs)
-            ]
-        )
+        # Build separate attention and MLP layers
+        attention_layers = []
+        mlp_layers = []
+        
+        for i, layer_spec in enumerate(self.submodules.layer_specs):
+            attention_layer, mlp_layer = build_attention_and_mlp_layers(layer_spec, i + 1)
+            attention_layers.append(attention_layer)
+            mlp_layers.append(mlp_layer)
+
+        self.attention_layers = torch.nn.ModuleList(attention_layers)
+        self.mlp_layers = torch.nn.ModuleList(mlp_layers)
 
         # @TODO: add back account_for_embedding_in_pipeline_split (see issue #293)
         # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
@@ -309,8 +205,11 @@ class TransformerBlock(MegatronModule):
         else:
             self.final_layernorm = None  # Either this or nn.Identity
 
-    def _get_layer(self, layer_number: int):
-        return self.layers[layer_number]
+    def _get_attention_layer(self, layer_number: int):
+        return self.attention_layers[layer_number]
+    
+    def _get_mlp_layer(self, layer_number: int):
+        return self.mlp_layers[layer_number]
 
     def _checkpointed_forward(
         self,
@@ -329,8 +228,11 @@ class TransformerBlock(MegatronModule):
                 hidden_states, attention_mask, context, context_mask, rotary_pos_emb
             ):
                 for index in range(start, end):
-                    layer = self._get_layer(index)
-                    hidden_states, context = layer(
+                    attention_layer = self._get_attention_layer(index)
+                    mlp_layer = self._get_mlp_layer(index)
+                    
+                    # Forward through attention layer
+                    pre_mlp_layernorm_output, residual, context = attention_layer(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
                         context=context,
@@ -340,6 +242,10 @@ class TransformerBlock(MegatronModule):
                         inference_context=None,
                         packed_seq_params=packed_seq_params,
                     )
+                    
+                    # Forward through MLP layer
+                    hidden_states = mlp_layer(pre_mlp_layernorm_output, residual)
+                    
                 return hidden_states, context
 
             return custom_forward
@@ -492,6 +398,43 @@ class TransformerBlock(MegatronModule):
         #   is called here to be future-proof and corner-case-proof.
         hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
 
+        # save_tensors(hidden_states, "make_viewless_tensor")
+        
+        # print(f"hidden_dropout: {self.config.hidden_dropout}")
+
+        # Split inputs into two micro-batches
+        # Assuming batch dimension is the second dimension (seq_len, batch_size, hidden_size)
+        batch_size = hidden_states.size(1)
+        if batch_size < 2:
+            raise ValueError(f"Batch size must be at least 2 for micro-batch splitting, got {batch_size}")
+        
+        mid_point = batch_size // 2
+        
+        # Split input tensors
+        hidden_states_1 = hidden_states[:, :mid_point, ...]
+        hidden_states_2 = hidden_states[:, mid_point:, ...]
+        
+        attention_mask_1 = attention_mask[:, :, :, :mid_point] if attention_mask is not None else None
+        attention_mask_2 = attention_mask[:, :, :, mid_point:] if attention_mask is not None else None
+        
+        context_1 = context[:, :mid_point, ...] if context is not None else None
+        context_2 = context[:, mid_point:, ...] if context is not None else None
+        
+        context_mask_1 = context_mask[:, :mid_point, ...] if context_mask is not None else None
+        context_mask_2 = context_mask[:, mid_point:, ...] if context_mask is not None else None
+        
+        attention_bias_1 = attention_bias[:mid_point, ...] if attention_bias is not None else None
+        attention_bias_2 = attention_bias[mid_point:, ...] if attention_bias is not None else None
+        
+        sequence_len_offset_1 = sequence_len_offset[:mid_point] if sequence_len_offset is not None else None
+        sequence_len_offset_2 = sequence_len_offset[mid_point:] if sequence_len_offset is not None else None
+
+        # Process micro-batches with interleaved execution:
+        # 1. Execute attention for batch 1
+        # 2. Execute attention for batch 2  
+        # 3. Execute MLP for batch 1
+        # 4. Execute MLP for batch 2
+        
         if self.config.sequence_parallel:
             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
         else:
@@ -509,53 +452,121 @@ class TransformerBlock(MegatronModule):
         with rng_context, outer_fp8_context:
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
-                hidden_states = self._checkpointed_forward(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    context=context,
-                    context_mask=context_mask,
+                # For checkpointed forward, we need to process each micro-batch separately
+                # as the checkpointing mechanism expects a single input
+                hidden_states_1 = self._checkpointed_forward(
+                    hidden_states=hidden_states_1,
+                    attention_mask=attention_mask_1,
+                    context=context_1,
+                    context_mask=context_mask_1,
                     rotary_pos_emb=rotary_pos_emb,
-                    attention_bias=attention_bias,
+                    attention_bias=attention_bias_1,
                     packed_seq_params=packed_seq_params,
                 )
+                hidden_states_2 = self._checkpointed_forward(
+                    hidden_states=hidden_states_2,
+                    attention_mask=attention_mask_2,
+                    context=context_2,
+                    context_mask=context_mask_2,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_bias=attention_bias_2,
+                    packed_seq_params=packed_seq_params,
+                )
+                context = context_1 if context_1 is not None else context_2
             else:
-                for l_no, layer in enumerate(self.layers):
+                # Layer-by-layer execution: For each layer, process both micro-batches
+                # through attention, then both micro-batches through MLP
+                current_hidden_1 = hidden_states_1
+                current_hidden_2 = hidden_states_2
+                current_context_1 = context_1
+                current_context_2 = context_2
+                
+                for l_no in range(len(self.attention_layers)):
+                    attention_layer = self.attention_layers[l_no]
+                    mlp_layer = self.mlp_layers[l_no]
+                    
                     inner_fp8_context = (
-                        get_fp8_context(self.config, layer.layer_number - 1)
+                        get_fp8_context(self.config, attention_layer.layer_number - 1)
                         if use_inner_fp8_context
                         else nullcontext()
                     )
+                    
                     with self.offload_context, inner_fp8_context:
-                        hidden_states, context = layer(
-                            hidden_states=hidden_states,
-                            attention_mask=attention_mask,
-                            context=context,
-                            context_mask=context_mask,
+                        # Process attention for both micro-batches
+                        # Micro-batch 1 attention
+                        pre_mlp_output_1, residual_1, current_context_1 = attention_layer(
+                            hidden_states=current_hidden_1,
+                            attention_mask=attention_mask_1,
+                            context=current_context_1,
+                            context_mask=context_mask_1,
                             rotary_pos_emb=rotary_pos_emb,
                             rotary_pos_cos=rotary_pos_cos,
                             rotary_pos_sin=rotary_pos_sin,
-                            attention_bias=attention_bias,
+                            attention_bias=attention_bias_1,
                             inference_context=inference_context,
                             packed_seq_params=packed_seq_params,
-                            sequence_len_offset=sequence_len_offset,
+                            sequence_len_offset=sequence_len_offset_1,
                         )
+                        
+                        # Micro-batch 2 attention
+                        pre_mlp_output_2, residual_2, current_context_2 = attention_layer(
+                            hidden_states=current_hidden_2,
+                            attention_mask=attention_mask_2,
+                            context=current_context_2,
+                            context_mask=context_mask_2,
+                            rotary_pos_emb=rotary_pos_emb,
+                            rotary_pos_cos=rotary_pos_cos,
+                            rotary_pos_sin=rotary_pos_sin,
+                            attention_bias=attention_bias_2,
+                            inference_context=inference_context,
+                            packed_seq_params=packed_seq_params,
+                            sequence_len_offset=sequence_len_offset_2,
+                        )
+                        
+                        # Process MLP for both micro-batches
+                        # Micro-batch 1 MLP
+                        current_hidden_1 = mlp_layer(pre_mlp_output_1, residual_1)
+                        
+                        # Micro-batch 2 MLP
+                        current_hidden_2 = mlp_layer(pre_mlp_output_2, residual_2)
+                        
+                        if (
+                            torch.is_grad_enabled()
+                            and self.config.cpu_offloading
+                            and self.group_prefetch_offload_commit_async is not None
+                        ):
+                            current_hidden_1 = self.group_prefetch_offload_commit_async(current_hidden_1)
+                            current_hidden_2 = self.group_prefetch_offload_commit_async(current_hidden_2)
+                
+                hidden_states_1 = current_hidden_1
+                hidden_states_2 = current_hidden_2
+                
+                # Set context from the last processed context
+                if current_context_1 is not None and current_context_2 is not None:
+                    context = torch.cat([current_context_1, current_context_2], dim=1)
+                elif current_context_1 is not None:
+                    context = current_context_1
+                elif current_context_2 is not None:
+                    context = current_context_2
+                else:
+                    context = None
 
-                    if (
-                        torch.is_grad_enabled()
-                        and self.config.cpu_offloading
-                        and self.group_prefetch_offload_commit_async is not None
-                    ):
-                        hidden_states = self.group_prefetch_offload_commit_async(hidden_states)
-
-        # Final layer norm.
+        # Final layer norm for both micro-batches
         if self.final_layernorm is not None:
-            hidden_states = self.final_layernorm(hidden_states)
+            hidden_states_1 = self.final_layernorm(hidden_states_1)
+            hidden_states_2 = self.final_layernorm(hidden_states_2)
             # TENorm produces a "viewed" tensor. This will result in schedule.py's
             # deallocate_output_tensor() throwing an error, so a viewless tensor is
             # created to prevent this.
-            hidden_states = make_viewless_tensor(
-                inp=hidden_states, requires_grad=True, keep_graph=True
+            hidden_states_1 = make_viewless_tensor(
+                inp=hidden_states_1, requires_grad=True, keep_graph=True
             )
+            hidden_states_2 = make_viewless_tensor(
+                inp=hidden_states_2, requires_grad=True, keep_graph=True
+            )
+
+        # Concatenate results
+        hidden_states = torch.cat([hidden_states_1, hidden_states_2], dim=1)
 
         return hidden_states
 
@@ -590,31 +601,54 @@ class TransformerBlock(MegatronModule):
 
         sharded_state_dict = {}
 
-        layer_prefix = f'{prefix}layers.'
+        # Handle attention layers
+        attention_layer_prefix = f'{prefix}attention_layers.'
         num_layers = self.config.num_layers
-        for layer in self.layers:
+        for i, attention_layer in enumerate(self.attention_layers):
             offset = get_transformer_layer_offset(self.config)
 
-            global_layer_offset = layer.layer_number - 1  # self.layer_number starts at 1
-            state_dict_prefix = f'{layer_prefix}{global_layer_offset - offset}.'  # module list index in TransformerBlock # pylint: disable=line-too-long
+            global_layer_offset = attention_layer.layer_number - 1  # self.layer_number starts at 1
+            state_dict_prefix = f'{attention_layer_prefix}{i}.'  # module list index in TransformerBlock
             if non_homogeneous_layers:
-                sharded_prefix = f'{layer_prefix}{global_layer_offset}.'
+                sharded_prefix = f'{attention_layer_prefix}{global_layer_offset}.'
                 sharded_pp_offset = []
             else:
-                sharded_prefix = layer_prefix
+                sharded_prefix = attention_layer_prefix
                 sharded_pp_offset = [
                     (0, global_layer_offset, num_layers)
                 ]  # PP sharding offset for ShardedTensors
-            layer_sharded_state_dict = layer.sharded_state_dict(
+            layer_sharded_state_dict = attention_layer.sharded_state_dict(
                 state_dict_prefix, sharded_pp_offset, metadata
             )
             replace_prefix_for_sharding(layer_sharded_state_dict, state_dict_prefix, sharded_prefix)
 
             sharded_state_dict.update(layer_sharded_state_dict)
 
-        # Add modules other than self.layers
+        # Handle MLP layers
+        mlp_layer_prefix = f'{prefix}mlp_layers.'
+        for i, mlp_layer in enumerate(self.mlp_layers):
+            offset = get_transformer_layer_offset(self.config)
+
+            global_layer_offset = mlp_layer.layer_number - 1  # self.layer_number starts at 1
+            state_dict_prefix = f'{mlp_layer_prefix}{i}.'  # module list index in TransformerBlock
+            if non_homogeneous_layers:
+                sharded_prefix = f'{mlp_layer_prefix}{global_layer_offset}.'
+                sharded_pp_offset = []
+            else:
+                sharded_prefix = mlp_layer_prefix
+                sharded_pp_offset = [
+                    (0, global_layer_offset, num_layers)
+                ]  # PP sharding offset for ShardedTensors
+            layer_sharded_state_dict = mlp_layer.sharded_state_dict(
+                state_dict_prefix, sharded_pp_offset, metadata
+            )
+            replace_prefix_for_sharding(layer_sharded_state_dict, state_dict_prefix, sharded_prefix)
+
+            sharded_state_dict.update(layer_sharded_state_dict)
+
+        # Add modules other than self.attention_layers and self.mlp_layers
         for name, module in self.named_children():
-            if not module is self.layers:
+            if not (module is self.attention_layers or module is self.mlp_layers):
                 sharded_state_dict.update(
                     sharded_state_dict_default(
                         module, f'{prefix}{name}.', sharded_offsets, metadata
@@ -622,3 +656,18 @@ class TransformerBlock(MegatronModule):
                 )
 
         return sharded_state_dict
+
+    @property
+    def layers(self):
+        """
+        Backward compatibility property for pipeline parallel scheduler.
+        Returns a combined view of attention and MLP layers.
+        """
+        # Create a combined list that alternates attention and MLP layers
+        # This maintains the expected interface for pipeline parallel code
+        combined_layers = []
+        for i in range(len(self.attention_layers)):
+            # Add a wrapper that combines attention and MLP for this layer
+            combined_layer = CombinedLayerWrapper(self.attention_layers[i], self.mlp_layers[i])
+            combined_layers.append(combined_layer)
+        return combined_layers

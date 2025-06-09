@@ -80,6 +80,9 @@ model:
 
   # use GPTModel from megatron.core
   mcore_gpt: True
+
+  kareus_gpt: True
+  kareus_debug: True
   
   # Skip training and do only validation step
   skip_train: False

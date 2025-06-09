@@ -24,10 +24,11 @@ from megatron.core.transformer.multi_token_prediction import (
     tie_word_embeddings_state_dict,
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
 
+from kareus.megatron.core.transformer.transformer_block import TransformerBlock
+from kareus.utils.debug import save_tensors
 
 class GPTModel(LanguageModule):
     """GPT Transformer language model.
@@ -92,8 +93,12 @@ class GPTModel(LanguageModule):
         scatter_embedding_sequence_parallel: bool = True,
         seq_len_interpolation_factor: Optional[float] = None,
         mtp_block_spec: Optional[ModuleSpec] = None,
+        kareus_debug: bool = True,
     ) -> None:
         super().__init__(config=config)
+        self.kareus_debug = kareus_debug
+        if self.kareus_debug:
+            self.num_iter = 0
 
         if has_config_logger_enabled(config):
             log_config_to_disk(config, locals(), prefix=type(self).__name__)
@@ -329,7 +334,37 @@ class GPTModel(LanguageModule):
             and not has_config_logger_enabled(self.config)
         ):
             decoder_input = WrappedTensor(decoder_input)
+        
+        # if self.kareus_debug:
+        #     save_tensors(decoder_input, "decoder_input", 2)
 
+        #     if self.num_iter == 10:
+        #         # Save one of the decoder parameters
+        #         if len(self.decoder.layers) > 0:
+        #             # Get the first transformer layer
+        #             first_layer = self.decoder.layers[0]
+
+        #             if hasattr(first_layer, 'self_attention') and hasattr(first_layer.self_attention, 'linear_qkv'):
+        #                 # For fused QKV linear layer
+        #                 param_to_save = first_layer.self_attention.linear_qkv.weight
+        #                 param_name = "first_layer_self_attn_qkv_weight"
+        #             elif hasattr(first_layer, 'self_attention') and hasattr(first_layer.self_attention, 'linear_q'):
+        #                 # For separate Q, K, V linear layers
+        #                 param_to_save = first_layer.self_attention.linear_q.weight
+        #                 param_name = "first_layer_self_attn_q_weight"
+        #             elif hasattr(first_layer, 'attention') and hasattr(first_layer.attention, 'linear_qkv'):
+        #                 # Alternative naming convention
+        #                 param_to_save = first_layer.attention.linear_qkv.weight
+        #                 param_name = "first_layer_attn_qkv_weight"
+        #             else:
+        #                 # Fallback: save the first parameter we can find
+        #                 param_to_save = next(first_layer.parameters())
+        #                 param_name = "first_layer_first_param"
+                    
+        #             # Save the parameter
+        #             save_tensors(param_to_save, param_name + "_iter_" + str(self.num_iter), 2)
+        #             exit(0)
+        
         # Run decoder.
         hidden_states = self.decoder(
             hidden_states=decoder_input,
@@ -342,6 +377,11 @@ class GPTModel(LanguageModule):
             sequence_len_offset=sequence_len_offset,
             **(extra_block_kwargs or {}),
         )
+
+        if self.kareus_debug:
+            # save_tensors(hidden_states, "decoder_output")
+            # exit(0)
+            self.num_iter += 1
 
         # Process inference output.
         if inference_context and not inference_context.is_static_batching():
