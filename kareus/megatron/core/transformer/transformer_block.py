@@ -30,10 +30,12 @@ from megatron.core.transformer.transformer_block import (
     _get_block_submodules,
 )
 
-# Import the new split layers
-from kareus.megatron.core.transformer.split_layers import (
-    AttentionLayer,
-    MLPLayer,
+# Import the attention and MLP layers
+from kareus.megatron.core.transformer.attention import AttentionLayer
+from kareus.megatron.core.transformer.mlp import MLPLayer
+
+# Import the partition function
+from kareus.megatron.core.transformer.partition_transformer_layer import (
     create_attention_and_mlp_layers_from_transformer_submodules,
     create_attention_and_mlp_layers_from_module_spec,
 )
@@ -233,14 +235,6 @@ class TransformerBlock(MegatronModule):
         """
         Split input tensors into two halves for nano-batch processing.
         
-        Args:
-            hidden_states (Tensor): Main hidden states tensor to split
-            attention_mask (Optional[Tensor]): Attention mask tensor
-            context (Optional[Tensor]): Context tensor for cross-attention
-            context_mask (Optional[Tensor]): Context mask tensor
-            attention_bias (Optional[Tensor]): Attention bias tensor
-            sequence_len_offset (Optional[Tensor]): Sequence length offset tensor
-        
         Returns:
             tuple: Two tuples containing the split tensors for each half
         """
@@ -390,6 +384,8 @@ class TransformerBlock(MegatronModule):
                 # through attention, then both nano-batches through MLP
                 current_hidden_1 = hidden_states_1
                 current_hidden_2 = hidden_states_2
+                residual_1 = None
+                residual_2 = None
                 current_context_1 = context_1
                 current_context_2 = context_2
                 
@@ -406,8 +402,9 @@ class TransformerBlock(MegatronModule):
                     with self.offload_context, inner_fp8_context:
                         # Process attention for both nano-batches
                         # Micro-batch 1 attention
-                        pre_mlp_output_1, residual_1, current_context_1 = attention_layer(
+                        current_hidden_1, residual_1, current_context_1 = attention_layer(
                             hidden_states=current_hidden_1,
+                            residual=residual_1,
                             attention_mask=attention_mask_1,
                             context=current_context_1,
                             context_mask=context_mask_1,
@@ -421,8 +418,9 @@ class TransformerBlock(MegatronModule):
                         )
                         
                         # Micro-batch 2 attention
-                        pre_mlp_output_2, residual_2, current_context_2 = attention_layer(
+                        current_hidden_2, residual_2, current_context_2 = attention_layer(
                             hidden_states=current_hidden_2,
+                            residual=residual_2,
                             attention_mask=attention_mask_2,
                             context=current_context_2,
                             context_mask=context_mask_2,
@@ -437,21 +435,22 @@ class TransformerBlock(MegatronModule):
                         
                         # Process MLP for both nano-batches
                         # Micro-batch 1 MLP
-                        current_hidden_1 = mlp_layer(pre_mlp_output_1, residual_1)
+                        current_hidden_1, residual_1 = mlp_layer(current_hidden_1, residual_1)
                         
                         # Micro-batch 2 MLP
-                        current_hidden_2 = mlp_layer(pre_mlp_output_2, residual_2)
+                        current_hidden_2, residual_2 = mlp_layer(current_hidden_2, residual_2)
                         
                         if (
                             torch.is_grad_enabled()
                             and self.config.cpu_offloading
                             and self.group_prefetch_offload_commit_async is not None
                         ):
-                            current_hidden_1 = self.group_prefetch_offload_commit_async(current_hidden_1)
-                            current_hidden_2 = self.group_prefetch_offload_commit_async(current_hidden_2)
+                            raise NotImplementedError("CPU offloading not implemented")
                 
                 hidden_states_1 = current_hidden_1
                 hidden_states_2 = current_hidden_2
+                # Concatenate results
+                hidden_states = torch.cat([hidden_states_1, hidden_states_2], dim=1)
                 
                 # Set context from the last processed context
                 if current_context_1 is not None and current_context_2 is not None:
@@ -465,20 +464,13 @@ class TransformerBlock(MegatronModule):
 
         # Final layer norm for both nano-batches
         if self.final_layernorm is not None:
-            hidden_states_1 = self.final_layernorm(hidden_states_1)
-            hidden_states_2 = self.final_layernorm(hidden_states_2)
+            hidden_states = self.final_layernorm(hidden_states)
             # TENorm produces a "viewed" tensor. This will result in schedule.py's
             # deallocate_output_tensor() throwing an error, so a viewless tensor is
             # created to prevent this.
-            hidden_states_1 = make_viewless_tensor(
-                inp=hidden_states_1, requires_grad=True, keep_graph=True
+            hidden_states = make_viewless_tensor(
+                inp=hidden_states, requires_grad=True, keep_graph=True
             )
-            hidden_states_2 = make_viewless_tensor(
-                inp=hidden_states_2, requires_grad=True, keep_graph=True
-            )
-
-        # Concatenate results
-        hidden_states = torch.cat([hidden_states_1, hidden_states_2], dim=1)
 
         return hidden_states
 

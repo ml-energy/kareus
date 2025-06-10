@@ -335,35 +335,35 @@ class GPTModel(LanguageModule):
         ):
             decoder_input = WrappedTensor(decoder_input)
         
-        # if self.kareus_debug:
-        #     save_tensors(decoder_input, "decoder_input", 2)
+        if self.kareus_debug:
+            save_tensors(decoder_input, "decoder_input")
 
-        #     if self.num_iter == 10:
-        #         # Save one of the decoder parameters
-        #         if len(self.decoder.layers) > 0:
-        #             # Get the first transformer layer
-        #             first_layer = self.decoder.layers[0]
+            # if self.num_iter == 10:
+                # Save one of the decoder parameters
+            if len(self.decoder.layers) > 0:
+                # Get the first transformer layer
+                first_layer = self.decoder.layers[0]
 
-        #             if hasattr(first_layer, 'self_attention') and hasattr(first_layer.self_attention, 'linear_qkv'):
-        #                 # For fused QKV linear layer
-        #                 param_to_save = first_layer.self_attention.linear_qkv.weight
-        #                 param_name = "first_layer_self_attn_qkv_weight"
-        #             elif hasattr(first_layer, 'self_attention') and hasattr(first_layer.self_attention, 'linear_q'):
-        #                 # For separate Q, K, V linear layers
-        #                 param_to_save = first_layer.self_attention.linear_q.weight
-        #                 param_name = "first_layer_self_attn_q_weight"
-        #             elif hasattr(first_layer, 'attention') and hasattr(first_layer.attention, 'linear_qkv'):
-        #                 # Alternative naming convention
-        #                 param_to_save = first_layer.attention.linear_qkv.weight
-        #                 param_name = "first_layer_attn_qkv_weight"
-        #             else:
-        #                 # Fallback: save the first parameter we can find
-        #                 param_to_save = next(first_layer.parameters())
-        #                 param_name = "first_layer_first_param"
-                    
-        #             # Save the parameter
-        #             save_tensors(param_to_save, param_name + "_iter_" + str(self.num_iter), 2)
-        #             exit(0)
+                if hasattr(first_layer, 'self_attention') and hasattr(first_layer.self_attention, 'linear_qkv'):
+                    # For fused QKV linear layer
+                    param_to_save = first_layer.self_attention.linear_qkv.weight
+                    param_name = "first_layer_self_attn_qkv_weight"
+                elif hasattr(first_layer, 'self_attention') and hasattr(first_layer.self_attention, 'linear_q'):
+                    # For separate Q, K, V linear layers
+                    param_to_save = first_layer.self_attention.linear_q.weight
+                    param_name = "first_layer_self_attn_q_weight"
+                elif hasattr(first_layer, 'attention') and hasattr(first_layer.attention, 'linear_qkv'):
+                    # Alternative naming convention
+                    param_to_save = first_layer.attention.linear_qkv.weight
+                    param_name = "first_layer_attn_qkv_weight"
+                else:
+                    # Fallback: save the first parameter we can find
+                    param_to_save = next(first_layer.parameters())
+                    param_name = "first_layer_first_param"
+                
+                # Save the parameter
+                save_tensors(param_to_save, param_name + "_iter_" + str(self.num_iter))
+                    # exit(0)
         
         # Run decoder.
         hidden_states = self.decoder(
@@ -379,8 +379,8 @@ class GPTModel(LanguageModule):
         )
 
         if self.kareus_debug:
-            # save_tensors(hidden_states, "decoder_output")
-            # exit(0)
+            save_tensors(hidden_states, "decoder_output")
+            exit(0)
             self.num_iter += 1
 
         # Process inference output.
