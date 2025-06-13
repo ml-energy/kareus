@@ -123,7 +123,7 @@ def compare_tensors(tensor1, tensor2, name="tensors"):
 
 def main():
     """Main function to compare tensors in the two directories"""
-    dir1 = Path("compare_results/megatron")
+    dir1 = Path("compare_results/te")
     dir2 = Path("compare_results/kareus")
     
     print("🔍 Tensor Comparison Tool")

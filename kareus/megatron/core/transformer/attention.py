@@ -17,6 +17,8 @@ from megatron.core.transformer.transformer_layer import (
 )
 from megatron.core.utils import deprecate_inference_params, make_viewless_tensor
 
+from kareus.megatron.core.extensions.transformer_engine import create_operation_fuser
+from kareus.utils.debug import save_tensors
 
 @dataclass
 class AttentionLayerSubmodules:
@@ -67,6 +69,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
         )
+        self.input_layernorm = create_operation_fuser(self.input_layernorm)
 
         attention_optional_kwargs = {}
         if config.context_parallel_size > 1 and config.cp_comm_type is not None:
@@ -132,7 +135,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
 
         # Optional Input Layer norm
         input_layernorm_output = self.input_layernorm(hidden_states)
-        
+
         # Self attention.
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,

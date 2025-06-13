@@ -5,7 +5,7 @@ import io
 import os
 import pickle
 import warnings
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 import transformer_engine as te
@@ -45,23 +45,19 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_te_version, is_te_min_version
 
+from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs, condition_init_method
 
-def _get_extra_te_kwargs(config: TransformerConfig):
-    extra_transformer_engine_kwargs = {"params_dtype": config.params_dtype}
-
-    if is_te_min_version("0.12.0"):
-        if config.use_cpu_initialization:
-            extra_transformer_engine_kwargs["device"] = 'cpu'
-        elif config.init_model_with_meta_device:
-            extra_transformer_engine_kwargs["device"] = "meta"
-        else:
-            extra_transformer_engine_kwargs["device"] = torch.cuda.current_device()
-    return extra_transformer_engine_kwargs
+from transformer_engine.pytorch.ops.op import FusibleOperation
+from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 
-def condition_init_method(config, init_method):
-    """Condition TE init_method on config.perform_initialization."""
-    return init_method if config.perform_initialization else (lambda w: None)
+def create_operation_fuser(ops: Union[list[FusibleOperation], FusibleOperation]) -> OperationFuser:
+    """Create an OperationFuser for TE operations"""
+    if isinstance(ops, FusibleOperation):
+        fuser = OperationFuser([ops], fuse_ops=False)
+    else:
+        fuser = OperationFuser(ops, fuse_ops=False)
+    return fuser
 
 
 class TENorm:

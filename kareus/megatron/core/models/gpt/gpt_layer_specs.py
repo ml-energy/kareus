@@ -35,18 +35,18 @@ from megatron.core.transformer.transformer_layer import (
 )
 from megatron.core.utils import is_te_min_version
 
-try:
-    from megatron.core.extensions.transformer_engine import (
-        TEColumnParallelLinear,
-        TEDotProductAttention,
-        TELayerNormColumnParallelLinear,
-        TENorm,
-        TERowParallelLinear,
-    )
+# try:
+from kareus.megatron.core.extensions.transformer_engine import (
+    TEColumnParallelLinear,
+    TEDotProductAttention,
+    TELayerNormColumnParallelLinear,
+    TENorm,
+    TERowParallelLinear,
+)
 
-    HAVE_TE = True
-except ImportError:
-    HAVE_TE = False
+HAVE_TE = True
+# except ImportError:
+#     HAVE_TE = False
 
 from megatron.core.transformer.torch_norm import WrappedTorchNorm
 
@@ -104,6 +104,7 @@ def get_gpt_layer_with_transformer_engine_spec(
     )
 
     if multi_latent_attention:
+        raise NotImplementedError("MLA is not supported.")
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
         return ModuleSpec(
             module=TransformerLayer,
@@ -147,11 +148,12 @@ def get_gpt_layer_with_transformer_engine_spec(
         return ModuleSpec(
             module=TransformerLayer,
             submodules=TransformerLayerSubmodules(
+                input_layernorm=TENorm,
                 self_attention=ModuleSpec(
                     module=SelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=SelfAttentionSubmodules(
-                        linear_qkv=TELayerNormColumnParallelLinear,
+                        linear_qkv=TEColumnParallelLinear,
                         core_attention=TEDotProductAttention,
                         linear_proj=TERowParallelLinear,
                         q_layernorm=(
