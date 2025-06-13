@@ -79,7 +79,6 @@ from nemo.utils.nvtx import nvtx_range_push, nvtx_range_pop
 # Import classes and functions from megatron_gpt_model.py
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import (
     mcore_supports_moe,
-    get_specs,
     mcore_model_customize,
     EmbeddingScalingMixin,
     MegatronGPTExportableModel,
@@ -98,11 +97,6 @@ try:
     # NeMo's implementation of the get_gpt_layer_ammo_spec function is temporarily used
     # from megatron.core.inference.gpt.model_specs import get_gpt_layer_ammo_spec
     from megatron.core.models.gpt import GPTModel as MCoreGPTModel
-    from megatron.core.models.gpt.gpt_layer_specs import (
-        get_gpt_decoder_block_spec,
-        get_gpt_layer_local_spec,
-        get_gpt_layer_with_transformer_engine_spec,
-    )
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from megatron.core.transformer.module import Float16Module as MCoreFloat16Module
     from megatron.core.transformer.transformer_config import TransformerConfig
@@ -140,6 +134,40 @@ HAVE_TE = HAVE_TE and HAVE_TE_MODULE and HAVE_HYENA_SPEC
 
 from kareus.megatron.core.models.gpt import GPTModel as KCoreGPTModel
 from kareus.utils.debug import save_tensors
+from kareus.megatron.core.models.gpt.gpt_layer_specs import (
+    get_gpt_layer_with_transformer_engine_spec,
+)
+
+
+# TODO: This function will not work if TE is not installed
+def get_specs(spec_name, transformer_config=None, use_te=True, hyena_cfg: Dict = None, fp8=False):
+    # from nemo.collections.nlp.models.language_modeling.megatron.gemma2.gemma2_spec import get_gemma2_layer_spec
+
+    # else cases for backwards compatibility with neva
+    num_experts = transformer_config.num_moe_experts if transformer_config else None
+    moe_grouped_gemm = transformer_config.moe_grouped_gemm if transformer_config else False
+
+    if num_experts is not None:
+        assert mcore_supports_moe(), "Megatron-core >= v0.5.0 is required for MoE"
+
+    if use_te and spec_name == '':
+        spec_name = 'te_gpt'
+    print(f"spec_name: {spec_name}")
+    print(f"use_te: {use_te}")
+    name_spec_dict = {
+        # "": get_gpt_layer_local_spec(num_experts, moe_grouped_gemm),
+        "te_gpt": get_gpt_layer_with_transformer_engine_spec(num_experts, moe_grouped_gemm, fp8=fp8),
+        # "megatron_falcon_gpt": get_falcon_layer_spec(),
+        # "megatron_gemma2": get_gemma2_layer_spec(),
+        # "megatron_gpt_full_te_layer_autocast": get_gpt_full_te_layer_autocast_spec(transformer_config),
+        # "modelopt": get_gpt_layer_modelopt_spec(num_experts),
+        # "te_gpt_hyena": get_gpt_layer_with_te_and_hyena_spec(hyena_cfg),
+        # "decoder_block_gpt": get_gpt_decoder_block_spec(transformer_config, use_te),
+    }
+    if spec_name not in name_spec_dict:
+        raise ValueError(f"Spec name '{spec_name}' is not recognized.")
+    return name_spec_dict[spec_name]
+
 
 class MegatronGPTModel(MegatronBaseModel, TextGeneration):
     """
@@ -769,7 +797,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 ), "When you defer wgrads, this buffer should not hold stray activations"
 
         loss_mean = self.training_step_fwd_bwd_step_call(dataloader_iter, forward_only=False)
-        save_tensors(loss_mean, "loss_mean", 2)
+        # save_tensors(loss_mean, "loss_mean", 2)
 
         if self.cfg.get('fp8', False):
             self.prev_step_training = self.training
