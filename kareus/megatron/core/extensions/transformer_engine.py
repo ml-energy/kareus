@@ -54,9 +54,9 @@ from transformer_engine.pytorch.ops.fuser import OperationFuser
 def create_operation_fuser(ops: Union[list[FusibleOperation], FusibleOperation]) -> OperationFuser:
     """Create an OperationFuser for TE operations"""
     if isinstance(ops, FusibleOperation):
-        fuser = OperationFuser([ops], fuse_ops=False)
+        fuser = OperationFuser([ops], fuse_ops=True)
     else:
-        fuser = OperationFuser(ops, fuse_ops=False)
+        fuser = OperationFuser(ops, fuse_ops=True)
     return fuser
 
 

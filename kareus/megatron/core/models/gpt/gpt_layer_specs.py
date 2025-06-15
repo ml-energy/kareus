@@ -6,11 +6,11 @@ from typing import Optional, Union
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
-from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
+# from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityOp
-from megatron.core.transformer.mlp import MLP, MLPSubmodules
+# from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSubmodules,
@@ -43,6 +43,9 @@ from kareus.megatron.core.extensions.transformer_engine import (
     TENorm,
     TERowParallelLinear,
 )
+from kareus.megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
+from kareus.megatron.core.transformer.mlp import MLP, MLPSubmodules
+from kareus.megatron.core.extensions.transformer_engine_ import TEFusibleColumnParallelLinear
 
 HAVE_TE = True
 # except ImportError:
@@ -153,7 +156,8 @@ def get_gpt_layer_with_transformer_engine_spec(
                     module=SelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=SelfAttentionSubmodules(
-                        linear_qkv=TEColumnParallelLinear,
+                        # linear_qkv=TEColumnParallelLinear,
+                        linear_qkv=TEFusibleColumnParallelLinear,
                         core_attention=TEDotProductAttention,
                         linear_proj=TERowParallelLinear,
                         q_layernorm=(

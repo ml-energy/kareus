@@ -1,130 +1,291 @@
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Union
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+from dataclasses import dataclass
+from typing import Optional, Union
+
+import numpy as np
 import torch
-from torch import Tensor
+import torch.nn.functional as F
 
-from megatron.core.dist_checkpointing.mapping import ShardedStateDict
-from megatron.core.dist_checkpointing.utils import apply_prefix_mapping
-from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
+from megatron.core.dist_checkpointing import ShardedTensor
+from megatron.core.dist_checkpointing.mapping import (
+    ReplicaId,
+    ShardedStateDict,
+    ShardedTensorFactory,
+)
+from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
+from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
+from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_bias_swiglu_impl
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.transformer_layer import (
-    get_transformer_layer_offset,
-    BaseTransformerLayer,
-)
-from megatron.core.transformer.transformer_block import get_num_layers_to_build
-from megatron.core.utils import deprecate_inference_params, make_viewless_tensor
 
 
+# pylint: disable=missing-class-docstring
 @dataclass
-class MLPLayerSubmodules:
-    """Configuration class for specifying the submodules of an MLP layer."""
-    
-    prev_self_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
-    pre_mlp_layernorm: Union[ModuleSpec, type] = IdentityOp
-    mlp: Union[ModuleSpec, type] = IdentityOp
-    post_mlp_bda: Union[ModuleSpec, type] = IdentityFuncOp
-    
-    # Mapping for sharded tensor keys to be applied in `sharded_state_dict` method
-    sharded_state_dict_keys_map: Dict[str, str] = field(default_factory=dict)
+class MLPSubmodules:
+    linear_fc1: Union[ModuleSpec, type] = None
+    linear_fc2: Union[ModuleSpec, type] = None
 
 
-class MLPLayer(MegatronModule, BaseTransformerLayer):
-    """MLP layer containing feed-forward operations."""
+class MLP(MegatronModule):
+    """
+    MLP will take the input with h hidden state, project it to 4*h
+    hidden dimension, perform nonlinear transformation, and project the
+    state back into h hidden dimension.
+
+
+    Returns an output and a bias to be added to the output.
+    If config.add_bias_linear is False, the bias returned is None.
+
+    We use the following notation:
+     h: hidden size
+     p: number of tensor model parallel partitions
+     b: batch size
+     s: sequence length
+    """
 
     def __init__(
         self,
         config: TransformerConfig,
-        submodules: MLPLayerSubmodules,
-        layer_number: int = 1,
-        hidden_dropout: Optional[float] = None,
+        submodules: MLPSubmodules,
+        is_expert: bool = False,
+        input_size: Optional[int] = None,
     ):
         super().__init__(config=config)
 
-        if config.enable_cuda_graph or config.external_cuda_graph:
-            raise NotImplementedError("Cuda graph not implemented")
+        self.config: TransformerConfig = config
 
-        self.submodules_config = submodules
-        self.layer_number = layer_number + get_transformer_layer_offset(self.config)
-        self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
+        self.input_size = input_size if input_size != None else self.config.hidden_size
 
-        num_layers = get_num_layers_to_build(config)
-        self.is_last_layer = layer_number == num_layers
-        
-        # [Module 1: Prev attention BDA] Optional BDA on the previous attention output
-        self.prev_self_attn_bda = build_module(submodules.prev_self_attn_bda)
-
-        # [Module 2: Pre MLP Layernorm] Optional Layernorm before MLP
-        self.pre_mlp_layernorm = build_module(
-            submodules.pre_mlp_layernorm,
-            config=self.config,
-            hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
-        )
-
-        # [Module 3: MLP]
-        self.mlp = build_module(submodules.mlp, config=self.config)
-        if hasattr(self.mlp, 'set_layer_number'):
-            self.mlp.set_layer_number(self.layer_number)
-
-        # [Module 4: Post MLP BDA] Optional BDA on the MLP output
-        
-        self.post_mlp_bda = build_module(
-            submodules.post_mlp_bda if self.is_last_layer else IdentityFuncOp,
-            config=self.config
-        )
-
-        self.recompute_pre_mlp_layernorm = False
-        self.recompute_mlp = False
-        if self.config.recompute_granularity == 'selective':
-            raise NotImplementedError("Selective recompute not implemented")
-
-        # Set bias+dropout+add fusion grad_enable execution handler.
-        self.bias_dropout_add_exec_handler = torch.enable_grad
-        
-    def forward(self, hidden_states, residual):
-        """
-        Perform a forward pass through the feed-forward layer.
-
-        Args:
-            hidden_states (Tensor): Transformed hidden states before the MLP.
-            residual (Tensor): Residual connection.
-
-        Returns:
-            output (Tensor): Transformed hidden states of shape [s, b, h].
-        """
-        
-        with self.bias_dropout_add_exec_handler():
-            hidden_states = self.prev_self_attn_bda(self.training, self.config.bias_dropout_fusion)(
-                hidden_states, residual, self.hidden_dropout
-            )
-        
-        # Residual connection.
-        residual = hidden_states
-        
-        # Optional Pre MLP Layer norm
-        input_layernorm_output = self.pre_mlp_layernorm(hidden_states)
-
-        # MLP.
-        mlp_output_with_bias = self.mlp(input_layernorm_output)
-        
-        if self.is_last_layer:
-            with self.bias_dropout_add_exec_handler():
-                hidden_states = self.post_mlp_bda(self.training, self.config.bias_dropout_fusion)(
-                    mlp_output_with_bias, residual, self.hidden_dropout
-                )
-            # Jit compiled function creates 'view' tensor. This tensor
-            # potentially gets saved in the MPU checkpoint function context,
-            # which rejects view tensors. While making a viewless tensor here
-            # won't result in memory savings (like the data loader, or
-            # p2p_communication), it serves to document the origin of this
-            # 'view' tensor.
-            output = make_viewless_tensor(
-                inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
-            )
-            return output, residual
+        # If this is a gated linear unit we double the output width
+        # see https://arxiv.org/pdf/2002.05202.pdf
+        if is_expert and self.config.moe_ffn_hidden_size != None:
+            # Experts read ffn_hidden_size from config.moe_ffn_hidden_size
+            ffn_hidden_size = self.config.moe_ffn_hidden_size
         else:
-            return mlp_output_with_bias, residual
+            # Normal MLPs read ffn_hidden_size from config.ffn_hidden_size
+            ffn_hidden_size = self.config.ffn_hidden_size
+        if self.config.gated_linear_unit:
+            ffn_hidden_size *= 2
+
+        self.linear_fc1 = build_module(
+            submodules.linear_fc1,
+            self.input_size,
+            ffn_hidden_size,
+            config=self.config,
+            init_method=self.config.init_method,
+            gather_output=False,
+            bias=self.config.add_bias_linear,
+            skip_bias_add=True,
+            is_expert=is_expert,
+            tp_comm_buffer_name='fc1',
+        )
+
+        self.activation_func = self.config.activation_func
+
+        self.linear_fc2 = build_module(
+            submodules.linear_fc2,
+            self.config.ffn_hidden_size,
+            self.config.hidden_size,
+            config=self.config,
+            init_method=self.config.output_layer_init_method,
+            bias=self.config.add_bias_linear,
+            input_is_parallel=True,
+            skip_bias_add=True,
+            is_expert=is_expert,
+            tp_comm_buffer_name='fc2',
+        )
+
+    def forward(self, hidden_states, per_token_scale=None):
+        """Perform the forward pass through the MLP block."""
+        # [s, b, 4 * h/p]
+        intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
+
+        if self.config.bias_activation_fusion:
+            if per_token_scale is not None:
+                if self.activation_func == F.silu and self.config.gated_linear_unit:
+                    # dtype is handled inside the fused kernel
+                    intermediate_parallel = weighted_bias_swiglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        per_token_scale.unsqueeze(-1),
+                        self.config.activation_func_fp8_input_store,
+                    )
+                else:
+                    raise ValueError("Only support fusion of swiglu with per_token_scale in MLP.")
+            else:
+                if self.activation_func == F.gelu:
+                    if self.config.gated_linear_unit:
+                        intermediate_parallel = bias_geglu_impl(
+                            intermediate_parallel, bias_parallel
+                        )
+                    else:
+                        assert self.config.add_bias_linear is True
+                        intermediate_parallel = bias_gelu_impl(intermediate_parallel, bias_parallel)
+                elif self.activation_func == F.silu and self.config.gated_linear_unit:
+                    intermediate_parallel = bias_swiglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        self.config.activation_func_fp8_input_store,
+                    )
+                else:
+                    raise ValueError("Only support fusion of gelu and swiglu")
+        else:
+            if bias_parallel is not None:
+                intermediate_parallel = intermediate_parallel + bias_parallel
+            if self.config.gated_linear_unit:
+
+                def glu(x):
+                    x = torch.chunk(x, 2, dim=-1)
+                    return self.config.activation_func(x[0]) * x[1]
+
+                intermediate_parallel = glu(intermediate_parallel)
+            else:
+                intermediate_parallel = self.activation_func(intermediate_parallel)
+
+            if per_token_scale is not None:
+                original_dtype = intermediate_parallel.dtype
+                intermediate_parallel = intermediate_parallel * per_token_scale.unsqueeze(-1)
+                intermediate_parallel = intermediate_parallel.to(original_dtype)
+
+        # [s, b, h]
+        output, output_bias = self.linear_fc2(intermediate_parallel)
+
+        if per_token_scale is not None:
+            assert output_bias is None, "Bias is not supported with per_token_scale"
+
+        return output, output_bias
+
+    # pylint: disable=missing-function-docstring
+    def sharded_state_dict(
+        self, prefix: str = '', sharded_offsets: tuple = (), metadata: Optional[dict] = None
+    ) -> ShardedStateDict:
+        sharded_state_dict = {}
+        for name, module in self._modules.items():
+            sub_sd = module.sharded_state_dict(f'{prefix}{name}.', sharded_offsets, metadata)
+            if self.config.gated_linear_unit and name == 'linear_fc1':
+                for k, v in sub_sd.items():
+                    if k in (f'{prefix}{name}.weight', f'{prefix}{name}.bias'):
+                        sub_sd[k] = apply_swiglu_sharded_factory(v, sharded_offsets)
+            sharded_state_dict.update(sub_sd)
+        return sharded_state_dict
+
+
+# pylint: disable=missing-function-docstring
+def apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets):
+    # We must split the tensor into 2 parts, each sharded separately.
+    # This requires a ShardedTensorFactory which `chunk`s during saving
+    # and `cat`s during loading
+
+    swiglu_shard_axis = 0
+    prepend_axis_num = len(sharded_offsets)
+    original_shape = original_sh_ten.local_shape
+    original_numel = int(np.prod(original_shape))
+    local_axis_size = original_shape[swiglu_shard_axis]
+    assert (
+        original_sh_ten.global_offset[swiglu_shard_axis + prepend_axis_num] % local_axis_size == 0
+    )
+    rank_offset = (
+        original_sh_ten.global_offset[swiglu_shard_axis + prepend_axis_num] // local_axis_size
+    )
+    axis_frag = original_sh_ten.axis_fragmentations[swiglu_shard_axis + prepend_axis_num]
+
+    @torch.no_grad()
+    def sh_ten_build_fn(
+        key: str, t: torch.Tensor, replica_id: ReplicaId, flattened_range: Optional[slice]
+    ):
+        offset_w = (swiglu_shard_axis + prepend_axis_num, rank_offset, axis_frag * 2)
+        offset_v = (swiglu_shard_axis + prepend_axis_num, rank_offset + axis_frag, axis_frag * 2)
+        if flattened_range is None:
+            tensor_w, tensor_v = torch.chunk(t, 2, dim=swiglu_shard_axis)
+            return [
+                ShardedTensor.from_rank_offsets(
+                    key,
+                    tensor_w,
+                    *sharded_offsets,
+                    offset_w,
+                    replica_id=replica_id,
+                    prepend_axis_num=prepend_axis_num,
+                ),
+                ShardedTensor.from_rank_offsets(
+                    key,
+                    tensor_v,
+                    *sharded_offsets,
+                    offset_v,
+                    replica_id=replica_id,
+                    prepend_axis_num=prepend_axis_num,
+                ),
+            ]
+        else:
+            # Here we need to map a slice `t` (`flattened_range` specifies slice start and stop)
+            # of the *original* flattened tensor into slices `w` and `v` of chunked
+            # and flattened tensor.
+            # Example:
+            # If original tensor has (16, 5) shape and flattened_range is `slice(8, 64)`,
+            # then `t` has shape `(56,)` and we need to create 2 tensors:
+            # w: first 32 elements of `t` with flattened_range slice(8, 40)
+            # v: last 24 elements of `t` with flattened_range slice(0, 24)
+            # Global offsets are the same as in the non-flattened case
+            assert t.ndim == 1, (key, t.shape)
+            non_flat_local_shape = (original_shape[0] // 2, *original_shape[1:])
+            chunk_numel = original_numel // 2
+            result = []
+            if flattened_range.start < chunk_numel:
+                # Non-empty `w` chunk
+                tensor_w = t[: chunk_numel - flattened_range.start]
+                flattened_range_w = slice(
+                    flattened_range.start, min(chunk_numel, flattened_range.stop)
+                )
+                assert len(tensor_w) == flattened_range_w.stop - flattened_range_w.start
+                result.append(
+                    ShardedTensor.from_rank_offsets_flat(
+                        key,
+                        tensor_w,
+                        non_flat_local_shape,
+                        *sharded_offsets,
+                        offset_w,
+                        replica_id=replica_id,
+                        prepend_axis_num=prepend_axis_num,
+                        flattened_range=flattened_range_w,
+                    )
+                )
+            if flattened_range.stop > chunk_numel:
+                # Non-empty `v` chunk
+                tensor_v = t[-(flattened_range.stop - chunk_numel) :]
+                flattened_range_v = slice(
+                    max(chunk_numel, flattened_range.start) - chunk_numel,
+                    flattened_range.stop - chunk_numel,
+                )
+                assert len(tensor_v) == flattened_range_v.stop - flattened_range_v.start, (
+                    len(tensor_v),
+                    flattened_range_v,
+                )
+
+                result.append(
+                    ShardedTensor.from_rank_offsets_flat(
+                        key,
+                        tensor_v,
+                        non_flat_local_shape,
+                        *sharded_offsets,
+                        offset_v,
+                        replica_id=replica_id,
+                        prepend_axis_num=prepend_axis_num,
+                        flattened_range=flattened_range_v,
+                    )
+                )
+            assert sum(sh_ten.data.numel() for sh_ten in result) == t.numel(), (result, t.shape)
+            return result
+
+    def sh_ten_merge_fn(sub_state_dict):
+        with torch.no_grad():
+            return torch.cat(sub_state_dict)
+
+    return ShardedTensorFactory(
+        original_sh_ten.key,
+        original_sh_ten.data,
+        sh_ten_build_fn,
+        sh_ten_merge_fn,
+        original_sh_ten.replica_id,
+        flattened_range=original_sh_ten.flattened_range,
+    )

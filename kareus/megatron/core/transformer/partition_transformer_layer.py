@@ -4,8 +4,8 @@ from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import TransformerLayerSubmodules
 
-from kareus.megatron.core.transformer.attention import AttentionLayerSubmodules
-from kareus.megatron.core.transformer.mlp import MLPLayerSubmodules
+from kareus.megatron.core.transformer.attention_layer import AttentionLayerSubmodules
+from kareus.megatron.core.transformer.mlp_layer import MLPLayerSubmodules
 
 
 def create_attention_and_mlp_layers_from_transformer_submodules(

@@ -31,8 +31,8 @@ from megatron.core.transformer.transformer_block import (
 )
 
 # Import the attention and MLP layers
-from kareus.megatron.core.transformer.attention import AttentionLayer
-from kareus.megatron.core.transformer.mlp import MLPLayer
+from kareus.megatron.core.transformer.attention_layer import AttentionLayer
+from kareus.megatron.core.transformer.mlp_layer import MLPLayer
 
 # Import the partition function
 from kareus.megatron.core.transformer.partition_transformer_layer import (
