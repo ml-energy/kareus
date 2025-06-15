@@ -667,6 +667,8 @@ class Attention(MegatronModule, ABC):
         # =================
 
         output, bias = self.linear_proj(core_attn_out)
+        print(f"linear_proj output: {output.shape}")   
+        exit() 
 
         return output, bias
 
@@ -808,7 +810,6 @@ class SelfAttention(Attention):
         # save_tensors(hidden_states, "linear_qkv_input", "te")
         mixed_qkv, _ = self.linear_qkv(hidden_states)
         # save_tensors(mixed_qkv, "linear_qkv_output", "te")
-        exit()
 
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         new_tensor_shape = mixed_qkv.size()[:-1] + (

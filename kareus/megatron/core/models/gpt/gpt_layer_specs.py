@@ -45,7 +45,10 @@ from kareus.megatron.core.extensions.transformer_engine import (
 )
 from kareus.megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from kareus.megatron.core.transformer.mlp import MLP, MLPSubmodules
-from kareus.megatron.core.extensions.transformer_engine_ import TEFusibleColumnParallelLinear
+from kareus.megatron.core.extensions.transformer_engine_ import (
+    TEFusibleColumnParallelLinear,
+    TEFusibleRowParallelLinear,
+)
 
 HAVE_TE = True
 # except ImportError:
@@ -156,10 +159,11 @@ def get_gpt_layer_with_transformer_engine_spec(
                     module=SelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=SelfAttentionSubmodules(
-                        # linear_qkv=TEColumnParallelLinear,
-                        linear_qkv=TEFusibleColumnParallelLinear,
+                        linear_qkv=TEColumnParallelLinear,
+                        # linear_qkv=TEFusibleColumnParallelLinear,
                         core_attention=TEDotProductAttention,
-                        linear_proj=TERowParallelLinear,
+                        # linear_proj=TERowParallelLinear,
+                        linear_proj=TEFusibleRowParallelLinear,
                         q_layernorm=(
                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         ),

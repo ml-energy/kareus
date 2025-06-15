@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
-from ..fp8 import (
+from transformer_engine.pytorch.fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     Float8BlockScalingRecipeState,
@@ -22,7 +22,7 @@ from ..fp8 import (
     RecipeState,
     fp8_autocast,
 )
-from ..tensor import Quantizer
+from transformer_engine.pytorch.tensor import Quantizer
 
 
 @dataclasses.dataclass

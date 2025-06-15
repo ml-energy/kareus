@@ -3,7 +3,7 @@ from typing import Any, Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
-import transformer_engine as te
+from kareus.transformer_engine.pytorch.ops import Linear
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
@@ -37,7 +37,7 @@ def _get_cuda_rng_tracker_fn():
     return None
 
 
-class TEFusibleLinear(te.pytorch.ops.Linear):
+class TEFusibleLinear(Linear):
     """
     Wrapper for the Transformer-Engine's FusedOperation-based `Linear` layer.
     
