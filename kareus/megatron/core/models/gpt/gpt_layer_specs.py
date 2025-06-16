@@ -38,17 +38,18 @@ from megatron.core.utils import is_te_min_version
 # try:
 from kareus.megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
-    TEDotProductAttention,
+    # TEDotProductAttention,
     TELayerNormColumnParallelLinear,
     TENorm,
     TERowParallelLinear,
 )
 from kareus.megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from kareus.megatron.core.transformer.mlp import MLP, MLPSubmodules
-from kareus.megatron.core.extensions.transformer_engine_ import (
+from kareus.megatron.core.extensions.te_linear import (
     TEFusibleColumnParallelLinear,
     TEFusibleRowParallelLinear,
 )
+from kareus.megatron.core.extensions.te_attention import TEDotProductAttention
 
 HAVE_TE = True
 # except ImportError:

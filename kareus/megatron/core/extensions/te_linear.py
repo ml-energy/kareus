@@ -157,9 +157,6 @@ class TEFusibleLinear(Linear):
                 te_parallel_mode = None
                 tp_size = 1
                 tp_group = None
-        print(f"tp_group: {tp_group}")
-        print(f"te_parallel_mode: {te_parallel_mode}")
-        print(f"tp_size: {tp_size}")
         # Get RNG tracker function for weight initialization
         rng_tracker_fn = None
         if not is_expert:

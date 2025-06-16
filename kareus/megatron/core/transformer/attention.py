@@ -667,7 +667,6 @@ class Attention(MegatronModule, ABC):
         # =================
 
         output, bias = self.linear_proj(core_attn_out)
-        print(f"linear_proj output: {output.shape}")   
         exit() 
 
         return output, bias
