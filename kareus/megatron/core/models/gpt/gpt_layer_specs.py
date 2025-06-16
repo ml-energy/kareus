@@ -159,8 +159,8 @@ def get_gpt_layer_with_transformer_engine_spec(
                     module=SelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=SelfAttentionSubmodules(
-                        linear_qkv=TEColumnParallelLinear,
-                        # linear_qkv=TEFusibleColumnParallelLinear,
+                        # linear_qkv=TEColumnParallelLinear,
+                        linear_qkv=TEFusibleColumnParallelLinear,
                         core_attention=TEDotProductAttention,
                         # linear_proj=TERowParallelLinear,
                         linear_proj=TEFusibleRowParallelLinear,

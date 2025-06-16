@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -109,25 +109,28 @@ class Linear(FusedOperation):
             "accumulate_into_main_grad": accumulate_into_main_grad,
         }
         bias_kwargs = {
-            "size": local_out_features,
+            "size": out_features,
             "device": device,
             "dtype": dtype,
             "tensor_parallel": (tensor_parallel_mode is not None),
             "tensor_parallel_group": tensor_parallel_group,
             "tensor_parallel_size": tensor_parallel_size,
         }
-        print(f"local_in_features: {local_in_features}")
-        print(f"local_out_features: {local_out_features}")
         if tensor_parallel_mode == "row":
             # Row TP: GEMM + bias + reduction
             linear_kwargs["in_features"] = local_in_features
             linear_kwargs["out_features"] = local_out_features
             linear_kwargs["tensor_parallel_mode"] = None
             linear_kwargs["tensor_parallel_group"] = None
+            linear_kwargs["tensor_parallel_size"] = 1
             linear_kwargs["sequence_parallel"] = False
             # bias_kwargs["size"] *= tensor_parallel_size
+            bias_kwargs["tensor_parallel"] = False
+            bias_kwargs["tensor_parallel_group"] = None
+            bias_kwargs["tensor_parallel_size"] = 1
             ops.append(BasicLinear(**linear_kwargs))
             if bias:
+                print(f"bias_kwargs: {bias_kwargs}")
                 ops.append(Bias(**bias_kwargs))
             if sequence_parallel:
                 ops.append(ReduceScatter(tensor_parallel_group))
@@ -177,3 +180,22 @@ class Linear(FusedOperation):
                 "Attempted to set bias parameter in Linear operation "
                 "that does not have bias enabled"
             )
+
+    # def set_tensor_parallel_group(self, tp_group: Union[torch.distributed.ProcessGroup, None]) -> None:
+    #     """
+    #     Set the tensor parallel group for the given
+    #     module before executing the forward pass.
+
+    #     Parameters
+    #     ----------
+    #     tp_group : ProcessGroup, default = `None`
+    #               tensor parallel process group.
+    #     """
+        
+    #     # Update the tensor parallel group in the underlying operations
+    #     for op in self.basic_ops:
+    #         if hasattr(op, 'tensor_parallel_group'):
+    #             op.tensor_parallel_group = tp_group
+    #         # For AllReduce and ReduceScatter operations, update the process group
+    #         elif hasattr(op, 'process_group'):
+    #             op.process_group = tp_group
