@@ -13,13 +13,13 @@ import torch
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.ops.basic import (
     AllReduce,
-    Bias,
     ReduceScatter,
 )
 from transformer_engine.pytorch.ops.op import FusedOperation
 
 from kareus.transformer_engine.pytorch.ops.basic import (
     BasicLinear,
+    Bias,
 )
 
 

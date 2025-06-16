@@ -13,7 +13,7 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
-from .._common import (
+from transformer_engine.pytorch.ops._common import (
     canonicalize_device,
     canonicalize_dtype,
 )
@@ -48,6 +48,7 @@ class Bias(BasicOperation):
         dtype: Optional[torch.dtype] = None,
         tensor_parallel: bool = False,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
+        tensor_parallel_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -63,10 +64,8 @@ class Bias(BasicOperation):
         self.device: torch.device = device
 
         # Tensor parallel configuration
-        tensor_parallel_size = 1
         local_size = size
         if tensor_parallel:
-            tensor_parallel_size = torch.distributed.get_world_size(tensor_parallel_group)
             tensor_parallel = tensor_parallel_size > 1
             if size % tensor_parallel_size != 0:
                 raise ValueError(
@@ -76,6 +75,8 @@ class Bias(BasicOperation):
             local_size //= tensor_parallel_size
         else:
             tensor_parallel_group = None
+            tensor_parallel_size = 1
+
         self.tensor_parallel: bool = tensor_parallel
         self.tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = tensor_parallel_group
         self.tensor_parallel_size: int = tensor_parallel_size
