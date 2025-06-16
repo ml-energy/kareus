@@ -3,7 +3,6 @@ from typing import Any, Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
-from kareus.transformer_engine.pytorch.ops import Linear
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
@@ -28,6 +27,8 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import is_te_min_version
 
 from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs, condition_init_method
+
+from kareus.transformer_engine.pytorch.ops import Linear
 
 
 def _get_cuda_rng_tracker_fn():

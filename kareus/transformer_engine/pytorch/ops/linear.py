@@ -10,14 +10,17 @@ from typing import Optional
 
 import torch
 
+from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.ops.basic import (
     AllReduce,
-    BasicLinear,
     Bias,
     ReduceScatter,
 )
-from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.ops.op import FusedOperation
+
+from kareus.transformer_engine.pytorch.ops.basic import (
+    BasicLinear,
+)
 
 
 class Linear(FusedOperation):
@@ -68,6 +71,7 @@ class Linear(FusedOperation):
         dtype: Optional[torch.dtype] = None,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
+        tensor_parallel_size: Optional[int] = None,
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
@@ -84,6 +88,7 @@ class Linear(FusedOperation):
         ) = BasicLinear._canonicalize_tensor_parallelism(
             mode=tensor_parallel_mode,
             process_group=tensor_parallel_group,
+            tensor_parallel_size=tensor_parallel_size,
             sequence_parallel=sequence_parallel,
             in_features=in_features,
             out_features=out_features,
@@ -98,17 +103,21 @@ class Linear(FusedOperation):
             "dtype": dtype,
             "tensor_parallel_mode": tensor_parallel_mode,
             "tensor_parallel_group": tensor_parallel_group,
+            "tensor_parallel_size": tensor_parallel_size,
             "sequence_parallel": sequence_parallel,
             "rng_state_tracker_function": rng_state_tracker_function,
             "accumulate_into_main_grad": accumulate_into_main_grad,
         }
         bias_kwargs = {
-            "size": out_features,
+            "size": local_out_features,
             "device": device,
             "dtype": dtype,
             "tensor_parallel": (tensor_parallel_mode is not None),
             "tensor_parallel_group": tensor_parallel_group,
+            "tensor_parallel_size": tensor_parallel_size,
         }
+        print(f"local_in_features: {local_in_features}")
+        print(f"local_out_features: {local_out_features}")
         if tensor_parallel_mode == "row":
             # Row TP: GEMM + bias + reduction
             linear_kwargs["in_features"] = local_in_features
@@ -116,7 +125,7 @@ class Linear(FusedOperation):
             linear_kwargs["tensor_parallel_mode"] = None
             linear_kwargs["tensor_parallel_group"] = None
             linear_kwargs["sequence_parallel"] = False
-            bias_kwargs["size"] *= tensor_parallel_size
+            # bias_kwargs["size"] *= tensor_parallel_size
             ops.append(BasicLinear(**linear_kwargs))
             if bias:
                 ops.append(Bias(**bias_kwargs))

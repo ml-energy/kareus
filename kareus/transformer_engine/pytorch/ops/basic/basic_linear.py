@@ -13,26 +13,26 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.pytorch.module.base import get_workspace
-from ...cpp_extensions import general_gemm
-from ...distributed import (
+from transformer_engine.pytorch.cpp_extensions import general_gemm
+from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...fp8 import FP8GlobalStateManager
-from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
-from ...tensor import Quantizer, QuantizedTensor
-from ...tensor.float8_tensor import Float8Quantizer
-from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ...tensor.mxfp8_tensor import MXFP8Quantizer
-from ...tensor._internal.float8_tensor_base import Float8TensorBase
-from ..op import BasicOperation, OperationContext
-from .._common import (
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
+from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+from transformer_engine.pytorch.ops._common import (
     canonicalize_device,
     canonicalize_dtype,
     devices_match,
 )
-from ...utils import clear_tensor_data
+from transformer_engine.pytorch.utils import clear_tensor_data
 
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -91,6 +91,7 @@ class BasicLinear(BasicOperation):
         dtype: Optional[torch.dtype] = None,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
+        tensor_parallel_size: Optional[int] = None,
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
@@ -125,6 +126,7 @@ class BasicLinear(BasicOperation):
         ) = self._canonicalize_tensor_parallelism(
             mode=tensor_parallel_mode,
             process_group=tensor_parallel_group,
+            tensor_parallel_size=tensor_parallel_size,
             sequence_parallel=sequence_parallel,
             in_features=in_features,
             out_features=out_features,
@@ -160,6 +162,7 @@ class BasicLinear(BasicOperation):
         *,
         mode: Optional[str],
         process_group: Optional[torch.distributed.ProcessGroup],
+        tensor_parallel_size: Optional[int],
         sequence_parallel: bool,
         in_features: int,
         out_features: int,
@@ -207,10 +210,11 @@ class BasicLinear(BasicOperation):
         """
 
         # Tensor-parallel group size
-        if mode is None:
-            group_size = 1
-        else:
-            group_size = torch.distributed.get_world_size(process_group)
+        # if mode is None:
+        #     group_size = 1
+        # else:
+        #     group_size = torch.distributed.get_world_size(process_group)
+        group_size = tensor_parallel_size
 
         # Disable tensor parallelism if not needed
         if group_size == 1:
@@ -521,6 +525,7 @@ class BasicLinear(BasicOperation):
 
         # Reduce tensor-parallel output if needed
         if tensor_parallel_mode == "row":
+            print("forward tensor_parallel_mode == row")
             if sequence_parallel:
                 y, _ = reduce_scatter_along_first_dim(y, tensor_parallel_group)
             else:
@@ -891,6 +896,8 @@ class BasicLinear(BasicOperation):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
 
+        # from kareus.utils.debug import save_tensors
+        # save_tensors(self.weight, "linear_qkv_weight", "kareus")
         # Linear forward
         output, x_local, _ = BasicLinear._functional_forward(
             input=input_,
