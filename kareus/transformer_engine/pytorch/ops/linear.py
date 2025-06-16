@@ -97,55 +97,43 @@ class Linear(FusedOperation):
         # Construct basic ops
         ops = []
         linear_kwargs = {
-            "in_features": in_features,
-            "out_features": out_features,
+            "in_features": local_in_features,
+            "out_features": local_out_features,
             "device": device,
             "dtype": dtype,
-            "tensor_parallel_mode": tensor_parallel_mode,
-            "tensor_parallel_group": tensor_parallel_group,
-            "tensor_parallel_size": tensor_parallel_size,
-            "sequence_parallel": sequence_parallel,
+            "tensor_parallel_mode": None,
+            "tensor_parallel_group": None,
+            "tensor_parallel_size": 1,
+            "sequence_parallel": False,
             "rng_state_tracker_function": rng_state_tracker_function,
             "accumulate_into_main_grad": accumulate_into_main_grad,
         }
         bias_kwargs = {
-            "size": out_features,
+            "size": local_out_features,
             "device": device,
             "dtype": dtype,
-            "tensor_parallel": (tensor_parallel_mode is not None),
-            "tensor_parallel_group": tensor_parallel_group,
-            "tensor_parallel_size": tensor_parallel_size,
+            "tensor_parallel": None,
+            "tensor_parallel_group": None,
+            "tensor_parallel_size": 1,
         }
-        if tensor_parallel_mode == "row":
-            # Row TP: GEMM + bias + reduction
-            linear_kwargs["in_features"] = local_in_features
-            linear_kwargs["out_features"] = local_out_features
-            linear_kwargs["tensor_parallel_mode"] = None
-            linear_kwargs["tensor_parallel_group"] = None
-            linear_kwargs["tensor_parallel_size"] = 1
-            linear_kwargs["sequence_parallel"] = False
-            # bias_kwargs["size"] *= tensor_parallel_size
-            bias_kwargs["tensor_parallel"] = False
-            bias_kwargs["tensor_parallel_group"] = None
-            bias_kwargs["tensor_parallel_size"] = 1
-            ops.append(BasicLinear(**linear_kwargs))
-            if bias:
-                print(f"bias_kwargs: {bias_kwargs}")
-                ops.append(Bias(**bias_kwargs))
-            if sequence_parallel:
-                ops.append(ReduceScatter(tensor_parallel_group))
-            else:
-                ops.append(AllReduce(tensor_parallel_group))
-        else:
-            # Column TP or no TP: (gather + GEMM) + bias
-            ops.append(BasicLinear(**linear_kwargs))
-            if bias:
-                ops.append(Bias(**bias_kwargs))
+        ops.append(BasicLinear(**linear_kwargs))
+        if bias:
+            ops.append(Bias(**bias_kwargs))
 
         # Initialize base class
         super().__init__(ops)
 
         self._has_bias: bool = bias
+
+        if sequence_parallel:
+            raise NotImplementedError("Sequence parallelism is not supported")
+        
+        self.forward_comm_op = None
+        self.backward_comm_op = None
+        if tensor_parallel_mode == "column":
+            self.backward_comm_op = AllReduce(process_group=tensor_parallel_group)
+        elif tensor_parallel_mode == "row":
+            self.forward_comm_op = AllReduce(process_group=tensor_parallel_group)
 
     @property
     def weight(self) -> torch.nn.Parameter:
