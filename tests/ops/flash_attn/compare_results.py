@@ -5,10 +5,53 @@ import torch
 import numpy as np
 import os
 
+def compare_tensors(tensor1, tensor2, name, rtol=1e-4, atol=1e-5):
+    """Compare two tensors and return detailed statistics."""
+    if torch.equal(tensor1, tensor2):
+        return {
+            'status': 'identical',
+            'max_diff': 0.0,
+            'mean_diff': 0.0,
+            'rel_diff': 0.0,
+            'correlation': 1.0
+        }
+    
+    max_diff = torch.max(torch.abs(tensor1 - tensor2)).item()
+    mean_diff = torch.mean(torch.abs(tensor1 - tensor2)).item()
+    rel_diff = max_diff / (torch.mean(torch.abs(tensor2)).item() + 1e-8)
+    
+    # Correlation coefficient
+    tensor1_flat = tensor1.flatten()
+    tensor2_flat = tensor2.flatten()
+    correlation = torch.corrcoef(torch.stack([tensor1_flat, tensor2_flat]))[0, 1].item()
+    
+    # Determine status
+    is_close = torch.allclose(tensor1, tensor2, rtol=rtol, atol=atol)
+    
+    if is_close:
+        status = 'pass'
+    elif rel_diff < 0.01:  # 1% relative difference
+        status = 'acceptable'
+    elif correlation > 0.99:
+        status = 'acceptable'
+    else:
+        status = 'fail'
+    
+    return {
+        'status': status,
+        'max_diff': max_diff,
+        'mean_diff': mean_diff,
+        'rel_diff': rel_diff,
+        'correlation': correlation
+    }
+
 def load_and_compare_results():
     """Load saved results and compare them."""
     
     print("🔍 Comparing Flash Attention Implementation Results")
+    print("=" * 60)
+    print("Custom Implementation: Manual backward function calls")
+    print("Original Implementation: PyTorch autograd")
     print("=" * 60)
     
     # Check if result files exist
@@ -41,10 +84,20 @@ def load_and_compare_results():
     
     print(f"\n⚙️  Test Configuration:")
     for key in custom_config:
-        custom_val = custom_config[key]
-        original_val = original_config[key]
-        match = "✅" if custom_val == original_val else "❌"
-        print(f"   {key}: {custom_val} vs {original_val} {match}")
+        if key in original_config:
+            custom_val = custom_config[key]
+            original_val = original_config[key]
+            match = "✅" if custom_val == original_val else "❌"
+            print(f"   {key}: {custom_val} vs {original_val} {match}")
+        else:
+            print(f"   {key}: {custom_config[key]} (custom only)")
+    
+    # Show backward method differences
+    custom_manual = custom_config.get('manual_backward', False)
+    original_manual = original_config.get('manual_backward', False)
+    print(f"\n🔄 Backward Method:")
+    print(f"   Custom: {'Manual backward calls' if custom_manual else 'PyTorch autograd'}")
+    print(f"   Original: {'Manual backward calls' if original_manual else 'PyTorch autograd'}")
     
     # Compare input tensors (should be identical due to same seed)
     print(f"\n🎯 Input Tensor Verification:")
@@ -99,7 +152,7 @@ def load_and_compare_results():
             comparison_summary[config_name] = "original_failed"
             continue
         
-        # Compare successful outputs
+        # Compare successful forward outputs
         custom_output = custom_result['output']
         original_output = original_result['output']
         
@@ -110,21 +163,14 @@ def load_and_compare_results():
             comparison_summary[config_name] = "shape_mismatch"
             continue
         
-        # Statistical comparison
-        max_diff = torch.max(torch.abs(custom_output - original_output)).item()
-        mean_diff = torch.mean(torch.abs(custom_output - original_output)).item()
-        rel_diff = max_diff / (torch.mean(torch.abs(original_output)).item() + 1e-8)
+        # Forward pass comparison
+        forward_comp = compare_tensors(custom_output, original_output, "forward_output")
         
-        # Correlation coefficient
-        custom_flat = custom_output.flatten()
-        original_flat = original_output.flatten()
-        correlation = torch.corrcoef(torch.stack([custom_flat, original_flat]))[0, 1].item()
-        
-        print(f"      📈 Statistics:")
-        print(f"         Max absolute diff: {max_diff:.2e}")
-        print(f"         Mean absolute diff: {mean_diff:.2e}")
-        print(f"         Relative diff: {rel_diff:.2e} ({rel_diff*100:.3f}%)")
-        print(f"         Correlation: {correlation:.6f}")
+        print(f"      📈 Forward Pass Statistics:")
+        print(f"         Max absolute diff: {forward_comp['max_diff']:.2e}")
+        print(f"         Mean absolute diff: {forward_comp['mean_diff']:.2e}")
+        print(f"         Relative diff: {forward_comp['rel_diff']:.2e} ({forward_comp['rel_diff']*100:.3f}%)")
+        print(f"         Correlation: {forward_comp['correlation']:.6f}")
         
         # Custom vs Original statistics
         custom_stats = f"mean={custom_result['mean']:.4f}, std={custom_result['std']:.4f}"
@@ -132,24 +178,66 @@ def load_and_compare_results():
         print(f"         Custom stats: {custom_stats}")
         print(f"         Original stats: {original_stats}")
         
-        # Determine if results are acceptable
-        # Allow for small numerical differences due to potential backend differences
-        rtol, atol = 1e-4, 1e-5
-        is_close = torch.allclose(custom_output, original_output, rtol=rtol, atol=atol)
+        # Compare gradients
+        print(f"      🔄 Backward Pass (Gradients) Statistics:")
+        print(f"         Custom: Manual backward calls")
+        print(f"         Original: PyTorch autograd")
+        gradient_comparisons = {}
         
-        if is_close:
-            print(f"      ✅ PASS: Outputs are numerically equivalent")
-            comparison_summary[config_name] = "pass"
-        elif rel_diff < 0.01:  # 1% relative difference
-            print(f"      ⚠️  ACCEPTABLE: Small difference ({rel_diff*100:.3f}%)")
-            comparison_summary[config_name] = "acceptable"
-        elif correlation > 0.99:
-            print(f"      ⚠️  ACCEPTABLE: High correlation ({correlation:.4f})")
-            comparison_summary[config_name] = "acceptable"
+        for grad_name in ['q_grad', 'k_grad', 'v_grad']:
+            if grad_name in custom_result and grad_name in original_result:
+                custom_grad = custom_result[grad_name]
+                original_grad = original_result[grad_name]
+                
+                grad_comp = compare_tensors(custom_grad, original_grad, grad_name)
+                gradient_comparisons[grad_name] = grad_comp
+                
+                print(f"         {grad_name}:")
+                print(f"           Max diff: {grad_comp['max_diff']:.2e}")
+                print(f"           Mean diff: {grad_comp['mean_diff']:.2e}")
+                print(f"           Relative diff: {grad_comp['rel_diff']:.2e} ({grad_comp['rel_diff']*100:.3f}%)")
+                print(f"           Correlation: {grad_comp['correlation']:.6f}")
+                
+                # Compare gradient statistics
+                if 'grad_stats' in custom_result and 'grad_stats' in original_result:
+                    custom_grad_stats = custom_result['grad_stats']
+                    original_grad_stats = original_result['grad_stats']
+                    
+                    grad_norm_key = f"{grad_name.split('_')[0]}_grad_norm"
+                    grad_mean_key = f"{grad_name.split('_')[0]}_grad_mean"
+                    
+                    if grad_norm_key in custom_grad_stats and grad_norm_key in original_grad_stats:
+                        custom_norm = custom_grad_stats[grad_norm_key]
+                        original_norm = original_grad_stats[grad_norm_key]
+                        print(f"           Gradient norms: custom={custom_norm:.4f}, original={original_norm:.4f}")
+                    
+                    if grad_mean_key in custom_grad_stats and grad_mean_key in original_grad_stats:
+                        custom_mean = custom_grad_stats[grad_mean_key]
+                        original_mean = original_grad_stats[grad_mean_key]
+                        print(f"           Gradient means: custom={custom_mean:.4f}, original={original_mean:.4f}")
+        
+        # Determine overall status for this configuration
+        forward_status = forward_comp['status']
+        gradient_statuses = [comp['status'] for comp in gradient_comparisons.values()]
+        
+        # Overall status is the worst among forward and all gradients
+        all_statuses = [forward_status] + gradient_statuses
+        if 'fail' in all_statuses:
+            overall_status = 'fail'
+        elif 'acceptable' in all_statuses:
+            overall_status = 'acceptable'
         else:
-            print(f"      ❌ FAIL: Significant difference")
+            overall_status = 'pass'
+        
+        comparison_summary[config_name] = overall_status
+        
+        if overall_status == 'pass':
+            print(f"      ✅ PASS: Manual backward matches autograd")
+        elif overall_status == 'acceptable':
+            print(f"      ⚠️  ACCEPTABLE: Small differences between manual backward and autograd")
+        else:
+            print(f"      ❌ FAIL: Significant differences between manual backward and autograd")
             all_configs_match = False
-            comparison_summary[config_name] = "fail"
     
     # Print final summary
     print(f"\n" + "=" * 60)
@@ -175,10 +263,13 @@ def load_and_compare_results():
     print(f"\nOverall: {passed}/{total} configurations acceptable")
     
     if passed == total:
-        print("🎉 SUCCESS: Custom implementation matches original!")
+        print("🎉 SUCCESS: Manual backward calls match PyTorch autograd!")
+        print("   This validates that your custom flash attention backward implementation")
+        print("   produces the same results as the original implementation.")
         return True
     else:
-        print("⚠️  WARNING: Some differences detected between implementations")
+        print("⚠️  WARNING: Some differences detected between manual backward and autograd")
+        print("   This may indicate differences in the backward implementation.")
         return False
 
 if __name__ == "__main__":

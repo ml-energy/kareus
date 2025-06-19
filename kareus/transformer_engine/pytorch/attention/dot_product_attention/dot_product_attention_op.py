@@ -44,6 +44,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 
 # Import FlashAttention functions directly
 from kareus.flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+from kareus.flash_attn.flash_attn_interface import flash_attn_func_backward, flash_attn_varlen_func_backward
 try:
     from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flash_attn_3.flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_v3
@@ -345,6 +346,7 @@ class DotProductAttentionOp(BasicOperation):
 
         # update KV cache and retrieve saved tokens from cache for inference
         if inference_params is not None:
+            raise NotImplementedError("DotProductAttentionOp does not support inference_params is not None.")
             assert self.layer_number is not None, "Layer number must be set!"
 
             # convert top-left causal to bottom-right causal due to KV caching
@@ -490,20 +492,9 @@ class DotProductAttentionOp(BasicOperation):
             else:
                 pad_between_seqs = False
 
-        # Save state for backward pass
-        # ctx.save_for_backward(
-        #     query_layer, key_layer, value_layer,
-        #     cu_seqlens_q, cu_seqlens_kv, attention_mask, alibi_slopes, core_attention_bias
-        # )
-        # ctx.qkv_layout = qkv_layout
-        # ctx.attn_mask_type = attn_mask_type
-        # ctx.window_size = window_size
-        # ctx.max_seqlen_q = max_seqlen_q
-        # ctx.max_seqlen_kv = max_seqlen_kv
-        # ctx.context_parallel = context_parallel
-        # ctx.inference_params = inference_params
-        # ctx.core_attention_bias_type = core_attention_bias_type
-        # ctx.pad_between_seqs = pad_between_seqs
+        ctx.qkv_format = qkv_format
+        ctx.q_format = q_format
+        ctx.context_parallel = context_parallel
 
         # Handle ALiBi
         if core_attention_bias_type == "alibi":
@@ -551,7 +542,7 @@ class DotProductAttentionOp(BasicOperation):
             attention_type=self.attention_type,
             deterministic=self.deterministic,
             training=self.training if hasattr(self, 'training') else True,
-            ctx=ctx,  # Pass context directly to forward function
+            ctx=ctx,  # Pass context to save tensors for backward
         )
 
         return output
@@ -561,26 +552,23 @@ class DotProductAttentionOp(BasicOperation):
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """Backward pass for dot product attention."""
+        """Backward pass for dot product attention using FlashAttention backward functions."""
         
-        # Retrieve saved tensors
-        (
-            query_layer, key_layer, value_layer,
-            cu_seqlens_q, cu_seqlens_kv, attention_mask, alibi_slopes, core_attention_bias
-        ) = ctx.saved_tensors
-
-        # For now, we'll use PyTorch's autograd for the backward pass
-        # In a full implementation, you would implement the backward pass manually
-        # using the FlashAttention backward kernels
+        # Retrieve saved context information
+        qkv_format = ctx.qkv_format
+        q_format = ctx.q_format
+        context_parallel = ctx.context_parallel
         
-        # This is a simplified backward pass - in practice you'd want to implement
-        # the actual gradients computation using the attention backward kernels
-        grad_query = torch.zeros_like(query_layer)
-        grad_key = torch.zeros_like(key_layer) 
-        grad_value = torch.zeros_like(value_layer)
+        # Call the comprehensive backward function that handles all transformations
+        dq, dk, dv = flash_attention_backward(
+            ctx=ctx,
+            grad_output=grad_output,
+            qkv_format=qkv_format,
+            q_format=q_format,
+            context_parallel=context_parallel,
+        )
         
-        # Return gradients: grad_input (query), and extra input grads (key, value)
-        return grad_query, (grad_key, grad_value)
+        return dq, (dk, dv)
 
     def fuser_forward(
         self,
@@ -623,7 +611,7 @@ class DotProductAttentionOp(BasicOperation):
         list[tuple[torch.Tensor, torch.Tensor]],
     ]:
         """Override fuser_backward since we have extra inputs."""
-        
+        print(f"grad_output: {grad_output.shape}")
         grad_input, grad_extra_inputs = self.op_backward(basic_op_ctxs[0], grad_output)
         return grad_input, [()], [grad_extra_inputs] 
 
@@ -693,48 +681,53 @@ def flash_attention_forward(
                 query_layer.shape[-1] == 128
                 and query_layer.shape[0] * query_layer.shape[1] >= 512
                 and qkv_layout == "sbh3d"
-            ):
-                # Use _PrepareQKVForFA if available
-                try:
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _PrepareQKVForFA
-                    query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(
-                        query_layer, key_layer, value_layer
-                    )
-                except ImportError:
-                    query_layer, key_layer, value_layer = [
-                        x.transpose(0, 1).contiguous()
-                        for x in (query_layer, key_layer, value_layer)
-                    ]
+            ):  
+                raise NotImplementedError("FlashAttention does not support \
+                    query_layer.shape[-1] == 128 and query_layer.shape[0] * query_layer.shape[1] >= 512 and qkv_layout == 'sbh3d'.")
+                # # Use _PrepareQKVForFA if available
+                # try:
+                #     from transformer_engine.pytorch.attention.dot_product_attention.backends import _PrepareQKVForFA
+                #     query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(
+                #         query_layer, key_layer, value_layer
+                #     )
+                # except ImportError:
+                #     query_layer, key_layer, value_layer = [
+                #         x.transpose(0, 1).contiguous()
+                #         for x in (query_layer, key_layer, value_layer)
+                #     ]
             else:
                 query_layer, key_layer, value_layer = [
                     x.transpose(0, 1).contiguous()
                     for x in (query_layer, key_layer, value_layer)
                 ]
-        elif q_format == "sbhd" and kv_format == "bshd":
-            query_layer = query_layer.transpose(0, 1).contiguous()
-        if context_parallel:
-            query_layer, key_layer, value_layer = [
-                x.contiguous() for x in (query_layer, key_layer, value_layer)
-            ]
+        else:
+            raise NotImplementedError(f"qkv_format: {qkv_format} is not supported in FlashAttention.")
+        # elif q_format == "sbhd" and kv_format == "bshd":
+        #     query_layer = query_layer.transpose(0, 1).contiguous()
+        # if context_parallel:
+        #     query_layer, key_layer, value_layer = [
+        #         x.contiguous() for x in (query_layer, key_layer, value_layer)
+        #     ]
     else:
-        if qkv_format == "sbhd":
-            query_layer._data, key_layer._data, value_layer._data = [
-                x.transpose(0, 1).contiguous()
-                for x in (query_layer._data, key_layer._data, value_layer._data)
-            ]
-            query_layer, key_layer, value_layer = [
-                Float8Tensor.make_like(x, data=x._data, shape=x._data.shape)
-                for x in (query_layer, key_layer, value_layer)
-            ]
-        elif q_format == "sbhd" and kv_format == "bshd":
-            query_layer._data = query_layer._data.transpose(0, 1).contiguous()
-            query_layer = Float8Tensor.make_like(
-                query_layer, data=query_layer._data, shape=query_layer._data.shape
-            )
-        if context_parallel:
-            query_layer._data, key_layer._data, value_layer._data = [
-                x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
-            ]
+        raise NotImplementedError("Float8Tensors are not supported in FlashAttention.")
+        # if qkv_format == "sbhd":
+        #     query_layer._data, key_layer._data, value_layer._data = [
+        #         x.transpose(0, 1).contiguous()
+        #         for x in (query_layer._data, key_layer._data, value_layer._data)
+        #     ]
+        #     query_layer, key_layer, value_layer = [
+        #         Float8Tensor.make_like(x, data=x._data, shape=x._data.shape)
+        #         for x in (query_layer, key_layer, value_layer)
+        #     ]
+        # elif q_format == "sbhd" and kv_format == "bshd":
+        #     query_layer._data = query_layer._data.transpose(0, 1).contiguous()
+        #     query_layer = Float8Tensor.make_like(
+        #         query_layer, data=query_layer._data, shape=query_layer._data.shape
+        #     )
+        # if context_parallel:
+        #     query_layer._data, key_layer._data, value_layer._data = [
+        #         x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
+        #     ]
 
     # get batch_size, max_seqlen and cu_seqlens
     batch_size, context_len = None, None
@@ -747,100 +740,103 @@ def flash_attention_forward(
             max_seqlen_kv *= cp_size
 
             if "padding" in attn_mask_type:
-                assert (
-                    not context_parallel
-                ), "Padding mask not supported with context parallelism!"
+                raise NotImplementedError("Padding mask not supported with context parallelism!")
+                # assert (
+                #     not context_parallel
+                # ), "Padding mask not supported with context parallelism!"
 
-                # [b * s, h, d]
-                query_layer, key_layer, value_layer = [
-                    x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
-                    for x in [query_layer, key_layer, value_layer]
-                ]
+                # # [b * s, h, d]
+                # query_layer, key_layer, value_layer = [
+                #     x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
+                #     for x in [query_layer, key_layer, value_layer]
+                # ]
 
-                if attention_type == "self":
-                    assert (
-                        max_seqlen_q == max_seqlen_kv
-                    ), "Maximum sequence length for Q and KV should be the same."
-                    if cu_seqlens_q is None:
-                        assert (
-                            attention_mask is not None
-                        ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
-                            attention_mask
-                        )
-                    else:
-                        indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
-                    cu_seqlens_kv = cu_seqlens_q
-                    query_layer, key_layer, value_layer = dpa_utils.PackTensors.apply(
-                        indices_q, query_layer, key_layer, value_layer
-                    )
-                else:
-                    if cu_seqlens_q is None or cu_seqlens_kv is None:
-                        assert (
-                            attention_mask is not None
-                        ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
-                            attention_mask[0]
-                        )
-                        cu_seqlens_kv, indices_kv = dpa_utils.get_cu_seqlens_and_indices(
-                            attention_mask[1]
-                        )
-                    else:
-                        indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
-                        indices_kv = dpa_utils.get_indices(max_seqlen_kv, cu_seqlens_kv)
-                    query_layer = dpa_utils.PackTensors.apply(indices_q, query_layer)
-                    key_layer, value_layer = dpa_utils.PackTensors.apply(
-                        indices_kv, key_layer, value_layer
-                    )
-            else:
-                # Cumulative sequence lengths for unpadded data
-                if cu_seqlens_q is None:
-                    cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_q,
-                        query_layer.device,
-                    )
-                if cu_seqlens_kv is None:
-                    cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_kv,
-                        key_layer.device,
-                    )
+                # if attention_type == "self":
+                #     assert (
+                #         max_seqlen_q == max_seqlen_kv
+                #     ), "Maximum sequence length for Q and KV should be the same."
+                #     if cu_seqlens_q is None:
+                #         assert (
+                #             attention_mask is not None
+                #         ), "Please provide attention_mask for padding!"
+                #         cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
+                #             attention_mask
+                #         )
+                #     else:
+                #         indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
+                #     cu_seqlens_kv = cu_seqlens_q
+                #     query_layer, key_layer, value_layer = dpa_utils.PackTensors.apply(
+                #         indices_q, query_layer, key_layer, value_layer
+                #     )
+                # else:
+                #     if cu_seqlens_q is None or cu_seqlens_kv is None:
+                #         assert (
+                #             attention_mask is not None
+                #         ), "Please provide attention_mask for padding!"
+                #         cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
+                #             attention_mask[0]
+                #         )
+                #         cu_seqlens_kv, indices_kv = dpa_utils.get_cu_seqlens_and_indices(
+                #             attention_mask[1]
+                #         )
+                #     else:
+                #         indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
+                #         indices_kv = dpa_utils.get_indices(max_seqlen_kv, cu_seqlens_kv)
+                #     query_layer = dpa_utils.PackTensors.apply(indices_q, query_layer)
+                #     key_layer, value_layer = dpa_utils.PackTensors.apply(
+                #         indices_kv, key_layer, value_layer
+                #     )
+            # else:
+            #     # Cumulative sequence lengths for unpadded data
+            #     if cu_seqlens_q is None:
+            #         cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
+            #             batch_size,
+            #             max_seqlen_q,
+            #             query_layer.device,
+            #         )
+            #     if cu_seqlens_kv is None:
+            #         cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
+            #             batch_size,
+            #             max_seqlen_kv,
+            #             key_layer.device,
+            #         )
         elif qkv_format == "thd":
-            assert (
-                cu_seqlens_q is not None and cu_seqlens_kv is not None
-            ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
-            if max_seqlen_q is None:
-                seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                max_seqlen_q = seqlens_q.max().item()
-            if max_seqlen_kv is None:
-                seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                max_seqlen_kv = seqlens_kv.max().item()
+            raise NotImplementedError("FlashAttention does not support qkv_format = thd.")
+            # assert (
+            #     cu_seqlens_q is not None and cu_seqlens_kv is not None
+            # ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
+            # if max_seqlen_q is None:
+            #     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+            #     max_seqlen_q = seqlens_q.max().item()
+            # if max_seqlen_kv is None:
+            #     seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+            #     max_seqlen_kv = seqlens_kv.max().item()
     else:
-        if qkv_format in ["sbhd_2bshd", "bshd"]:
-            # q is in bshd in both cases from conversion above or the original input
-            batch_size, context_len = query_layer.shape[:2]
-            cu_seqlens_q = cu_seqlens_q[: batch_size + 1]
-            cu_seqlens_kv = cu_seqlens_kv[: batch_size + 1]
-            # convert from bshd to thd_2bshd for flash_attn_varlen_func/_with_kvcache;
-            # kernel assumes tensor is contiguous
-            if isinstance(query_layer, Float8Tensor):
-                import transformer_engine_torch as tex
-                query_layer._data = tex.convert_bshd_to_thd(
-                    query_layer._data,
-                    cu_seqlens_q,
-                    batch_size * context_len,
-                )
-                query_layer = Float8Tensor.make_like(
-                    query_layer, data=query_layer._data, shape=query_layer._data.shape
-                )
-            else:
-                import transformer_engine_torch as tex
-                query_layer = tex.convert_bshd_to_thd(
-                    query_layer,
-                    cu_seqlens_q,
-                    batch_size * context_len,
-                )
+        raise NotImplementedError("FlashAttention does not support inference_params is not None.")
+        # if qkv_format in ["sbhd_2bshd", "bshd"]:
+        #     # q is in bshd in both cases from conversion above or the original input
+        #     batch_size, context_len = query_layer.shape[:2]
+        #     cu_seqlens_q = cu_seqlens_q[: batch_size + 1]
+        #     cu_seqlens_kv = cu_seqlens_kv[: batch_size + 1]
+        #     # convert from bshd to thd_2bshd for flash_attn_varlen_func/_with_kvcache;
+        #     # kernel assumes tensor is contiguous
+        #     if isinstance(query_layer, Float8Tensor):
+        #         import transformer_engine_torch as tex
+        #         query_layer._data = tex.convert_bshd_to_thd(
+        #             query_layer._data,
+        #             cu_seqlens_q,
+        #             batch_size * context_len,
+        #         )
+        #         query_layer = Float8Tensor.make_like(
+        #             query_layer, data=query_layer._data, shape=query_layer._data.shape
+        #         )
+        #     else:
+        #         import transformer_engine_torch as tex
+        #         query_layer = tex.convert_bshd_to_thd(
+        #             query_layer,
+        #             cu_seqlens_q,
+        #             batch_size * context_len,
+        #         )
 
     use_flash_attn_3 = False
     if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
@@ -850,35 +846,35 @@ def flash_attention_forward(
         not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
     ):
         raise NotImplementedError("Context parallelism is not supported with FlashAttention.")
-        assert (
-            alibi_slopes is None
-        ), "Alibi slope bias addition is not supported with context parallelism."
-        with attention_dropout_ctx():
-            output = attn_forward_func_with_cp(
-                training,
-                query_layer,
-                key_layer,
-                value_layer,
-                cu_seqlens_q,
-                cu_seqlens_kv,
-                max_seqlen_q,
-                max_seqlen_kv,
-                cu_seqlens_q if qkv_format == "thd" else None,
-                cu_seqlens_kv if qkv_format == "thd" else None,
-                attention_dropout if training else 0.0,
-                cp_group,
-                cp_global_ranks,
-                cp_stream,
-                cp_comm_type,
-                softmax_scale=softmax_scale,
-                qkv_format="bshd" if qkv_format == "sbhd" else qkv_format,
-                attn_mask_type=attn_mask_type,
-                deterministic=deterministic,
-                window_size=window_size,
-                quantizers=quantizers,
-                pad_between_seqs=False,
-                use_flash_attn_3=use_flash_attn_3,
-            )
+        # assert (
+        #     alibi_slopes is None
+        # ), "Alibi slope bias addition is not supported with context parallelism."
+        # with attention_dropout_ctx():
+        #     output = attn_forward_func_with_cp(
+        #         training,
+        #         query_layer,
+        #         key_layer,
+        #         value_layer,
+        #         cu_seqlens_q,
+        #         cu_seqlens_kv,
+        #         max_seqlen_q,
+        #         max_seqlen_kv,
+        #         cu_seqlens_q if qkv_format == "thd" else None,
+        #         cu_seqlens_kv if qkv_format == "thd" else None,
+        #         attention_dropout if training else 0.0,
+        #         cp_group,
+        #         cp_global_ranks,
+        #         cp_stream,
+        #         cp_comm_type,
+        #         softmax_scale=softmax_scale,
+        #         qkv_format="bshd" if qkv_format == "sbhd" else qkv_format,
+        #         attn_mask_type=attn_mask_type,
+        #         deterministic=deterministic,
+        #         window_size=window_size,
+        #         quantizers=quantizers,
+        #         pad_between_seqs=False,
+        #         use_flash_attn_3=use_flash_attn_3,
+        #     )
     else:
         from transformer_engine.pytorch.cpu_offload import (
             CPUOffloadEnabled,
@@ -886,9 +882,10 @@ def flash_attention_forward(
         )
 
         if CPUOffloadEnabled:
-            mark_activation_offload(
-                query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
-            )
+            raise NotImplementedError("FlashAttention does not support CPUOffload.")
+            # mark_activation_offload(
+            #     query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
+            # )
 
         with attention_dropout_ctx():
             #       | API                     | use cases
@@ -909,17 +906,18 @@ def flash_attention_forward(
                     flash_attn_func if not use_flash_attn_3 else flash_attn_func_v3
                 )
             else:
-                if not use_flash_attn_3:
-                    func = flash_attn_varlen_func
-                elif inference_params is None:
-                    func = flash_attn_varlen_func_v3
-                else:
-                    func = flash_attn_with_kvcache_v3
-                if not use_flash_attn_3 or inference_params is None:
-                    fa_optional_forward_args_thd.append(cu_seqlens_q)
-                    fa_optional_forward_args_thd.append(cu_seqlens_kv)
-                    fa_optional_forward_args_thd.append(max_seqlen_q)
-                    fa_optional_forward_args_thd.append(max_seqlen_kv)
+                raise NotImplementedError("FlashAttention does not support flash_attn_varlen_func.")
+                # if not use_flash_attn_3:
+                #     func = flash_attn_varlen_func
+                # elif inference_params is None:
+                #     func = flash_attn_varlen_func_v3
+                # else:
+                #     func = flash_attn_with_kvcache_v3
+                # if not use_flash_attn_3 or inference_params is None:
+                #     fa_optional_forward_args_thd.append(cu_seqlens_q)
+                #     fa_optional_forward_args_thd.append(cu_seqlens_kv)
+                #     fa_optional_forward_args_thd.append(max_seqlen_q)
+                #     fa_optional_forward_args_thd.append(max_seqlen_kv)
             
             if not use_flash_attn_3:
                 fa_optional_forward_kwargs = {}
@@ -939,6 +937,7 @@ def flash_attention_forward(
                         )[:batch_size]
                     )
                 output = func(
+                    ctx,
                     query_layer,
                     key_layer,
                     value_layer,
@@ -949,137 +948,174 @@ def flash_attention_forward(
                     **fa_optional_forward_kwargs,
                 )
             else:
-                fa_3_optional_forward_kwargs = {}
-                fa_3_optional_forward_kwargs["window_size"] = window_size
-                if inference_params is None:
-                    fa_3_optional_forward_kwargs["deterministic"] = deterministic
-                else:
-                    fa_3_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
-                    fa_3_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
-                    cache_seqlens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                    fa_3_optional_forward_kwargs["cache_seqlens"] = cache_seqlens
-                    # flash_attn_with_kvcache accepts thd_2bshd for non-paged
-                    if inference_params.is_paged:
-                        fa_3_optional_forward_kwargs["page_table"] = (
-                            inference_params.cache_manager.page_table[:batch_size]
-                        )
+                raise NotImplementedError("FlashAttention does not support use_flash_attn_3.")
+                # fa_3_optional_forward_kwargs = {}
+                # fa_3_optional_forward_kwargs["window_size"] = window_size
+                # if inference_params is None:
+                #     fa_3_optional_forward_kwargs["deterministic"] = deterministic
+                # else:
+                #     fa_3_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
+                #     fa_3_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
+                #     cache_seqlens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                #     fa_3_optional_forward_kwargs["cache_seqlens"] = cache_seqlens
+                #     # flash_attn_with_kvcache accepts thd_2bshd for non-paged
+                #     if inference_params.is_paged:
+                #         fa_3_optional_forward_kwargs["page_table"] = (
+                #             inference_params.cache_manager.page_table[:batch_size]
+                #         )
                 
-                if fp8:
-                    from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype
-                    from transformer_engine.pytorch.cpp_extensions.fused_attn import META_QKV
+                # if fp8:
+                #     from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype
+                #     from transformer_engine.pytorch.cpp_extensions.fused_attn import META_QKV
                     
-                    QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-                    torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
-                    torch_orig_dtype = query_layer.dtype
+                #     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
+                #     torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                #     torch_orig_dtype = query_layer.dtype
 
-                    def convert_to_torch_float8(tensor, dtype):
-                        out = torch.Tensor().to(device=tensor.device, dtype=dtype)
-                        out.set_(
-                            tensor._data.untyped_storage(),
-                            tensor._data.storage_offset(),
-                            tensor._data.shape,
-                            tensor._data.stride(),
-                        )
-                        return out
+                #     def convert_to_torch_float8(tensor, dtype):
+                #         out = torch.Tensor().to(device=tensor.device, dtype=dtype)
+                #         out.set_(
+                #             tensor._data.untyped_storage(),
+                #             tensor._data.storage_offset(),
+                #             tensor._data.shape,
+                #             tensor._data.stride(),
+                #         )
+                #         return out
 
-                    # "fp8_mha" decides outputs in fp8, while inputs are inferred from
-                    # the real dtype
-                    assert isinstance(key_layer, query_layer.__class__) and isinstance(
-                        value_layer, query_layer.__class__
-                    ), "q, k, and v must have the same type."
-                    if not isinstance(query_layer, Float8Tensor):
-                        query_layer, key_layer, value_layer = (
-                            QKV_quantizer(x) for x in [query_layer, key_layer, value_layer]
-                        )
-                    batch_size = cu_seqlens_q.shape[0] - 1
-                    num_heads_k = key_layer.shape[-2]
-                    fa_3_optional_forward_kwargs["q_descale"] = (
-                        query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
-                    )
-                    fa_3_optional_forward_kwargs["k_descale"] = key_layer._scale_inv.unsqueeze(
-                        0
-                    ).repeat(batch_size, num_heads_k)
-                    fa_3_optional_forward_kwargs["v_descale"] = (
-                        value_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
-                    )
-                    query_layer, key_layer, value_layer = (
-                        convert_to_torch_float8(x, torch_dtype)
-                        for x in [query_layer, key_layer, value_layer]
-                    )
+                #     # "fp8_mha" decides outputs in fp8, while inputs are inferred from
+                #     # the real dtype
+                #     assert isinstance(key_layer, query_layer.__class__) and isinstance(
+                #         value_layer, query_layer.__class__
+                #     ), "q, k, and v must have the same type."
+                #     if not isinstance(query_layer, Float8Tensor):
+                #         query_layer, key_layer, value_layer = (
+                #             QKV_quantizer(x) for x in [query_layer, key_layer, value_layer]
+                #         )
+                #     batch_size = cu_seqlens_q.shape[0] - 1
+                #     num_heads_k = key_layer.shape[-2]
+                #     fa_3_optional_forward_kwargs["q_descale"] = (
+                #         query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
+                #     )
+                #     fa_3_optional_forward_kwargs["k_descale"] = key_layer._scale_inv.unsqueeze(
+                #         0
+                #     ).repeat(batch_size, num_heads_k)
+                #     fa_3_optional_forward_kwargs["v_descale"] = (
+                #         value_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
+                #     )
+                #     query_layer, key_layer, value_layer = (
+                #         convert_to_torch_float8(x, torch_dtype)
+                #         for x in [query_layer, key_layer, value_layer]
+                #     )
                 
-                try:
-                    output = func(
-                        query_layer,
-                        key_layer,
-                        value_layer,
-                        *fa_optional_forward_args_thd,
-                        softmax_scale=softmax_scale,
-                        causal="causal" in attn_mask_type,
-                        **fa_3_optional_forward_kwargs,
-                    )
-                    if isinstance(output, (List, Tuple)):
-                        output = output[0]
-                except TypeError as e:
-                    if fa_utils.v3_0_0_beta:
-                        e.args = (
-                            e.args[0]
-                            + ". Please update your flash-attn v3 (beta) installation as it "
-                            + "may have added more supported arguments to its API. \n"
-                            + fa_utils.v3_installation_steps,
-                        ) + e.args[1:]
-                    raise
+                # try:
+                #     output = func(
+                #         ctx,
+                #         query_layer,
+                #         key_layer,
+                #         value_layer,
+                #         *fa_optional_forward_args_thd,
+                #         softmax_scale=softmax_scale,
+                #         causal="causal" in attn_mask_type,
+                #         **fa_3_optional_forward_kwargs,
+                #     )
+                #     if isinstance(output, (List, Tuple)):
+                #         output = output[0]
+                # except TypeError as e:
+                #     if fa_utils.v3_0_0_beta:
+                #         e.args = (
+                #             e.args[0]
+                #             + ". Please update your flash-attn v3 (beta) installation as it "
+                #             + "may have added more supported arguments to its API. \n"
+                #             + fa_utils.v3_installation_steps,
+                #         ) + e.args[1:]
+                #     raise
 
-                if fp8:
-                    output = output.to(dtype=torch_orig_dtype)
-                if fp8 and fp8_meta["recipe"].fp8_mha:
-                    from transformer_engine.pytorch.cpp_extensions.fused_attn import META_O
-                    O_quantizer = quantizers["scaling_fwd"][META_O]
-                    output = O_quantizer(output)
+                # if fp8:
+                #     output = output.to(dtype=torch_orig_dtype)
+                # if fp8 and fp8_meta["recipe"].fp8_mha:
+                #     from transformer_engine.pytorch.cpp_extensions.fused_attn import META_O
+                #     O_quantizer = quantizers["scaling_fwd"][META_O]
+                #     output = O_quantizer(output)
 
-    if inference_params is None:
-        if qkv_format in ["sbhd", "bshd"] and "padding" in attn_mask_type and indices_q is not None:
-            output = dpa_utils.UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
-    elif qkv_format in ["bshd", "sbhd_2bshd"]:
-        # all KV caching cases use thd_2bshd for calculation
-        # convert results back to bshd from thd_2bshd
-        if isinstance(query_layer, Float8Tensor):
-            import transformer_engine_torch as tex
-            output._data = tex.convert_thd_to_bshd(
-                output._data,
-                cu_seqlens_q,
-                batch_size,
-                context_len,
-            )
-            output = Float8Tensor.make_like(output, data=output._data, shape=output._data.shape)
-        else:
-            import transformer_engine_torch as tex
-            output = tex.convert_thd_to_bshd(
-                output,
-                cu_seqlens_q,
-                batch_size,
-                context_len,
-            )
+    # if inference_params is None:
+    #     if qkv_format in ["sbhd", "bshd"] and "padding" in attn_mask_type and indices_q is not None:
+    #         output = dpa_utils.UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
+    # elif qkv_format in ["bshd", "sbhd_2bshd"]:
+    #     # all KV caching cases use thd_2bshd for calculation
+    #     # convert results back to bshd from thd_2bshd
+    #     if isinstance(query_layer, Float8Tensor):
+    #         import transformer_engine_torch as tex
+    #         output._data = tex.convert_thd_to_bshd(
+    #             output._data,
+    #             cu_seqlens_q,
+    #             batch_size,
+    #             context_len,
+    #         )
+    #         output = Float8Tensor.make_like(output, data=output._data, shape=output._data.shape)
+    #     else:
+    #         import transformer_engine_torch as tex
+    #         output = tex.convert_thd_to_bshd(
+    #             output,
+    #             cu_seqlens_q,
+    #             batch_size,
+    #             context_len,
+    #         )
 
     if q_format == "sbhd":
         # (bs)hd -> bs(hd) -> sb(hd)
         if fp8 and fp8_meta["recipe"].fp8_mha:
-            output_data = (
-                output._data.reshape(batch_size, max_seqlen_q // cp_size, -1)
-                .transpose(0, 1)
-                .contiguous()
-            )
-            output = Float8Tensor.make_like(
-                output,
-                data=output_data,
-                shape=output_data.shape,
-            )
+            raise NotImplementedError("FlashAttention does not support fp8.")
+            # output_data = (
+            #     output._data.reshape(batch_size, max_seqlen_q // cp_size, -1)
+            #     .transpose(0, 1)
+            #     .contiguous()
+            # )
+            # output = Float8Tensor.make_like(
+            #     output,
+            #     data=output_data,
+            #     shape=output_data.shape,
+            # )
         else:
+            ctx.original_output_shape = output.shape
             output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
-    elif q_format == "bshd":
-        # (bs)hd -> bs(hd)
-        output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
-    elif q_format == "thd":
-        # thd -> t(hd)
-        output = output.reshape(output.shape[0], -1)
+    else:
+        raise NotImplementedError("FlashAttention does not support q_format != sbhd.")
+    # elif q_format == "bshd":
+    #     # (bs)hd -> bs(hd)
+    #     output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
+    # elif q_format == "thd":
+    #     # thd -> t(hd)
+    #     output = output.reshape(output.shape[0], -1)
 
     return output.contiguous() 
+
+def flash_attention_backward(
+    ctx: OperationContext,
+    grad_output: torch.Tensor,
+    qkv_format: str,
+    q_format: str,
+    context_parallel: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Backward pass for FlashAttention that reverses all forward transformations."""
+
+    # Step 1: Reverse the final output format transformations
+    if q_format == "sbhd":
+        grad_output_transformed = grad_output.transpose(0, 1).contiguous()
+        original_shape = ctx.original_output_shape
+        grad_output_transformed = grad_output_transformed.view(original_shape)
+    else:
+        raise NotImplementedError("FlashAttention only supports q_format == 'sbhd'.")
+
+    # Step 2: Call the FlashAttention backward function
+    if context_parallel:
+        raise NotImplementedError("Context parallelism backward is not supported.")
+    else:
+        dq, dk, dv, _, _, _, _, _, _, _, _  = flash_attn_func_backward(ctx, grad_output_transformed)
+
+    # Step 3: Reverse the input tensor format transformations
+    if qkv_format == "sbhd":
+        dq, dk, dv = [x.transpose(0, 1).contiguous() for x in (dq, dk, dv)]
+    else:
+        raise NotImplementedError("Simplified FlashAttention only supports qkv_format == 'sbhd'.")
+
+    return dq, dk, dv 

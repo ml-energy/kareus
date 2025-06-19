@@ -6,6 +6,52 @@ sys.path.append("/workspaces/Kareus")
 
 import torch
 import traceback
+import dataclasses
+from typing import Optional
+
+@dataclasses.dataclass
+class OperationContext:
+    """State needed to apply an operation
+
+    Saves state from forward pass for use in backward pass.
+
+    """
+
+    # Tensors that have been saved from forward function
+    # Note: Available in the backward function, matching tensors from
+    # to_save.
+    saved_tensors: Optional[tuple[Optional[torch.Tensor], ...]] = None
+    # Tensors to save for backward function
+    # Note: Expected to be set in the forward function, either
+    # directly or with save_for_backward.
+    to_save: Optional[tuple[Optional[torch.Tensor], ...]] = None
+
+    # Corresponding range in pipeline's list of saved tensors
+    _saved_tensors_range: Optional[tuple[int, int]] = None
+
+    # Whether backward pass is required
+    requires_grad: bool = True
+
+    def save_for_backward(self, *tensors: Optional[torch.Tensor]) -> None:
+        """Register tensors to be saved for the backward function
+
+        Expected to be called in the forward function.
+
+        """
+        self.to_save = tensors
+
+class MockBackwardContext:
+    """Mock context object that mimics the structure expected by FlashAttnFunc.backward"""
+    def __init__(self, saved_tensors, dropout_p, softmax_scale, causal, window_size, 
+                 softcap, alibi_slopes, deterministic):
+        self.saved_tensors = saved_tensors
+        self.dropout_p = dropout_p
+        self.softmax_scale = softmax_scale
+        self.causal = causal
+        self.window_size = window_size
+        self.softcap = softcap
+        self.alibi_slopes = alibi_slopes
+        self.deterministic = deterministic
 
 def test_custom_flash_attn():
     """Test custom flash_attn_func and save output."""
@@ -38,16 +84,19 @@ def test_custom_flash_attn():
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
+
+    ctx = OperationContext()
     
     print(f"Input tensor shapes: {q.shape}")
     print(f"Input tensor device: {q.device}")
     print(f"Input tensor dtype: {q.dtype}")
+    print(f"Manual backward testing enabled")
     
     try:
-        # Import custom flash_attn_func
+        # Import custom flash_attn_func and backward function
         print("\n📦 Importing custom flash_attn_func...")
-        from kareus.flash_attn.flash_attn_interface import flash_attn_func
-        print("✅ Successfully imported custom flash_attn_func")
+        from kareus.flash_attn.flash_attn_interface import flash_attn_func, flash_attn_func_backward
+        print("✅ Successfully imported custom flash_attn_func and flash_attn_func_backward")
         
         # Test different configurations
         test_configs = [
@@ -65,27 +114,117 @@ def test_custom_flash_attn():
             print(f"   Parameters: {config}")
             
             try:
-                with torch.no_grad():
-                    output = flash_attn_func(q, k, v, **config)
+                # Forward pass - need to create a mock context to capture saved tensors
+                class ForwardContext:
+                    def __init__(self):
+                        self.saved_tensors = None
+                        self.dropout_p = None
+                        self.softmax_scale = None
+                        self.causal = None
+                        self.window_size = None
+                        self.softcap = None
+                        self.alibi_slopes = None
+                        self.deterministic = None
+                    
+                    def save_for_backward(self, *tensors):
+                        self.saved_tensors = tensors
                 
-                # Validate output
+                # Call forward pass using the FlashAttnFunc class directly to capture context
+                from kareus.flash_attn.flash_attn_interface import FlashAttnFunc
+                
+                forward_ctx = ForwardContext()
+                
+                # Set default parameters
+                dropout_p = config.get('dropout_p', 0.0)
+                softmax_scale = config.get('softmax_scale', None)
+                causal = config.get('causal', False)
+                window_size = config.get('window_size', (-1, -1))
+                softcap = config.get('softcap', 0.0)
+                alibi_slopes = config.get('alibi_slopes', None)
+                deterministic = config.get('deterministic', False)
+                return_softmax = config.get('return_softmax', False)
+                
+                output = FlashAttnFunc.forward(
+                    forward_ctx,
+                    q, k, v,
+                    dropout_p,
+                    softmax_scale,
+                    causal,
+                    window_size,
+                    softcap,
+                    alibi_slopes,
+                    deterministic,
+                    return_softmax
+                )
+                
+                # Validate forward output
                 assert output.shape == q.shape, f"Shape mismatch: {output.shape} vs {q.shape}"
                 assert not torch.isnan(output).any(), "Output contains NaN"
                 assert not torch.isinf(output).any(), "Output contains Inf"
                 
+                # Backward pass - manually call backward function
+                print("   🔄 Testing backward pass...")
+                
+                # Create gradient output (simulating loss.backward())
+                grad_output = torch.ones_like(output)
+                
+                # Create mock backward context with saved tensors and parameters
+                backward_ctx = MockBackwardContext(
+                    saved_tensors=forward_ctx.saved_tensors,
+                    dropout_p=forward_ctx.dropout_p,
+                    softmax_scale=forward_ctx.softmax_scale,
+                    causal=forward_ctx.causal,
+                    window_size=forward_ctx.window_size,
+                    softcap=forward_ctx.softcap,
+                    alibi_slopes=forward_ctx.alibi_slopes,
+                    deterministic=forward_ctx.deterministic
+                )
+                
+                # Call backward function manually
+                dq, dk, dv = FlashAttnFunc.backward(backward_ctx, grad_output)[:3]
+                
+                # Validate gradients
+                assert dq is not None, "dq is None"
+                assert dk is not None, "dk is None"
+                assert dv is not None, "dv is None"
+                
+                assert dq.shape == q.shape, f"dq shape mismatch: {dq.shape} vs {q.shape}"
+                assert dk.shape == k.shape, f"dk shape mismatch: {dk.shape} vs {k.shape}"
+                assert dv.shape == v.shape, f"dv shape mismatch: {dv.shape} vs {v.shape}"
+                
+                assert not torch.isnan(dq).any(), "dq contains NaN"
+                assert not torch.isnan(dk).any(), "dk contains NaN" 
+                assert not torch.isnan(dv).any(), "dv contains NaN"
+                
+                assert not torch.isinf(dq).any(), "dq contains Inf"
+                assert not torch.isinf(dk).any(), "dk contains Inf"
+                assert not torch.isinf(dv).any(), "dv contains Inf"
+                
                 # Store results
                 results[config_name] = {
-                    'output': output.cpu(),
+                    'output': output.detach().cpu(),
+                    'q_grad': dq.detach().cpu(),
+                    'k_grad': dk.detach().cpu(), 
+                    'v_grad': dv.detach().cpu(),
                     'config': config.copy(),
                     'shape': output.shape,
                     'min': output.min().item(),
                     'max': output.max().item(),
                     'mean': output.mean().item(),
-                    'std': output.std().item()
+                    'std': output.std().item(),
+                    'grad_stats': {
+                        'q_grad_norm': dq.norm().item(),
+                        'k_grad_norm': dk.norm().item(),
+                        'v_grad_norm': dv.norm().item(),
+                        'q_grad_mean': dq.mean().item(),
+                        'k_grad_mean': dk.mean().item(),
+                        'v_grad_mean': dv.mean().item(),
+                    }
                 }
                 
-                print(f"   ✅ Success! Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
+                print(f"   ✅ Forward Success! Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
                 print(f"   📊 Mean: {output.mean().item():.4f}, Std: {output.std().item():.4f}")
+                print(f"   ✅ Backward Success! Gradient norms: q={dq.norm().item():.4f}, k={dk.norm().item():.4f}, v={dv.norm().item():.4f}")
                 
             except Exception as e:
                 print(f"   ❌ Failed: {e}")
@@ -94,9 +233,9 @@ def test_custom_flash_attn():
         
         # Save input tensors and results
         save_data = {
-            'input_q': q.cpu(),
-            'input_k': k.cpu(), 
-            'input_v': v.cpu(),
+            'input_q': q.detach().cpu(),
+            'input_k': k.detach().cpu(), 
+            'input_v': v.detach().cpu(),
             'results': results,
             'test_config': {
                 'batch_size': batch_size,
@@ -104,7 +243,9 @@ def test_custom_flash_attn():
                 'num_heads': num_heads,
                 'head_dim': head_dim,
                 'dtype': str(dtype),
-                'device': str(device)
+                'device': str(device),
+                'requires_grad': False,
+                'manual_backward': True
             }
         }
         

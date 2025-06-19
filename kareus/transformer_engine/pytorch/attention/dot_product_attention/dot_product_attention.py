@@ -12,7 +12,7 @@ import logging
 
 import torch
 
-import transformer_engine_torch as tex
+# import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
@@ -717,6 +717,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "thd",
             ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
             batch_size = None
+            print("qkv_format", qkv_format)
             if qkv_format in ["sbhd", "bshd"]:
                 assert all(
                     len(x.shape) == 4 for x in (query_layer, key_layer, value_layer)
@@ -1023,6 +1024,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
+                print("running flash attention")
+                print(query_layer.shape, key_layer.shape, value_layer.shape)
+                if attention_mask is not None:
+                    print("attention_mask", attention_mask.shape)
+                if cu_seqlens_q is not None:
+                    print("cu_seqlens_q", cu_seqlens_q.shape)
+                if cu_seqlens_kv is not None:
+                    print("cu_seqlens_kv", cu_seqlens_kv.shape)
                 return self.flash_attention(
                     query_layer,
                     key_layer,

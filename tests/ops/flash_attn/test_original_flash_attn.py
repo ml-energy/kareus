@@ -27,9 +27,9 @@ def test_original_flash_attn():
     torch.manual_seed(42)
     torch.cuda.manual_seed(42) if torch.cuda.is_available() else None
     
-    q = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype, requires_grad=False)
-    k = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype, requires_grad=False)
-    v = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype, requires_grad=False)
+    q = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype, requires_grad=True)
+    k = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype, requires_grad=True)
+    v = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype, requires_grad=True)
     
     # Ensure tensors are contiguous
     q = q.contiguous()
@@ -39,6 +39,7 @@ def test_original_flash_attn():
     print(f"Input tensor shapes: {q.shape}")
     print(f"Input tensor device: {q.device}")
     print(f"Input tensor dtype: {q.dtype}")
+    print(f"Autograd backward testing enabled")
     
     try:
         # Import original flash_attn_func
@@ -62,27 +63,66 @@ def test_original_flash_attn():
             print(f"   Parameters: {config}")
             
             try:
-                with torch.no_grad():
-                    output = flash_attn_func(q, k, v, **config)
+                # Clear gradients
+                if q.grad is not None:
+                    q.grad.zero_()
+                if k.grad is not None:
+                    k.grad.zero_()
+                if v.grad is not None:
+                    v.grad.zero_()
                 
-                # Validate output
+                # Forward pass
+                output = flash_attn_func(q, k, v, **config)
+                
+                # Validate forward output
                 assert output.shape == q.shape, f"Shape mismatch: {output.shape} vs {q.shape}"
                 assert not torch.isnan(output).any(), "Output contains NaN"
                 assert not torch.isinf(output).any(), "Output contains Inf"
                 
+                # Backward pass using autograd
+                print("   🔄 Testing backward pass...")
+                # Create gradient output (same as manual test for consistency)
+                grad_output = torch.ones_like(output)
+                output.backward(grad_output)
+                
+                # Validate gradients
+                assert q.grad is not None, "q.grad is None"
+                assert k.grad is not None, "k.grad is None"
+                assert v.grad is not None, "v.grad is None"
+                
+                assert not torch.isnan(q.grad).any(), "q.grad contains NaN"
+                assert not torch.isnan(k.grad).any(), "k.grad contains NaN" 
+                assert not torch.isnan(v.grad).any(), "v.grad contains NaN"
+                
+                assert not torch.isinf(q.grad).any(), "q.grad contains Inf"
+                assert not torch.isinf(k.grad).any(), "k.grad contains Inf"
+                assert not torch.isinf(v.grad).any(), "v.grad contains Inf"
+                
                 # Store results
                 results[config_name] = {
-                    'output': output.cpu(),
+                    'output': output.detach().cpu(),
+                    'q_grad': q.grad.detach().cpu(),
+                    'k_grad': k.grad.detach().cpu(), 
+                    'v_grad': v.grad.detach().cpu(),
                     'config': config.copy(),
                     'shape': output.shape,
                     'min': output.min().item(),
                     'max': output.max().item(),
                     'mean': output.mean().item(),
-                    'std': output.std().item()
+                    'std': output.std().item(),
+                    'grad_stats': {
+                        'q_grad_norm': q.grad.norm().item(),
+                        'k_grad_norm': k.grad.norm().item(),
+                        'v_grad_norm': v.grad.norm().item(),
+                        'q_grad_mean': q.grad.mean().item(),
+                        'k_grad_mean': k.grad.mean().item(),
+                        'v_grad_mean': v.grad.mean().item(),
+                    }
                 }
                 
-                print(f"   ✅ Success! Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
+                print(f"   ✅ Forward Success! Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
                 print(f"   📊 Mean: {output.mean().item():.4f}, Std: {output.std().item():.4f}")
+                print(f"   ✅ Backward Success! Gradient norms: q={q.grad.norm().item():.4f}, k={k.grad.norm().item():.4f}, v={v.grad.norm().item():.4f}")
                 
             except Exception as e:
                 print(f"   ❌ Failed: {e}")
@@ -91,9 +131,9 @@ def test_original_flash_attn():
         
         # Save input tensors and results
         save_data = {
-            'input_q': q.cpu(),
-            'input_k': k.cpu(), 
-            'input_v': v.cpu(),
+            'input_q': q.detach().cpu(),
+            'input_k': k.detach().cpu(), 
+            'input_v': v.detach().cpu(),
             'results': results,
             'test_config': {
                 'batch_size': batch_size,
@@ -101,7 +141,9 @@ def test_original_flash_attn():
                 'num_heads': num_heads,
                 'head_dim': head_dim,
                 'dtype': str(dtype),
-                'device': str(device)
+                'device': str(device),
+                'requires_grad': True,
+                'manual_backward': False
             }
         }
         
