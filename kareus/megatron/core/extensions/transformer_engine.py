@@ -793,6 +793,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                 core_attention_bias_type='post_scale_bias', core_attention_bias=attention_bias
             )
 
+        print(f"self.te_forward_mask_type: {self.te_forward_mask_type}")
         if self.te_forward_mask_type:
             if qkv_format == 'thd' and is_te_min_version("1.7.0"):
                 # thd format uses flash attention with cuDNN kernel which requires is_padding=True,
@@ -802,6 +803,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                     attn_mask_type = AttnMaskType.padding_causal
                 elif attn_mask_type == AttnMaskType.no_mask:
                     attn_mask_type = AttnMaskType.padding
+            print(f"attn_mask_type: {attn_mask_type}")
             core_attn_out = super().forward(
                 query,
                 key,

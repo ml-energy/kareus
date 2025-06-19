@@ -48,12 +48,12 @@ from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs, co
 from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
-from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
+from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttentionOp
 
 
-class TEDotProductAttention(DotProductAttention):
+class TEFusibleDotProductAttention(DotProductAttentionOp):
     """
-    Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
+    Wrapper for the Transformer-Engine's `DotProductAttentionOp` layer that also
     has "flash attention" enabled.
 
     Note that if Megatron's parallel_state has not been initialized yet, the
@@ -113,13 +113,13 @@ class TEDotProductAttention(DotProductAttention):
             assert is_te_min_version(
                 "1.0.0"
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
-            if getattr(TEDotProductAttention, "cp_stream") is None:
-                TEDotProductAttention.cp_stream = torch.cuda.Stream()
+            if getattr(DotProductAttentionOp, "cp_stream") is None:
+                DotProductAttentionOp.cp_stream = torch.cuda.Stream()
             extra_kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
             extra_kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(
                 check_initialized=False
             )
-            extra_kwargs["cp_stream"] = TEDotProductAttention.cp_stream
+            extra_kwargs["cp_stream"] = DotProductAttentionOp.cp_stream
             if is_te_min_version("1.10.0"):
                 if cp_comm_type is None:
                     extra_kwargs["cp_comm_type"] = "p2p"
@@ -242,6 +242,13 @@ class TEDotProductAttention(DotProductAttention):
                 core_attention_bias_type='post_scale_bias', core_attention_bias=attention_bias
             )
 
+        # Prepare kwargs for DotProductAttentionOp call
+        forward_kwargs = {
+            'attention_mask': attention_mask,
+            **attention_bias_kwargs,
+            **packed_seq_kwargs,
+        }
+
         if self.te_forward_mask_type:
             if qkv_format == 'thd' and is_te_min_version("1.7.0"):
                 # thd format uses flash attention with cuDNN kernel which requires is_padding=True,
@@ -251,19 +258,9 @@ class TEDotProductAttention(DotProductAttention):
                     attn_mask_type = AttnMaskType.padding_causal
                 elif attn_mask_type == AttnMaskType.no_mask:
                     attn_mask_type = AttnMaskType.padding
-            core_attn_out = super().forward(
-                query,
-                key,
-                value,
-                attention_mask,
-                attn_mask_type=attn_mask_type.name,
-                **attention_bias_kwargs,
-                **packed_seq_kwargs,
-            )
-        else:
-            core_attn_out = super().forward(
-                query, key, value, attention_mask, **attention_bias_kwargs, **packed_seq_kwargs
-            )
+            forward_kwargs['attn_mask_type'] = attn_mask_type.name
+
+        core_attn_out = super().forward(query, key, value, **forward_kwargs)
 
         if self.config.apply_rope_fusion and qkv_format == 'bshd':
             return core_attn_out.transpose(0, 1)

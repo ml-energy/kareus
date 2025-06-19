@@ -49,7 +49,8 @@ from kareus.megatron.core.extensions.te_linear import (
     TEFusibleColumnParallelLinear,
     TEFusibleRowParallelLinear,
 )
-from kareus.megatron.core.extensions.te_attention import TEDotProductAttention
+# from kareus.megatron.core.extensions.transformer_engine import TEDotProductAttention
+from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 
 HAVE_TE = True
 # except ImportError:
@@ -162,7 +163,8 @@ def get_gpt_layer_with_transformer_engine_spec(
                     submodules=SelfAttentionSubmodules(
                         # linear_qkv=TEColumnParallelLinear,
                         linear_qkv=TEFusibleColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
+                        # core_attention=TEDotProductAttention,
+                        core_attention=TEFusibleDotProductAttention,
                         # linear_proj=TERowParallelLinear,
                         linear_proj=TEFusibleRowParallelLinear,
                         q_layernorm=(
