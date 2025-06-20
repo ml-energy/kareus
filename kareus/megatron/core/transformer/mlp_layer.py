@@ -101,6 +101,7 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
             hidden_states = self.prev_self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 hidden_states, residual, self.hidden_dropout
             )
+        exit()
         
         # Residual connection.
         residual = hidden_states

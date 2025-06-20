@@ -51,6 +51,7 @@ from kareus.megatron.core.extensions.te_linear import (
 )
 # from kareus.megatron.core.extensions.transformer_engine import TEDotProductAttention
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
+from kareus.megatron.core.extensions.te_bias_dropout_add import te_fusible_get_bias_dropout_add
 
 HAVE_TE = True
 # except ImportError:
@@ -175,7 +176,8 @@ def get_gpt_layer_with_transformer_engine_spec(
                         ),
                     ),
                 ),
-                self_attn_bda=get_bias_dropout_add,
+                # self_attn_bda=get_bias_dropout_add,
+                self_attn_bda=te_fusible_get_bias_dropout_add,
                 pre_mlp_layernorm=TENorm if num_experts else IdentityOp,
                 mlp=mlp,
                 mlp_bda=get_bias_dropout_add,
