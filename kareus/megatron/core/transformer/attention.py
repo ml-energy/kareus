@@ -49,14 +49,15 @@ except:
     flash_attn_with_kvcache = None
 
 
-try:
-    import transformer_engine  # pylint: disable=unused-import
+# try:
+import transformer_engine  # pylint: disable=unused-import
 
-    HAVE_TE = True
-    from megatron.core.extensions.transformer_engine import SplitAlongDim
-except ImportError:
-    HAVE_TE = False
-    SplitAlongDim = None
+HAVE_TE = True
+from transformer_engine.pytorch.ops.fuser import OperationFuser
+from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp, create_qkv_postprocess_op
+# except ImportError:
+#     HAVE_TE = False
+#     SplitAlongDim = None
 
 
 @dataclass
@@ -728,6 +729,17 @@ class SelfAttention(Attention):
         else:
             self.k_layernorm = None
 
+        self.qkv_postprocess_op = create_qkv_postprocess_op(
+            num_query_groups_per_partition=self.num_query_groups_per_partition,
+            num_attention_heads_per_partition=self.num_attention_heads_per_partition,
+            hidden_size_per_attention_head=self.hidden_size_per_attention_head,
+            q_layernorm=self.q_layernorm,
+            k_layernorm=self.k_layernorm,
+            run_tests_fn=self.run_realtime_tests,
+            test_mode=self.config.test_mode,
+        )
+        # self.qkv_fuser = OperationFuser([self.qkv_postprocess_op])
+
     def run_realtime_tests(self):
         """Performs a consistency check.
 
@@ -809,50 +821,47 @@ class SelfAttention(Attention):
         mixed_qkv, _ = self.linear_qkv(hidden_states)
         # save_tensors(mixed_qkv, "linear_qkv_output", "te")
 
-        # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
-        new_tensor_shape = mixed_qkv.size()[:-1] + (
-            self.num_query_groups_per_partition,
-            (
-                (self.num_attention_heads_per_partition // self.num_query_groups_per_partition + 2)
-                * self.hidden_size_per_attention_head
-            ),
-        )
-        mixed_qkv = mixed_qkv.view(*new_tensor_shape)
-
-        split_arg_list = [
-            (
-                self.num_attention_heads_per_partition
-                // self.num_query_groups_per_partition
-                * self.hidden_size_per_attention_head
-            ),
-            self.hidden_size_per_attention_head,
-            self.hidden_size_per_attention_head,
-        ]
-
-        if SplitAlongDim is not None:
-
-            # [sq, b, ng, (np/ng + 2) * hn]
-            # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
-            (query, key, value) = SplitAlongDim(mixed_qkv, 3, split_arg_list)
-        else:
-
-            # [sq, b, ng, (np/ng + 2) * hn]
-            # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
-            (query, key, value) = torch.split(mixed_qkv, split_arg_list, dim=3)
-
-        # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
-        query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
-
-        if self.q_layernorm is not None:
-            query = self.q_layernorm(query)
-
-        if self.k_layernorm is not None:
-            key = self.k_layernorm(key)
-
-        if self.config.test_mode:
-            self.run_realtime_tests()
-
+        query, key, value = self.qkv_postprocess_op(mixed_qkv)
+        exit()
         return query, key, value
+
+        # # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
+        # new_tensor_shape = mixed_qkv.size()[:-1] + (
+        #     self.num_query_groups_per_partition,
+        #     (
+        #         (self.num_attention_heads_per_partition // self.num_query_groups_per_partition + 2)
+        #         * self.hidden_size_per_attention_head
+        #     ),
+        # )
+        # mixed_qkv = mixed_qkv.view(*new_tensor_shape)
+
+        # split_arg_list = [
+        #     (
+        #         self.num_attention_heads_per_partition
+        #         // self.num_query_groups_per_partition
+        #         * self.hidden_size_per_attention_head
+        #     ),
+        #     self.hidden_size_per_attention_head,
+        #     self.hidden_size_per_attention_head,
+        # ]
+
+        # # [sq, b, ng, (np/ng + 2) * hn]
+        # # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
+        # (query, key, value) = torch.split(mixed_qkv, split_arg_list, dim=3)
+
+        # # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
+        # query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
+
+        # if self.q_layernorm is not None:
+        #     query = self.q_layernorm(query)
+
+        # if self.k_layernorm is not None:
+        #     key = self.k_layernorm(key)
+
+        # if self.config.test_mode:
+        #     self.run_realtime_tests()
+
+        # return query, key, value
 
 
 class CrossAttention(Attention):

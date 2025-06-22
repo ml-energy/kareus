@@ -154,6 +154,8 @@ def get_gpt_layer_with_transformer_engine_spec(
         # for QKLayerNorm if TE Version < 1.9;
         # we instead use the Apex implementation.
         qk_norm = TENorm if is_te_min_version("1.9.0") else FusedLayerNorm
+        if qk_l2_norm or qk_layernorm:
+            raise NotImplementedError("qk_l2_norm and qk_layernorm not supported")
         return ModuleSpec(
             module=TransformerLayer,
             submodules=TransformerLayerSubmodules(
@@ -168,12 +170,12 @@ def get_gpt_layer_with_transformer_engine_spec(
                         core_attention=TEFusibleDotProductAttention,
                         # linear_proj=TERowParallelLinear,
                         linear_proj=TEFusibleRowParallelLinear,
-                        q_layernorm=(
-                            L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
-                        ),
-                        k_layernorm=(
-                            L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
-                        ),
+                        # q_layernorm=(
+                        #     L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                        # ),
+                        # k_layernorm=(
+                        #     L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                        # ),
                     ),
                 ),
                 # self_attn_bda=get_bias_dropout_add,
@@ -279,7 +281,8 @@ def get_gpt_layer_local_spec(
                 self_attn_bda=get_bias_dropout_add,
                 pre_mlp_layernorm=LNImpl,
                 mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
+                # mlp_bda=get_bias_dropout_add,
+                mlp_bda=te_fusible_get_bias_dropout_add,
                 sharded_state_dict_keys_map={
                     'input_layernorm.': 'self_attention.linear_qkv.layer_norm_',
                     'pre_mlp_layernorm.': 'mlp.linear_fc1.layer_norm_',
@@ -328,8 +331,10 @@ def get_mlp_module_spec(
         return ModuleSpec(
             module=MLP,
             submodules=MLPSubmodules(
-                linear_fc1=TELayerNormColumnParallelLinear if use_te else ColumnParallelLinear,
-                linear_fc2=TERowParallelLinear if use_te else RowParallelLinear,
+                # linear_fc1=TELayerNormColumnParallelLinear if use_te else ColumnParallelLinear,
+                linear_fc1=TEFusibleColumnParallelLinear if use_te else ColumnParallelLinear,
+                # linear_fc2=TERowParallelLinear if use_te else RowParallelLinear,
+                linear_fc2=TEFusibleRowParallelLinear if use_te else RowParallelLinear,
             ),
         )
     else:
