@@ -70,7 +70,7 @@ class RotaryEmbeddingOp(BasicOperation):
             ctx.duplicate_rotary_pos_emb = True
             rotary_pos_emb = (rotary_pos_emb,) * 2
         else:
-            raise ValueError("rotary_pos_emb cannot be a tuple of two tensors")
+            raise ValueError("rotary_pos_emb cannot be None ora tuple of two tensors")
         
         if rotary_pos_emb is not None and not self.config.flash_decode:
             q_pos_emb, k_pos_emb = rotary_pos_emb

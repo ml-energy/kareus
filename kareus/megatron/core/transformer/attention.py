@@ -583,6 +583,8 @@ class Attention(MegatronModule, ABC):
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
+        if rotary_pos_emb is not None:
+            query, key = self.rotary_embedding_op(query, key, rotary_pos_emb)
         # For self attention we just duplicate the rotary_pos_emb if it isn't already
 
         # if rotary_pos_emb is not None and not isinstance(rotary_pos_emb, tuple):
