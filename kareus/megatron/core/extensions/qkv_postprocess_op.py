@@ -285,7 +285,7 @@ class QKVPostProcessOp(BasicOperation):
             basic_op_ctxs[0], grad_output, grad_key, grad_value
         )
         
-        return grad_mixed_qkv, [], [(grad_key, grad_value)]
+        return grad_mixed_qkv, [], [()]
 
 
 def create_qkv_postprocess_op(

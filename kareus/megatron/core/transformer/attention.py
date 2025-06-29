@@ -55,6 +55,7 @@ import transformer_engine  # pylint: disable=unused-import
 HAVE_TE = True
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp, create_qkv_postprocess_op
+from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp, create_rotary_embedding_op
 # except ImportError:
 #     HAVE_TE = False
 #     SplitAlongDim = None
@@ -124,6 +125,8 @@ class Attention(MegatronModule, ABC):
         # To support both CUDA Graphs and key value with different hidden size
         self.key_hidden_size = self.hidden_size_per_attention_head
         self.val_hidden_size = self.hidden_size_per_attention_head
+
+        self.rotary_embedding_op = create_rotary_embedding_op(self.config)
 
         self.core_attention = build_module(
             submodules.core_attention,
@@ -519,10 +522,6 @@ class Attention(MegatronModule, ABC):
         else:
             assert rotary_pos_cos is None and rotary_pos_sin is None
 
-        # For self attention we just duplicate the rotary_pos_emb if it isn't already
-        if rotary_pos_emb is not None and not isinstance(rotary_pos_emb, tuple):
-            rotary_pos_emb = (rotary_pos_emb,) * 2
-
         # =====================
         # Query, Key, and Value
         # =====================
@@ -542,75 +541,82 @@ class Attention(MegatronModule, ABC):
             and inference_context.is_decode_only()
             and not self.training
             and rotary_pos_cos is not None
-        ):
-            assert self.layer_number in inference_context.key_value_memory_dict
-            assert inference_context.sequence_len_offset is not None
-            inference_key_memory, inference_value_memory = inference_context.key_value_memory_dict[
-                self.layer_number
-            ]
-            output = self.flash_decode(
-                sequence_len_offset=sequence_len_offset,
-                query_layer=query,
-                key_layer=key,
-                value_layer=value,
-                inference_key_memory=inference_key_memory,
-                inference_value_memory=inference_value_memory,
-                rotary_cos=rotary_pos_cos,
-                rotary_sin=rotary_pos_sin,
-            )
-            out = output.transpose(0, 1).contiguous()
-            context_layer = out.view(out.size(0), out.size(1), -1)
-            output, bias = self.linear_proj(context_layer)
-            return output, bias
+        ):  
+            raise NotImplementedError("Flash decoding is not implemented.")
+            # assert self.layer_number in inference_context.key_value_memory_dict
+            # assert inference_context.sequence_len_offset is not None
+            # inference_key_memory, inference_value_memory = inference_context.key_value_memory_dict[
+            #     self.layer_number
+            # ]
+            # output = self.flash_decode(
+            #     sequence_len_offset=sequence_len_offset,
+            #     query_layer=query,
+            #     key_layer=key,
+            #     value_layer=value,
+            #     inference_key_memory=inference_key_memory,
+            #     inference_value_memory=inference_value_memory,
+            #     rotary_cos=rotary_pos_cos,
+            #     rotary_sin=rotary_pos_sin,
+            # )
+            # out = output.transpose(0, 1).contiguous()
+            # context_layer = out.view(out.size(0), out.size(1), -1)
+            # output, bias = self.linear_proj(context_layer)
+            # return output, bias
 
-        query, key, value, rotary_pos_emb, attn_mask_type = self._adjust_key_value_for_inference(
-            inference_context,
-            query,
-            key,
-            value,
-            rotary_pos_emb,
-            rotary_pos_cos,
-            rotary_pos_sin,
-            sequence_len_offset,
-        )
+        # query, key, value, rotary_pos_emb, attn_mask_type = self._adjust_key_value_for_inference(
+        #     inference_context,
+        #     query,
+        #     key,
+        #     value,
+        #     rotary_pos_emb,
+        #     rotary_pos_cos,
+        #     rotary_pos_sin,
+        #     sequence_len_offset,
+        # )
 
         if packed_seq_params is not None:
-            query = query.squeeze(1)
-            key = key.squeeze(1)
-            value = value.squeeze(1)
+            raise NotImplementedError("Packed sequence params are not implemented.")
+            # query = query.squeeze(1)
+            # key = key.squeeze(1)
+            # value = value.squeeze(1)
 
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
-        if rotary_pos_emb is not None and not self.config.flash_decode:
-            q_pos_emb, k_pos_emb = rotary_pos_emb
+        # For self attention we just duplicate the rotary_pos_emb if it isn't already
 
-            if packed_seq_params is not None:
-                if packed_seq_params.cu_seqlens_q_padded is not None:
-                    cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded
-                else:
-                    cu_seqlens_q = packed_seq_params.cu_seqlens_q
-                if packed_seq_params.cu_seqlens_kv_padded is not None:
-                    cu_seqlens_kv = packed_seq_params.cu_seqlens_kv_padded
-                else:
-                    cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
-            else:
-                cu_seqlens_q = cu_seqlens_kv = None
+        # if rotary_pos_emb is not None and not isinstance(rotary_pos_emb, tuple):
+        #     rotary_pos_emb = (rotary_pos_emb,) * 2
 
-            if q_pos_emb is not None:
-                # TODO VIJAY: simplify
-                if inference_context is None or inference_context.is_static_batching():
-                    query = apply_rotary_pos_emb(
-                        query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q
-                    )
-                else:
-                    query = inference_context.apply_rotary_emb_query(
-                        query, q_pos_emb, self.config, cu_seqlens_q
-                    )
-            if k_pos_emb is not None:
-                key = apply_rotary_pos_emb(
-                    key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv
-                )
+        # if rotary_pos_emb is not None and not self.config.flash_decode:
+        #     q_pos_emb, k_pos_emb = rotary_pos_emb
+
+        #     if packed_seq_params is not None:
+        #         if packed_seq_params.cu_seqlens_q_padded is not None:
+        #             cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded
+        #         else:
+        #             cu_seqlens_q = packed_seq_params.cu_seqlens_q
+        #         if packed_seq_params.cu_seqlens_kv_padded is not None:
+        #             cu_seqlens_kv = packed_seq_params.cu_seqlens_kv_padded
+        #         else:
+        #             cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
+        #     else:
+        #         cu_seqlens_q = cu_seqlens_kv = None
+
+        #     if q_pos_emb is not None:
+        #         # TODO VIJAY: simplify
+        #         if inference_context is None or inference_context.is_static_batching():
+        #             query = apply_rotary_pos_emb(
+        #                 query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q
+        #             )
+        #         else:
+        #             query = inference_context.apply_rotary_emb_query(
+        #                 query, q_pos_emb, self.config, cu_seqlens_q
+        #             )
+        #     if k_pos_emb is not None:
+        #         key = apply_rotary_pos_emb(
+        #             key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv
+        #         )
 
             # TODO, can apply positional embedding to value_layer so it has
             # absolute positional embedding.
@@ -621,16 +627,18 @@ class Attention(MegatronModule, ABC):
         # core attention computation
         # ==================================
 
+        attn_mask_type = self.attn_mask_type
         if self.checkpoint_core_attention and self.training:
-            core_attn_out = self._checkpointed_attention_forward(
-                query,
-                key,
-                value,
-                attention_mask,
-                attn_mask_type=attn_mask_type,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
+            raise NotImplementedError("Checkpointed attention is not implemented.")
+            # core_attn_out = self._checkpointed_attention_forward(
+            #     query,
+            #     key,
+            #     value,
+            #     attention_mask,
+            #     attn_mask_type=attn_mask_type,
+            #     attention_bias=attention_bias,
+            #     packed_seq_params=packed_seq_params,
+            # )
         else:
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
@@ -645,6 +653,7 @@ class Attention(MegatronModule, ABC):
                 )
 
             else:
+                raise NotImplementedError("Dynamic batching attention kernel is not implemented.")
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
@@ -657,11 +666,12 @@ class Attention(MegatronModule, ABC):
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
+            raise NotImplementedError("Packed sequence params are not implemented.")
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
             # t is the pack size = sum (sq_i)
             # note that batch is a dummy dimension in the packed case
-            core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
+            # core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
 
         # =================
         # Output. [sq, b, h]
@@ -822,7 +832,7 @@ class SelfAttention(Attention):
         # save_tensors(mixed_qkv, "linear_qkv_output", "te")
 
         query, key, value = self.qkv_postprocess_op(mixed_qkv)
-        exit()
+        # exit()
         return query, key, value
 
         # # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
