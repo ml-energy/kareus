@@ -91,7 +91,8 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             raise NotImplementedError("Selective recompute not implemented")
         
         # Set bias+dropout+add fusion grad_enable execution handler.
-        self.bias_dropout_add_exec_handler = torch.enable_grad
+        # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
+        # self.bias_dropout_add_exec_handler = torch.enable_grad
         
     def forward(
         self,
@@ -122,10 +123,10 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if not self.is_first_layer:
-            with self.bias_dropout_add_exec_handler():
-                hidden_states = self.prev_mlp_bda(self.training, self.config.bias_dropout_fusion)(
-                    hidden_states, residual, self.hidden_dropout
-                )
+            # with self.bias_dropout_add_exec_handler():
+            hidden_states = self.prev_mlp_bda(self.training, self.config.bias_dropout_fusion)(
+                hidden_states, residual, self.hidden_dropout
+            )
             # hidden_states = make_viewless_tensor(
             #     inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
             # )

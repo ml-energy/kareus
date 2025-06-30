@@ -115,26 +115,28 @@ class BiasDropoutAddOp(BasicOperation):
         assert input_.dtype == bias.dtype == residual.dtype, \
             "Input, bias and residual must have the same data type!"
         
-        # Generate dropout mask if needed
-        mask = None
-        if training and dropout_prob > 0.0:
-            # Generate dropout mask
-            noise = torch.rand_like(input_)
-            keep_mask = noise >= dropout_prob
+        # Enable gradients for proper JIT compilation and mixed precision compatibility
+        with torch.enable_grad():
+            # Generate dropout mask if needed
+            mask = None
+            if training and dropout_prob > 0.0:
+                # Generate dropout mask
+                noise = torch.rand_like(input_)
+                keep_mask = noise >= dropout_prob
+                
+                if dropout_prob < 1.0:
+                    # Scale by 1/(1-p) for unbiased estimation
+                    mask = keep_mask.to(dtype=input_.dtype) / (1.0 - dropout_prob)
+                else:
+                    mask = torch.zeros_like(input_)
             
-            if dropout_prob < 1.0:
-                # Scale by 1/(1-p) for unbiased estimation
-                mask = keep_mask.to(dtype=input_.dtype) / (1.0 - dropout_prob)
-            else:
-                mask = torch.zeros_like(input_)
-        
-        # Call compiled forward function
-        output = fused_bias_dropout_add_forward(
-            x=input_,
-            bias=bias,
-            residual=residual,
-            mask=mask
-        )
+            # Call compiled forward function
+            output = fused_bias_dropout_add_forward(
+                x=input_,
+                bias=bias,
+                residual=residual,
+                mask=mask
+            )
 
         # Save context for backward pass
         ctx.has_bias = bias is not None

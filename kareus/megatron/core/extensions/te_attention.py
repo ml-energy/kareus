@@ -178,6 +178,15 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             # These two arguments did not exist prior to 1.8.0. Full support added in 1.10.0 (#1012)
             self.kept_packed_seq_params.discard("cu_seqlens_q_padded")
             self.kept_packed_seq_params.discard("cu_seqlens_kv_padded")
+        
+        # overwrite self.qkv_format depending on self.config.apply_rope_fusion, which can be set
+        # after init
+        if self.config.apply_rope_fusion and is_te_min_version("0.13.0", check_equality=False):
+            self.qkv_format = 'bshd'
+            raise NotImplementedError("Rope fusion is not implemented")
+
+        if self.te_forward_mask_type:
+            raise NotImplementedError("TE forward mask type is not implemented")
 
         super().__init__(
             num_attention_heads=self.config.num_attention_heads,
@@ -207,62 +216,61 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
-        packed_seq_kwargs = (
-            {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
-            if packed_seq_params is not None
-            else {}
-        )
-        # overwrite self.qkv_format depending on self.config.apply_rope_fusion, which can be set
-        # after init
-        if self.config.apply_rope_fusion and is_te_min_version("0.13.0", check_equality=False):
-            self.qkv_format = 'bshd'
+        # packed_seq_kwargs = (
+        #     {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
+        #     if packed_seq_params is not None
+        #     else {}
+        # )
+        # # overwrite self.qkv_format depending on self.config.apply_rope_fusion, which can be set
+        # # after init
+        # if self.config.apply_rope_fusion and is_te_min_version("0.13.0", check_equality=False):
+        #     self.qkv_format = 'bshd'
+        # qkv_format = packed_seq_kwargs.get('qkv_format', self.qkv_format)
 
-        qkv_format = packed_seq_kwargs.get('qkv_format', self.qkv_format)
+        # # WAR for peak memory usage.
+        # # See https://gitlab-master.nvidia.com/ADLR/megatron-lm/-/merge_requests/2388
+        # if self.config.apply_rope_fusion and qkv_format == 'bshd':
+        #     query, key, value = [x.transpose(0, 1).contiguous() for x in (query, key, value)]
+        #     # In PyTorch, the following two tensors are in fact the same:
+        #     #   Tensor with shape (1, S, H, D) and stride (S*H*D, H*D, D, 1)
+        #     #   Tensor with shape (1, S, H, D) and stride (H*D, H*D, D, 1)
+        #     # Stride for a dimension that is 1 has no meaning, so tensors created two different ways
+        #     # can have same shape but different strides.
+        #     # We unify them to the first one to pass the stride check in TE
+        #     if value.shape == key.shape and value.shape[0] == 1 and value.stride() != key.stride():
+        #         value = value.as_strided(value.shape, key.stride())
 
-        # WAR for peak memory usage.
-        # See https://gitlab-master.nvidia.com/ADLR/megatron-lm/-/merge_requests/2388
-        if self.config.apply_rope_fusion and qkv_format == 'bshd':
-            query, key, value = [x.transpose(0, 1).contiguous() for x in (query, key, value)]
-            # In PyTorch, the following two tensors are in fact the same:
-            #   Tensor with shape (1, S, H, D) and stride (S*H*D, H*D, D, 1)
-            #   Tensor with shape (1, S, H, D) and stride (H*D, H*D, D, 1)
-            # Stride for a dimension that is 1 has no meaning, so tensors created two different ways
-            # can have same shape but different strides.
-            # We unify them to the first one to pass the stride check in TE
-            if value.shape == key.shape and value.shape[0] == 1 and value.stride() != key.stride():
-                value = value.as_strided(value.shape, key.stride())
-
-        attention_bias_kwargs = {}
-        if attention_bias is not None:
-            assert is_te_min_version("1.2.0"), (
-                f"Transformer-Engine v{get_te_version()} must be >= 1.2.0 to support"
-                "`attention_bias`."
-            )
-            attention_bias_kwargs = dict(
-                core_attention_bias_type='post_scale_bias', core_attention_bias=attention_bias
-            )
+        # attention_bias_kwargs = {}
+        # if attention_bias is not None:
+        #     assert is_te_min_version("1.2.0"), (
+        #         f"Transformer-Engine v{get_te_version()} must be >= 1.2.0 to support"
+        #         "`attention_bias`."
+        #     )
+        #     attention_bias_kwargs = dict(
+        #         core_attention_bias_type='post_scale_bias', core_attention_bias=attention_bias
+        #     )
 
         # Prepare kwargs for DotProductAttentionOp call
         forward_kwargs = {
             'attention_mask': attention_mask,
-            **attention_bias_kwargs,
-            **packed_seq_kwargs,
+            # **attention_bias_kwargs,
+            # **packed_seq_kwargs,
         }
 
-        if self.te_forward_mask_type:
-            if qkv_format == 'thd' and is_te_min_version("1.7.0"):
-                # thd format uses flash attention with cuDNN kernel which requires is_padding=True,
-                # so the only acceptable mask types are `padding_causal` and `padding`. These do not
-                # necessarily indicate there are padded tokens in the sequence.
-                if attn_mask_type == AttnMaskType.causal:
-                    attn_mask_type = AttnMaskType.padding_causal
-                elif attn_mask_type == AttnMaskType.no_mask:
-                    attn_mask_type = AttnMaskType.padding
-            forward_kwargs['attn_mask_type'] = attn_mask_type.name
+        # if self.te_forward_mask_type:
+        #     if qkv_format == 'thd' and is_te_min_version("1.7.0"):
+        #         # thd format uses flash attention with cuDNN kernel which requires is_padding=True,
+        #         # so the only acceptable mask types are `padding_causal` and `padding`. These do not
+        #         # necessarily indicate there are padded tokens in the sequence.
+        #         if attn_mask_type == AttnMaskType.causal:
+        #             attn_mask_type = AttnMaskType.padding_causal
+        #         elif attn_mask_type == AttnMaskType.no_mask:
+        #             attn_mask_type = AttnMaskType.padding
+        #     forward_kwargs['attn_mask_type'] = attn_mask_type.name
 
         core_attn_out = super().forward(query, key, value, **forward_kwargs)
 
-        if self.config.apply_rope_fusion and qkv_format == 'bshd':
-            return core_attn_out.transpose(0, 1)
-        else:
-            return core_attn_out
+        # if self.config.apply_rope_fusion and qkv_format == 'bshd':
+        #     return core_attn_out.transpose(0, 1)
+        # else:
+        return core_attn_out

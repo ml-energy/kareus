@@ -83,7 +83,8 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
             raise NotImplementedError("Selective recompute not implemented")
 
         # Set bias+dropout+add fusion grad_enable execution handler.
-        self.bias_dropout_add_exec_handler = torch.enable_grad
+        # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
+        # self.bias_dropout_add_exec_handler = torch.enable_grad
         
     def forward(self, hidden_states, residual):
         """
@@ -97,10 +98,10 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
         
-        with self.bias_dropout_add_exec_handler():
-            hidden_states = self.prev_self_attn_bda(self.training, self.config.bias_dropout_fusion)(
-                hidden_states, residual, self.hidden_dropout
-            )
+        # with self.bias_dropout_add_exec_handler():
+        hidden_states = self.prev_self_attn_bda(self.training, self.config.bias_dropout_fusion)(
+            hidden_states, residual, self.hidden_dropout
+        )
         
         # Residual connection.
         residual = hidden_states
@@ -112,10 +113,10 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         mlp_output_with_bias = self.mlp(input_layernorm_output)
         
         if self.is_last_layer:
-            with self.bias_dropout_add_exec_handler():
-                hidden_states = self.post_mlp_bda(self.training, self.config.bias_dropout_fusion)(
-                    mlp_output_with_bias, residual, self.hidden_dropout
-                )
+            # with self.bias_dropout_add_exec_handler():
+            hidden_states = self.post_mlp_bda(self.training, self.config.bias_dropout_fusion)(
+                mlp_output_with_bias, residual, self.hidden_dropout
+            )
             # Jit compiled function creates 'view' tensor. This tensor
             # potentially gets saved in the MPU checkpoint function context,
             # which rejects view tensors. While making a viewless tensor here
