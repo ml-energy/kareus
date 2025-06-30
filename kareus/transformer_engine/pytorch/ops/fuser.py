@@ -158,7 +158,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             x.requires_grad_(requires_grad=requires_grad)
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
                 for y in ys:
-                    y.requires_grad_(requires_grad=requires_grad)
+                    if y is not None:
+                        y.requires_grad_(requires_grad=requires_grad)
                 extra_outputs[idx] = ys
 
         # Flatten list of extra outputs
@@ -340,6 +341,8 @@ class OperationFuser:
         self._backward_ops: list[tuple[FusibleOperation, list[int]]]
         self._forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
         self._backward_ops = list(reversed(self._forward_ops))
+        print(f"forward_ops: {self._forward_ops}")
+        print(f"backward_ops: {self._backward_ops}")
 
         # Fuse ops if needed
         if fuse_ops:

@@ -168,6 +168,7 @@ class TEFusibleLinear(Linear):
             in_features=input_size,
             out_features=output_size,
             bias=bias,
+            return_bias=self.te_return_bias,
             device=torch.cuda.current_device() if not config.use_cpu_initialization else 'cpu',
             dtype=config.params_dtype,
             tensor_parallel_mode=te_parallel_mode,
@@ -255,14 +256,16 @@ class TEFusibleLinear(Linear):
     def forward(self, x):
         """Forward pass."""
         # Call the FusedOperation forward
-        output = super().forward(x)
+        outputs = super().forward(x)
         
         # Handle bias return logic to match TELinear behavior
-        if self.te_return_bias:
-            # For FusedOperation, bias is integrated into the output
-            # We need to return (output, bias) for compatibility
-            return output, self.bias
-        return output, None
+        # if self.te_return_bias:
+        #     # For FusedOperation, bias is integrated into the output
+        #     # We need to return (output, bias) for compatibility
+        #     return output, self.bias
+        # return output, None
+        assert len(outputs) == 2
+        return outputs
 
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
         """Replicate cross TP/DP for checkpointing."""

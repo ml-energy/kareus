@@ -15,7 +15,7 @@ from transformer_engine.pytorch.ops.basic import (
     AllReduce,
     ReduceScatter,
 )
-from transformer_engine.pytorch.ops.op import FusedOperation
+from kareus.transformer_engine.pytorch.ops.op import FusedOperation
 
 from kareus.transformer_engine.pytorch.ops.basic import (
     BasicLinear,
@@ -67,6 +67,7 @@ class Linear(FusedOperation):
         out_features: int,
         *,
         bias: bool = True,
+        return_bias: bool = False,
         device: Optional[torch.device | str] = None,
         dtype: Optional[torch.dtype] = None,
         tensor_parallel_mode: Optional[str] = None,
@@ -76,6 +77,10 @@ class Linear(FusedOperation):
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
     ) -> None:
+        
+        self._has_bias: bool = bias
+        self.return_bias: bool = return_bias
+        self.apply_bias = bias and not return_bias
 
         # Tensor parallel configuration
         (
@@ -109,6 +114,9 @@ class Linear(FusedOperation):
             "accumulate_into_main_grad": accumulate_into_main_grad,
         }
         bias_kwargs = {
+            "has_bias": self._has_bias,
+            "apply_bias": self.apply_bias,
+            "return_bias": self.return_bias,
             "size": local_out_features,
             "device": device,
             "dtype": dtype,
@@ -117,13 +125,10 @@ class Linear(FusedOperation):
             "tensor_parallel_size": 1,
         }
         ops.append(BasicLinear(**linear_kwargs))
-        if bias:
-            ops.append(Bias(**bias_kwargs))
+        ops.append(Bias(**bias_kwargs))
 
         # Initialize base class
         super().__init__(ops)
-
-        self._has_bias: bool = bias
 
         if sequence_parallel:
             raise NotImplementedError("Sequence parallelism is not supported")
