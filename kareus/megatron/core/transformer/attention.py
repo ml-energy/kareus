@@ -353,6 +353,13 @@ class Attention(MegatronModule, ABC):
         This method needs to be implemented based on whether the derived class
         is "self-attn" or "cross-attn".
         """
+    
+    @abstractmethod
+    def get_query_key_value_tensors_ops():
+        """
+        This method needs to be implemented based on whether the derived class
+        is "self-attn" or "cross-attn".
+        """
 
     def flash_decode(
         self,
@@ -822,6 +829,9 @@ class SelfAttention(Attention):
                 ["q_w", "q_b", "k_w", "k_b"],
                 "TP",
             )
+    
+    def get_query_key_value_tensors_ops(self):
+        return [self.linear_qkv, self.qkv_postprocess_op]
 
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None):
         """

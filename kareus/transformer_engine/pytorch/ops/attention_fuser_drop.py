@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -48,7 +48,7 @@ def _is_graph_capturing() -> bool:
     return _is_graph_capturing_function()
 
 
-class _OperationFuserAutogradFunction(torch.autograd.Function):
+class _AttentionFuserAutogradFunction(torch.autograd.Function):
     """Autograd function for a pipeline of operations
 
     Autograd must be done at the pipeline level since we may apply
@@ -60,15 +60,21 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         func_ctx: Optional[torch.autograd.function.FunctionCtx],
-        input_: torch.Tensor,
+        hidden_states: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        residual: torch.Tensor,
+        rotary_pos_emb: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
         forward_ops: list[tuple[FusibleOperation, list[int]]],
         backward_ops: list[tuple[FusibleOperation, list[int]]],
         basic_ops: list[BasicOperation],
-        basic_op_kwargs: list[dict[str, Any]],
+        fused_forward_ops: list[tuple[list[FusibleOperation], list[int]]],
+        fused_backward_ops: list[tuple[list[FusibleOperation], list[int]]],
+        # basic_op_kwargs: list[dict[str, Any]],
         is_grad_enabled: bool,
         num_params: int,
-        num_extra_inputs: int,
-        *params_and_extra_inputs: torch.nn.Parameter,
+        # num_extra_inputs: int,
+        *params: torch.nn.Parameter,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass
 
@@ -109,58 +115,63 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = [OperationContext() for _ in range(len(basic_ops))]
 
         # Unflatten list of parameters and extra tensor inputs
-        if len(params_and_extra_inputs) != num_params + num_extra_inputs:
-            raise ValueError(
-                f"Expected {num_params + num_extra_inputs} extra tensor arguments "
-                f"({num_params} parameters, {num_extra_inputs} extra inputs), "
-                f"but got {len(params_and_extra_inputs)}"
-            )
-        _, extra_inputs = _split_tuple(params_and_extra_inputs, num_params)
-        basic_op_extra_inputs = []
-        for op in basic_ops:
-            xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
-            basic_op_extra_inputs.append(xs)
+        # if len(params_and_extra_inputs) != num_params + num_extra_inputs:
+        #     raise ValueError(
+        #         f"Expected {num_params + num_extra_inputs} extra tensor arguments "
+        #         f"({num_params} parameters, {num_extra_inputs} extra inputs), "
+        #         f"but got {len(params_and_extra_inputs)}"
+        #     )
+        # _, extra_inputs = _split_tuple(params_and_extra_inputs, num_params)
+        # basic_op_extra_inputs = []
+        # for op in basic_ops:
+        #     xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
+        #     basic_op_extra_inputs.append(xs)
 
         # Apply forward ops
-        x = input_
+        x = hidden_states
         requires_grad = is_grad_enabled and x.requires_grad
-        extra_outputs = [None for _ in range(len(basic_ops))]
-        for op, basic_op_idxs in forward_ops:
+        # extra_outputs = [None for _ in range(len(basic_ops))]
+        # for op, basic_op_idxs in forward_ops:
+        for op_list, idx_list in fused_forward_ops:
+            for i, op in enumerate(op_list):
+                basic_op_idx = idx_list[i]
 
-            # Check if backward op is required
-            if is_grad_enabled:
-                if not requires_grad:
-                    requires_grad = any(param.requires_grad for param in op.parameters())
-                if not requires_grad:
-                    requires_grad = any(any(x.requires_grad for x in xs) for xs in extra_inputs)
-            for idx in basic_op_idxs:
-                basic_op_ctxs[idx].requires_grad = requires_grad
-            if requires_grad != x.requires_grad:
-                if requires_grad:
-                    x.requires_grad_()
-                else:
-                    x = x.detach()
+                # Check if backward op is required
+                if is_grad_enabled:
+                    if not requires_grad:
+                        requires_grad = any(param.requires_grad for param in op.parameters())
+                    # if not requires_grad:
+                    #     requires_grad = any(any(x.requires_grad for x in xs) for xs in extra_inputs)
+                # for idx in basic_op_idxs:
+                basic_op_ctxs[basic_op_idx].requires_grad = requires_grad
+                if requires_grad != x.requires_grad:
+                    if requires_grad:
+                        x.requires_grad_()
+                    else:
+                        x = x.detach()
 
-            # Forward op
-            extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
-            prev_ops = [basic_ops[idx - 1] if idx > 0 else None for idx in basic_op_idxs]
-            next_ops = [
-                basic_ops[idx + 1] if (idx < len(basic_ops) - 1) else None for idx in basic_op_idxs
-            ]
-            x, fused_op_extra_outputs = op.fuser_forward(
-                [basic_op_ctxs[idx] for idx in basic_op_idxs],
-                x,
-                basic_op_extra_inputs=extra_inputs,
-                basic_op_prev_ops=prev_ops,
-                basic_op_next_ops=next_ops,
-                basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
-            )
-            x.requires_grad_(requires_grad=requires_grad)
-            for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
-                for y in ys:
-                    if y is not None:
-                        y.requires_grad_(requires_grad=requires_grad)
-                extra_outputs[idx] = ys
+                # Forward op
+                # extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
+                # prev_ops = [basic_ops[idx - 1] if idx > 0 else None for idx in basic_op_idxs]
+                prev_ops = [basic_ops[basic_op_idx]] if basic_op_idx > 0 else None
+                # next_ops = [
+                #     basic_ops[idx + 1] if (idx < len(basic_ops) - 1) else None for idx in basic_op_idxs
+                # ]
+                next_ops = [basic_ops[basic_op_idx + 1]] if basic_op_idx < len(basic_ops) - 1 else None
+                x, fused_op_extra_outputs = op.fuser_forward(
+                    [basic_op_ctxs[basic_op_idx],],
+                    x,
+                    # basic_op_extra_inputs=extra_inputs,
+                    basic_op_prev_ops=prev_ops,
+                    basic_op_next_ops=next_ops,
+                    # basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
+                )
+                x.requires_grad_(requires_grad=requires_grad)
+                for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
+                    for y in ys:
+                        if y is not None:
+                            y.requires_grad_(requires_grad=requires_grad)
+                    extra_outputs[idx] = ys
 
         # Flatten list of extra outputs
         extra_outputs_flat = []
@@ -305,7 +316,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         )
 
 
-class OperationFuser:
+class AttentionFuser:
     """Manages forward and backward passes for a pipeline of operations
 
     Parameters
@@ -321,32 +332,56 @@ class OperationFuser:
         self,
         ops: list[FusibleOperation],
         fuse_ops: bool = True,
+        # prev_mlp_bda: Optional[FusibleOperation] = None,
+        # input_layernorm: Optional[FusibleOperation] = None,
+        # get_qkv: Optional[FusibleOperation] = None,
+        # rotary_embedding: Optional[FusibleOperation] = None,
+        # core_attention: Optional[FusibleOperation] = None,
+        # linear_proj: Optional[FusibleOperation] = None,      
     ) -> None:
 
-        # Get list of basic operations
         basic_ops = []
+        fused_ops = []
+
         for op in ops:
             if op.is_fused_op:
                 basic_ops.extend(op.basic_ops)
+                fused_ops.append(list(op.basic_ops))
             else:
                 basic_ops.append(op)
-        self._num_basic_ops: int = len(basic_ops)
+                fused_ops.append([op,])
+        # self._num_basic_ops: int = len(basic_ops)
         self._basic_ops: list[BasicOperation] = basic_ops
+        self._fused_ops: list[list[BasicOperation]] = fused_ops
 
-        # Number of extra tensor inputs
-        self._num_extra_inputs: int = sum(op.num_extra_inputs for op in basic_ops)
+        # # Number of extra tensor inputs
+        # self._num_extra_inputs: int = sum(op.num_extra_inputs for op in basic_ops)
 
         # Ops for forward and backward pass
         self._forward_ops: list[tuple[FusibleOperation, list[int]]]
         self._backward_ops: list[tuple[FusibleOperation, list[int]]]
         self._forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
         self._backward_ops = list(reversed(self._forward_ops))
-        print(f"forward_ops: {self._forward_ops}")
-        print(f"backward_ops: {self._backward_ops}")
+        self._fused_forward_ops: list[tuple[list[FusibleOperation], list[int]]]
+        self._fused_backward_ops: list[tuple[list[FusibleOperation], list[int]]]
+        
+        # Create forward ops with indices for each operation in the list
+        self._fused_forward_ops = []
+        current_idx = 0
+        for op_list in self._fused_ops:
+            indices = list(range(current_idx, current_idx + len(op_list)))
+            self._fused_forward_ops.append((op_list, indices))
+            current_idx += len(op_list)
+        
+        # Create backward ops by reversing both operations and their indices
+        self._fused_backward_ops = [(list(reversed(op_list)), list(reversed(idx_list))) 
+                                   for op_list, idx_list in reversed(self._fused_forward_ops)]
+        # print(f"forward_ops: {self._forward_ops}")
+        # print(f"backward_ops: {self._backward_ops}")
 
         # Fuse ops if needed
-        if fuse_ops:
-            self.fuse_ops()
+        # if fuse_ops:
+        #     self.fuse_ops()
 
     @classmethod
     def _fuse_forward_ops(
@@ -376,18 +411,23 @@ class OperationFuser:
 
     def __call__(
         self,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
-        *extra_inputs: torch.Tensor,
-        basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        hidden_states: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        residual: torch.Tensor,
+        rotary_pos_emb: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        # input: torch.Tensor,  # pylint: disable=redefined-builtin
+        # *extra_inputs: torch.Tensor,
+        # basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: # hidden_states, bias, residual
 
         # Initialization before forward pass
         for op in self._basic_ops:
             op.pre_forward()
 
         # Canonicalize op kwargs
-        if basic_op_kwargs is None:
-            basic_op_kwargs = [{} for _ in range(len(self._basic_ops))]
+        # if basic_op_kwargs is None:
+        #     basic_op_kwargs = [{} for _ in range(len(self._basic_ops))]
 
         # Flatten list of parameters
         params = [param for op in self._basic_ops for param in op.parameters()]
@@ -395,21 +435,27 @@ class OperationFuser:
         # Fuser forward pass
         is_grad_enabled = torch.is_grad_enabled()
         if is_grad_enabled:
-            forward_func = _OperationFuserAutogradFunction.apply
+            forward_func = _AttentionFuserAutogradFunction.apply
             args = []
         else:
-            forward_func = _OperationFuserAutogradFunction.forward
+            forward_func = _AttentionFuserAutogradFunction.forward
             args = [None]
         args += (
-            input,
+            hidden_states,
+            bias,
+            residual,
+            rotary_pos_emb,
+            attention_mask,
             self._forward_ops,
             self._backward_ops,
             self._basic_ops,
-            basic_op_kwargs,
+            self._fused_forward_ops,
+            self._fused_backward_ops,
+            # basic_op_kwargs,
             is_grad_enabled,
             len(params),
-            self._num_extra_inputs,
+            # self._num_extra_inputs,
             *params,
-            *extra_inputs,
+            # *extra_inputs,
         )
         return forward_func(*args)

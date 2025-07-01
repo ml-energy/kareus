@@ -198,8 +198,11 @@ class Bias(BasicOperation):
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],
         list[tuple[torch.Tensor]],
-    ]:
-        grad_bias, = basic_op_grad_extra_outputs[0]
+    ]:  
+        if basic_op_grad_extra_outputs:
+            grad_bias, = basic_op_grad_extra_outputs[0]
+        else:
+            grad_bias = None
         grad_input, grad_params = self.op_backward(
             basic_op_ctxs[0], grad_output, grad_bias
         )
