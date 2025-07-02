@@ -596,6 +596,5 @@ class DotProductAttentionOp(BasicOperation):
         list[tuple[torch.Tensor, torch.Tensor]],
     ]:
         """Override fuser_backward since we have extra inputs."""
-        print(f"grad_output: {grad_output.shape}")
         grad_input, grad_extra_inputs = self.op_backward(basic_op_ctxs[0], grad_output)
         return grad_input, [()], [grad_extra_inputs] 

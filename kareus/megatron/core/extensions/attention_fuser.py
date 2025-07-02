@@ -27,6 +27,7 @@ from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDro
 from transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.megatron.core.extensions.te_linear import TEFusibleRowParallelLinear, TEFusibleColumnParallelLinear
+from kareus.transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from kareus.transformer_engine.pytorch.ops.basic.bias import Bias
 from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
 from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
@@ -147,14 +148,14 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             # Get extra inputs
             extra_inputs = []
             if isinstance(op, BiasDropoutAddOp):
-                extra_inputs = [tuple(bias, residual)]
+                extra_inputs = [(bias, residual)]
             elif isinstance(op, LayerNorm) or isinstance(op, RMSNorm):
                 residual = x
                 get_residual = True
             elif isinstance(op, RotaryEmbeddingOp):
-                extra_inputs = [tuple(key, rotary_pos_emb)]
+                extra_inputs = [(key, rotary_pos_emb)]
             elif isinstance(op, DotProductAttentionOp):
-                extra_inputs = [tuple(key, value, attention_mask)]
+                extra_inputs = [(key, value)]
 
             # Check if backward op is required
             if is_grad_enabled:
@@ -298,11 +299,11 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             # if isinstance(op, BiasDropoutAddOp):
             #     grad_extra_outputs = [tuple(grad_residual)]
             if isinstance(op, QKVPostProcessOp):
-                grad_extra_outputs = [tuple(grad_key, grad_value)]
+                grad_extra_outputs = [(grad_key, grad_value)]
             elif isinstance(op, RotaryEmbeddingOp):
-                grad_extra_outputs = [tuple(grad_key)]
-            # elif isinstance(op, Bias) and op.has_bias:
-            #     grad_extra_outputs = [tuple(grad_bias)]
+                grad_extra_outputs = [(grad_key,)]
+            elif isinstance(op, Bias) and op.return_bias:
+                grad_extra_outputs = [(grad_bias,)]
 
             # Backward op
             # grad_extra_outputs = [basic_op_grad_extra_outputs[idx] for idx in basic_op_idxs]

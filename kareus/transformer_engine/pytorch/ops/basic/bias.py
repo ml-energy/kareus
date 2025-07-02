@@ -199,7 +199,7 @@ class Bias(BasicOperation):
         list[tuple[Optional[torch.Tensor], ...]],
         list[tuple[torch.Tensor]],
     ]:  
-        if basic_op_grad_extra_outputs:
+        if basic_op_grad_extra_outputs[0]:
             grad_bias, = basic_op_grad_extra_outputs[0]
         else:
             grad_bias = None

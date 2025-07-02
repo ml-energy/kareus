@@ -315,7 +315,6 @@ class FlashAttnFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
-        print(f"dout: {dout.shape}")
         head_size_og = dout.size(3)
         dout_padded = dout
         if head_size_og % 8 != 0:

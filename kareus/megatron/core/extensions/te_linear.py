@@ -4,7 +4,8 @@ from typing import Any, Callable, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from megatron.core.model_parallel_config import ModelParallelConfig
+# from megatron.core.model_parallel_config import ModelParallelConfig
+from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.parallel_state import (
     get_expert_tensor_parallel_group,
     get_expert_tensor_parallel_rank,
@@ -59,7 +60,7 @@ class TEFusibleLinear(Linear):
         output_size: int,
         *,
         parallel_mode: Optional[str],
-        config: ModelParallelConfig,
+        config: TransformerConfig,
         init_method: Callable,
         bias: bool,
         skip_bias_add: bool,
@@ -289,7 +290,7 @@ class TEFusibleColumnParallelLinear(TEFusibleLinear):
         input_size: int,
         output_size: int,
         *,
-        config: ModelParallelConfig,
+        config: TransformerConfig,
         init_method: Callable,
         gather_output: bool,
         bias: bool,
@@ -339,7 +340,7 @@ class TEFusibleRowParallelLinear(TEFusibleLinear):
         input_size: int,
         output_size: int,
         *,
-        config: ModelParallelConfig,
+        config: TransformerConfig,
         init_method: Callable,
         bias: bool,
         input_is_parallel: bool,
@@ -410,7 +411,7 @@ def create_te_linear_layer(
     output_size: int,
     *,
     parallel_mode: Optional[str],
-    config: ModelParallelConfig,
+    config: TransformerConfig,
     init_method: Callable,
     bias: bool,
     skip_bias_add: bool,

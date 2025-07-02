@@ -185,8 +185,8 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             self.qkv_format = 'bshd'
             raise NotImplementedError("Rope fusion is not implemented")
 
-        if self.te_forward_mask_type:
-            raise NotImplementedError("TE forward mask type is not implemented")
+        # if self.te_forward_mask_type:
+        #     raise NotImplementedError("TE forward mask type is not implemented")
 
         super().__init__(
             num_attention_heads=self.config.num_attention_heads,
@@ -257,16 +257,16 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             # **packed_seq_kwargs,
         }
 
-        # if self.te_forward_mask_type:
-        #     if qkv_format == 'thd' and is_te_min_version("1.7.0"):
-        #         # thd format uses flash attention with cuDNN kernel which requires is_padding=True,
-        #         # so the only acceptable mask types are `padding_causal` and `padding`. These do not
-        #         # necessarily indicate there are padded tokens in the sequence.
-        #         if attn_mask_type == AttnMaskType.causal:
-        #             attn_mask_type = AttnMaskType.padding_causal
-        #         elif attn_mask_type == AttnMaskType.no_mask:
-        #             attn_mask_type = AttnMaskType.padding
-        #     forward_kwargs['attn_mask_type'] = attn_mask_type.name
+        if self.te_forward_mask_type:
+            # if qkv_format == 'thd' and is_te_min_version("1.7.0"):
+            #     # thd format uses flash attention with cuDNN kernel which requires is_padding=True,
+            #     # so the only acceptable mask types are `padding_causal` and `padding`. These do not
+            #     # necessarily indicate there are padded tokens in the sequence.
+            #     if attn_mask_type == AttnMaskType.causal:
+            #         attn_mask_type = AttnMaskType.padding_causal
+            #     elif attn_mask_type == AttnMaskType.no_mask:
+            #         attn_mask_type = AttnMaskType.padding
+            forward_kwargs['attn_mask_type'] = attn_mask_type.name
 
         core_attn_out = super().forward(query, key, value, **forward_kwargs)
 
