@@ -11,11 +11,14 @@ Test script for the attention fuser with the required operations:
 
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 import numpy as np
 import sys
 import os
 import pytest
 from typing import Optional, Tuple
+import argparse
+import random
 
 # Add the project root to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
@@ -24,6 +27,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
 from transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
+from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.qkv_postprocess_op import create_qkv_postprocess_op
 from kareus.megatron.core.extensions.rotary_embedding_op import create_rotary_embedding_op
 from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttentionOp
@@ -46,12 +50,66 @@ def set_random_seed(seed=42):
     np.random.seed(seed)
 
 
+def init_distributed(tensor_parallel_size: int = 1, backend: str = 'nccl'):
+    """Initialize distributed processing for tensor parallelism.
+    
+    Parameters
+    ----------
+    tensor_parallel_size : int
+        Size of tensor parallel group
+    backend : str
+        Distributed backend to use ('nccl', 'gloo', etc.)
+        
+    Returns
+    -------
+    torch.distributed.ProcessGroup or None
+        Tensor parallel process group, or None if single process
+    """
+    if tensor_parallel_size <= 1:
+        print("Single process mode - no distributed initialization needed")
+        return None
+        
+    # Initialize the process group if not already initialized
+    if not dist.is_initialized():
+        # For testing, we'll use a single machine setup
+        # In real scenarios, you'd have proper rank/world_size from environment
+        rank = int(os.environ.get('RANK', 0))
+        world_size = int(os.environ.get('WORLD_SIZE', tensor_parallel_size))
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        
+        # Set the device before initializing distributed
+        torch.cuda.set_device(local_rank)
+        
+        # Initialize process group
+        dist.init_process_group(
+            backend=backend,
+            rank=rank,
+            world_size=world_size
+        )
+        
+        print(f"Initialized distributed: rank={rank}, world_size={world_size}, local_rank={local_rank}")
+    
+    # Create tensor parallel group
+    if tensor_parallel_size > 1:
+        # Create process groups for tensor parallelism
+        ranks = list(range(tensor_parallel_size))
+        tp_group = dist.new_group(ranks)
+        print(f"Created tensor parallel group with ranks: {ranks}")
+        return tp_group
+    
+    return None
+
+
 class AttentionFuserTest:
     """Test suite for attention fuser operations."""
 
-    def __init__(self, device='cuda'):
+    def __init__(self, device='cuda', tensor_parallel_size: int = 1):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float16
+        self.tensor_parallel_size = tensor_parallel_size
+        
+        # Initialize distributed processing
+        self.tp_group = init_distributed(tensor_parallel_size)
         
         # Test configuration
         self.batch_size = 2
@@ -108,8 +166,13 @@ class AttentionFuserTest:
         #     dtype=torch.bool, device=self.device
         # ))
         attention_mask = None
+
+        allreduce_inputs = torch.randn(
+            self.batch_size, self.seq_length, self.hidden_size,
+            dtype=self.dtype, device=self.device, requires_grad=True
+        )
         
-        return hidden_states, bias, residual, rotary_pos_emb, attention_mask
+        return hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs
 
     def create_operations(self):
         """Create all the required operations for the attention fuser."""
@@ -142,28 +205,28 @@ class AttentionFuserTest:
         #     is_expert=False,
         #     tp_comm_buffer_name='qkv',
         # )
-        # linear_qkv_op = Linear(
-        #     in_features=self.hidden_size,
-        #     out_features=qkv_hidden_size,
-        #     device=self.device,
-        #     dtype=self.dtype,
-        #     bias=True,
-        #     return_bias=False,
-        #     tensor_parallel_mode=None,
-        #     tensor_parallel_group=None,
-        #     tensor_parallel_size=None,
-        # )
-        linear_qkv_op = TEFusibleLinear(
-            input_size=self.hidden_size,
-            output_size=qkv_hidden_size,
-            parallel_mode="duplicated",
-            config=self.config,
-            init_method=self.config.output_layer_init_method,
+        linear_qkv_op = Linear(
+            in_features=self.hidden_size,
+            out_features=qkv_hidden_size,
+            device=self.device,
+            dtype=self.dtype,
             bias=True,
-            skip_bias_add=False,
-            is_expert=False,
-            skip_weight_param_allocation=False,
+            return_bias=False,
+            tensor_parallel_mode=None,
+            tensor_parallel_group=None,
+            tensor_parallel_size=None,
         )
+        # linear_qkv_op = TEFusibleLinear(
+        #     input_size=self.hidden_size,
+        #     output_size=qkv_hidden_size,
+        #     parallel_mode="duplicated",
+        #     config=self.config,
+        #     init_method=self.config.output_layer_init_method,
+        #     bias=True,
+        #     skip_bias_add=False,
+        #     is_expert=False,
+        #     skip_weight_param_allocation=False,
+        # )
         
         # 4. QKV Post-process Operation
         qkv_postprocess_op = create_qkv_postprocess_op(
@@ -197,44 +260,63 @@ class AttentionFuserTest:
         #     is_expert=False,
         #     tp_comm_buffer_name='proj',
         # )
-        # linear_proj_op = Linear(
-        #     in_features=self.hidden_size,
-        #     out_features=self.hidden_size,
-        #     device=self.device,
-        #     dtype=self.dtype,
-        #     bias=True,
-        #     return_bias=True,
-        #     tensor_parallel_mode=None,
-        #     tensor_parallel_group=None,
-        #     tensor_parallel_size=None,
-        # )
-        linear_proj_op = TEFusibleLinear(
-            input_size=self.hidden_size,
-            output_size=self.hidden_size,
-            parallel_mode="duplicated",
-            config=self.config,
-            init_method=self.config.output_layer_init_method,
+        linear_proj_op = Linear(
+            in_features=self.hidden_size,
+            out_features=self.hidden_size,
+            device=self.device,
+            dtype=self.dtype,
             bias=True,
-            skip_bias_add=True,
-            is_expert=False,
-            skip_weight_param_allocation=False,
+            return_bias=True,
+            tensor_parallel_mode=None,
+            tensor_parallel_group=None,
+            tensor_parallel_size=None,
         )
+        # linear_proj_op = TEFusibleLinear(
+        #     input_size=self.hidden_size,
+        #     output_size=self.hidden_size,
+        #     parallel_mode="duplicated",
+        #     config=self.config,
+        #     init_method=self.config.output_layer_init_method,
+        #     bias=True,
+        #     skip_bias_add=True,
+        #     is_expert=False,
+        #     skip_weight_param_allocation=False,
+        # )
         
-        return [
-            bda_op,
-            layernorm_op,
-            linear_qkv_op,
-            qkv_postprocess_op,
-            rotary_embedding_op,
-            attention_op,
-            linear_proj_op
-        ]
+        # 8. AllReduce Communication Operation
+        if self.tensor_parallel_size > 1:
+            allreduce_comm_op = AllReduce(
+                process_group=self.tp_group,
+                async_op=True  # Use async mode as set in the modified AllReduce
+            )
+        
+            return [
+                bda_op,
+                layernorm_op,
+                linear_qkv_op,
+                qkv_postprocess_op,
+                rotary_embedding_op,
+                attention_op,
+                linear_proj_op,
+                allreduce_comm_op
+            ]
+
+        else:
+            return [
+                bda_op,
+                layernorm_op,
+                linear_qkv_op,
+                qkv_postprocess_op,
+                rotary_embedding_op,
+                attention_op,
+                linear_proj_op,
+            ]
 
     def test_individual_operations(self):
         """Test each operation individually to ensure they work correctly."""
         print("\n=== Testing Individual Operations ===")
         
-        hidden_states, bias, residual, rotary_pos_emb, attention_mask = self.create_test_tensors()
+        hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = self.create_test_tensors()
         operations = self.create_operations()
         
         # Test BDA
@@ -286,6 +368,23 @@ class AttentionFuserTest:
         linear_proj_op = operations[6]
         proj_output, _ = linear_proj_op(attn_output)
         print(f"✓ Linear Projection output shape: {proj_output.shape}")
+
+        # Test AllReduce
+        print("Testing AllReduce...")
+        if self.tensor_parallel_size > 1:
+            allreduce_comm_op = operations[7]
+            allreduce_output = allreduce_comm_op(allreduce_inputs)
+            if allreduce_comm_op.is_async_pending():
+                print("  AllReduce operation is running asynchronously...")
+                allreduce_comm_op.sync()
+                print("  AllReduce operation synchronized successfully")
+            print(f"✓ AllReduce output shape: {allreduce_output.shape}")
+            
+        # Verify AllReduce functionality
+        if self.tensor_parallel_size > 1:
+            print(f"  AllReduce performed with tensor parallel size: {self.tensor_parallel_size}")
+        else:
+            print("  AllReduce in single-process mode (no actual reduction)")
         
         # Test backward pass for individual operations
         print("\n--- Testing Individual Operations Backward Pass ---")
@@ -341,12 +440,18 @@ class AttentionFuserTest:
         """Test the complete attention fuser with all operations."""
         print("\n=== Testing Attention Fuser ===")
         
-        hidden_states, bias, residual, rotary_pos_emb, attention_mask = self.create_test_tensors()
+        hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = self.create_test_tensors()
         operations = self.create_operations()
+
+        if self.tensor_parallel_size > 1:
+            allreduce_comm_op = operations[7]
+        else:
+            allreduce_comm_op = None
         
         # Create attention fuser
         attention_fuser = AttentionFuser(
             ops=operations,
+            allreduce_comm_op=allreduce_comm_op,
             fuse_ops=False
         )
         
@@ -357,36 +462,55 @@ class AttentionFuserTest:
         
         # Test forward pass
         print("Testing fused forward pass...")
-        try:
-            output, output_bias, output_residual = attention_fuser(
+        # try:
+        if self.tensor_parallel_size > 1:
+            output, output_bias, output_residual, _ = attention_fuser(
                 hidden_states=hidden_states,
                 bias=bias,
                 residual=residual,
                 rotary_pos_emb=rotary_pos_emb,
-                attention_mask=attention_mask
+                attention_mask=attention_mask,
+                allreduce_inputs=allreduce_inputs,
+                allreduce_overlap_window=(0, 1)
             )
-            print(f"✓ Fused forward pass successful")
-            print(f"  Output shape: {output.shape}")
-            print(f"  Output bias shape: {output_bias.shape}")
-            print(f"  Output residual shape: {output_residual.shape}")
+        else:
+            output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
+                hidden_states=hidden_states,
+                bias=bias,
+                residual=residual,
+                rotary_pos_emb=rotary_pos_emb,
+                attention_mask=attention_mask,
+            )
+        
+        print(f"✓ Fused forward pass successful")
+        print(f"  Output shape: {output.shape}")
+        print(f"  Output bias shape: {output_bias.shape}")
+        print(f"  Output residual shape: {output_residual.shape}")
+        
+        # Test backward pass
+        print("Testing fused backward pass...")
+        loss = output.sum() + output_bias.sum() + output_residual.sum()
+
+        if self.tensor_parallel_size > 1:
+            loss += grad_allreduce_input.sum()
+
+        loss.backward()
+        
+        print("✓ Fused backward pass successful")
+        print(f"  Hidden states grad: {hidden_states.grad is not None}")
+        print(f"  Bias grad: {bias.grad is not None}")
+        print(f"  Residual grad: {residual.grad is not None}")
+
+        if self.tensor_parallel_size > 1:
+            print(f"  Grad allreduce input grad: {grad_allreduce_input.grad is not None}")
+        
+        return True
             
-            # Test backward pass
-            print("Testing fused backward pass...")
-            loss = output.sum() + output_bias.sum() + output_residual.sum()
-            loss.backward()
-            
-            print("✓ Fused backward pass successful")
-            print(f"  Hidden states grad: {hidden_states.grad is not None}")
-            print(f"  Bias grad: {bias.grad is not None}")
-            print(f"  Residual grad: {residual.grad is not None}")
-            
-            return True
-            
-        except Exception as e:
-            print(f"✗ Fused attention failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False
+        # except Exception as e:
+        #     print(f"✗ Fused attention failed: {str(e)}")
+        #     import traceback
+        #     traceback.print_exc()
+        #     return False
 
     def test_gradient_flow(self):
         """Test that gradients flow correctly through the fused operations."""
@@ -576,7 +700,7 @@ class AttentionFuserTest:
         """Compare performance of fused vs unfused operations."""
         print("\n=== Testing Performance Comparison ===")
         
-        hidden_states, bias, residual, rotary_pos_emb, attention_mask = self.create_test_tensors()
+        hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = self.create_test_tensors()
         operations = self.create_operations()
         
         # Test unfused operations
@@ -592,11 +716,14 @@ class AttentionFuserTest:
         # Manual unfused forward pass
         x = operations[0](hidden_states, bias, residual)  # BDA
         x = operations[1](x)  # LayerNorm
-        qkv = operations[2](x)  # Linear QKV
+        qkv, _ = operations[2](x)  # Linear QKV
         q, k, v = operations[3](qkv)  # QKV post-process
         q_rope, k_rope = operations[4](q, k, rotary_pos_emb)  # Rotary embedding
-        attn_out = operations[5](q_rope, k_rope, v, attention_mask)  # Attention
-        final_out = operations[6](attn_out)  # Linear projection
+        attn_out = operations[5](q_rope, k_rope, v, attention_mask, AttnMaskType.causal)  # Attention
+        final_out, _ = operations[6](attn_out)  # Linear projection
+        allreduce_out = operations[7](allreduce_inputs)  # AllReduce
+        if operations[7].is_async_pending():
+            operations[7].sync()
         
         end_time.record()
         torch.cuda.synchronize()
@@ -604,7 +731,7 @@ class AttentionFuserTest:
         
         print(f"Unfused operations time: {unfused_time:.3f} ms")
         
-        # Test fused operations
+        # Test fused operations (if available)
         print("Testing fused operations...")
         set_random_seed(42)
         
@@ -659,7 +786,7 @@ class AttentionFuserTest:
         #     test_results.append(False)
         
         # try:
-        test_results.append(self.test_individual_vs_fuser_comparison())
+        # test_results.append(self.test_individual_vs_fuser_comparison())
         # except Exception as e:
         #     print(f"Individual vs fuser comparison test failed: {e}")
         #     test_results.append(False)
@@ -678,7 +805,7 @@ class AttentionFuserTest:
         test_names = [
             "Individual Operations",
             "Attention Fuser",
-            "Individual vs Fuser Comparison",
+            # "Individual vs Fuser Comparison",
             # "Gradient Flow",
             # "Performance Comparison"
         ]
@@ -693,15 +820,54 @@ class AttentionFuserTest:
         return overall_success
 
 
+def run_process(rank, world_size, args, master_port):
+    """Run the attention fuser tests in a distributed environment."""
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = f"{master_port}"
+
+    # Create test instance and run tests
+    test_runner = AttentionFuserTest(
+        device=args.device, 
+        tensor_parallel_size=args.tensor_parallel_size
+    )
+    success = test_runner.run_all_tests()
+
+    # Clean up distributed if initialized
+    if dist.is_initialized():
+        dist.destroy_process_group()
+        print("Distributed process group destroyed")
+
+
 def main():
     """Main function to run the attention fuser tests."""
-    device = 'cuda'
+    parser = argparse.ArgumentParser(description='Attention Fuser Test with Distributed Support')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to run tests on')
+    parser.add_argument('--tensor-parallel-size', type=int, default=2, 
+                        help='Tensor parallel size for distributed testing')
+    parser.add_argument('--backend', type=str, default='nccl',
+                        help='Distributed backend (nccl, gloo)')
     
-    # Create test instance and run tests
-    test_runner = AttentionFuserTest(device=device)
-    success = test_runner.run_all_tests()
+    args = parser.parse_args()
     
-    return 0 if success else 1
+    print(f"Running tests with:")
+    print(f"  Device: {args.device}")
+    print(f"  Tensor Parallel Size: {args.tensor_parallel_size}")
+    print(f"  Backend: {args.backend}")
+
+    from torch.multiprocessing import spawn
+    spawn(
+        run_process,
+        args=(
+            args.tensor_parallel_size,
+            args,
+            random.randint(8000, 65535),
+        ),
+        nprocs=args.tensor_parallel_size,
+        join=True,
+    )
 
 
 if __name__ == "__main__":

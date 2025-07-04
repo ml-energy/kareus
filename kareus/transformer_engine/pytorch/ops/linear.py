@@ -11,13 +11,10 @@ from typing import Optional, Union
 import torch
 
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-from transformer_engine.pytorch.ops.basic import (
-    AllReduce,
-    ReduceScatter,
-)
 from kareus.transformer_engine.pytorch.ops.op import FusedOperation
 
 from kareus.transformer_engine.pytorch.ops.basic import (
+    AllReduce,
     BasicLinear,
     Bias,
 )
@@ -133,12 +130,12 @@ class Linear(FusedOperation):
         if sequence_parallel:
             raise NotImplementedError("Sequence parallelism is not supported")
         
-        self.forward_comm_op = None
-        self.backward_comm_op = None
-        if tensor_parallel_mode == "column":
-            self.backward_comm_op = AllReduce(process_group=tensor_parallel_group)
-        elif tensor_parallel_mode == "row":
-            self.forward_comm_op = AllReduce(process_group=tensor_parallel_group)
+        # self.forward_comm_op = None
+        # self.backward_comm_op = None
+        # if tensor_parallel_mode == "column":
+        #     self.backward_comm_op = AllReduce(process_group=tensor_parallel_group)
+        # elif tensor_parallel_mode == "row":
+        #     self.forward_comm_op = AllReduce(process_group=tensor_parallel_group)
 
     @property
     def weight(self) -> torch.nn.Parameter:
@@ -173,22 +170,3 @@ class Linear(FusedOperation):
                 "Attempted to set bias parameter in Linear operation "
                 "that does not have bias enabled"
             )
-
-    # def set_tensor_parallel_group(self, tp_group: Union[torch.distributed.ProcessGroup, None]) -> None:
-    #     """
-    #     Set the tensor parallel group for the given
-    #     module before executing the forward pass.
-
-    #     Parameters
-    #     ----------
-    #     tp_group : ProcessGroup, default = `None`
-    #               tensor parallel process group.
-    #     """
-        
-    #     # Update the tensor parallel group in the underlying operations
-    #     for op in self.basic_ops:
-    #         if hasattr(op, 'tensor_parallel_group'):
-    #             op.tensor_parallel_group = tp_group
-    #         # For AllReduce and ReduceScatter operations, update the process group
-    #         elif hasattr(op, 'process_group'):
-    #             op.process_group = tp_group
