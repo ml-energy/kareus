@@ -11,6 +11,7 @@ import torch
 
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+import cfuser.msccl_comm as msccl_comm
 
 
 class AllReduce(BasicOperation):
@@ -34,11 +35,19 @@ class AllReduce(BasicOperation):
         self,
         process_group: Optional[torch.distributed.ProcessGroup] = None,
         async_op: bool = True,
+        backend: str = "nccl",
+        rank: Optional[int] = None,
+        world_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.async_op: bool = async_op
+        self.backend: str = backend
+
         self._work_handle: Optional[torch.distributed.Work] = None
+        if self.backend == "msccl":
+            msccl_comm.msccl_AllReduce_init(rank, world_size)
+        self.wait_event = torch.cuda.Event()
 
     def op_forward(
         self,
@@ -46,6 +55,8 @@ class AllReduce(BasicOperation):
         input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
+        sm_num: Optional[int] = None,
+        block_size: Optional[int] = None,
     ) -> torch.Tensor:
 
         # Trivial case
@@ -58,14 +69,18 @@ class AllReduce(BasicOperation):
             x = x.dequantize()
         x = x.contiguous()
         
-        if self.async_op:
-            # Perform asynchronous all-reduce
-            self._work_handle = torch.distributed.all_reduce(
-                x, group=self.process_group, async_op=True
-            )
+        if self.backend == "msccl":
+            assert sm_num is not None and block_size is not None, "sm_num and block_size must be provided for msccl backend"
+            msccl_comm.msccl_AllReduce(x, x, sm_num, block_size)
         else:
-            # Perform synchronous all-reduce
-            torch.distributed.all_reduce(x, group=self.process_group)
+            if self.async_op:
+                # Perform asynchronous all-reduce
+                self._work_handle = torch.distributed.all_reduce(
+                    x, group=self.process_group, async_op=True
+                )
+            else:
+                # Perform synchronous all-reduce
+                torch.distributed.all_reduce(x, group=self.process_group)
             
         return x
 
@@ -80,21 +95,24 @@ class AllReduce(BasicOperation):
         RuntimeError
             If no async operation is pending or if the operation was synchronous
         """
-        if self._work_handle is None:
-            raise Warning("No AllReduce operation to sync")
-            # if not self.async_op:
-            #     raise RuntimeError(
-            #         "Cannot sync: AllReduce operation was configured as synchronous. "
-            #         "Set async_op=True to use asynchronous operations."
-            #     )
-            # else:
-            #     raise RuntimeError(
-            #         "Cannot sync: No pending asynchronous all-reduce operation found."
-            #     )
-        
-        # Wait for the async operation to complete
-        self._work_handle.wait()
-        self._work_handle = None
+        if self.backend == "msccl":
+            msccl_comm.msccl_sync()
+        else:
+            if self._work_handle is None:
+                raise Warning("No AllReduce operation to sync")
+                # if not self.async_op:
+                #     raise RuntimeError(
+                #         "Cannot sync: AllReduce operation was configured as synchronous. "
+                #         "Set async_op=True to use asynchronous operations."
+                #     )
+                # else:
+                #     raise RuntimeError(
+                #         "Cannot sync: No pending asynchronous all-reduce operation found."
+                #     )
+            
+            # Wait for the async operation to complete
+            self._work_handle.wait()
+            self._work_handle = None
 
     def is_async_pending(self) -> bool:
         """Check if there is a pending asynchronous all-reduce operation.

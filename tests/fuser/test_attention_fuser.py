@@ -40,6 +40,7 @@ from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
 # Import configuration
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.enums import AttnMaskType
+from cfuser.core.utils import nvtx_range
 
 
 def set_random_seed(seed=42):
@@ -113,10 +114,10 @@ class AttentionFuserTest:
         
         # Test configuration
         self.batch_size = 2
-        self.seq_length = 512
-        self.hidden_size = 768
-        self.num_attention_heads = 12
-        self.num_query_groups = 12  # For grouped query attention
+        self.seq_length = 4096
+        self.hidden_size = 2048
+        self.num_attention_heads = 32
+        self.num_query_groups = 32  # For grouped query attention
         self.head_dim = self.hidden_size // self.num_attention_heads
         
         # Create transformer config
@@ -174,7 +175,7 @@ class AttentionFuserTest:
         
         return hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs
 
-    def create_operations(self):
+    def create_operations(self, rank: int, world_size: int):
         """Create all the required operations for the attention fuser."""
         
         # 1. BDA Operation (Bias Dropout Add)
@@ -287,7 +288,10 @@ class AttentionFuserTest:
         if self.tensor_parallel_size > 1:
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
-                async_op=True  # Use async mode as set in the modified AllReduce
+                async_op=True,  # Use async mode as set in the modified AllReduce
+                backend="msccl",
+                rank=rank,
+                world_size=world_size,
             )
         
             return [
@@ -312,23 +316,25 @@ class AttentionFuserTest:
                 linear_proj_op,
             ]
 
-    def test_individual_operations(self):
+    def test_individual_operations(self, rank: int, world_size: int):
         """Test each operation individually to ensure they work correctly."""
         print("\n=== Testing Individual Operations ===")
         
         hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = self.create_test_tensors()
-        operations = self.create_operations()
+        operations = self.create_operations(rank, world_size)
         
         # Test BDA
         print("Testing BiasDropoutAddOp...")
         bda_op = operations[0]
-        bda_output = bda_op(hidden_states, bias, residual)
+        with nvtx_range("BDA"):
+            bda_output = bda_op(hidden_states, bias, residual)
         print(f"✓ BDA output shape: {bda_output.shape}")
         
         # Test LayerNorm
         print("Testing LayerNorm...")
         layernorm_op = operations[1]
-        ln_output = layernorm_op(bda_output)
+        with nvtx_range("LayerNorm"):
+            ln_output = layernorm_op(bda_output)
         print(f"✓ LayerNorm output shape: {ln_output.shape}")
 
         print(f"ln_output.dtype: {ln_output.dtype}")
@@ -336,7 +342,8 @@ class AttentionFuserTest:
         # Test Linear QKV
         print("Testing Linear QKV...")
         linear_qkv_op = operations[2]
-        qkv_output, _ = linear_qkv_op(ln_output)
+        with nvtx_range("Linear QKV"):
+            qkv_output, _ = linear_qkv_op(ln_output)
         print(f"✓ Linear QKV output shape: {qkv_output.shape}")
 
         print(f"qkv_output.dtype: {qkv_output.dtype}")
@@ -344,13 +351,15 @@ class AttentionFuserTest:
         # Test QKV Post-process
         print("Testing QKV Post-process...")
         qkv_postprocess_op = operations[3]
-        q, k, v = qkv_postprocess_op(qkv_output)
+        with nvtx_range("QKV Post-process"):
+            q, k, v = qkv_postprocess_op(qkv_output)
         print(f"✓ QKV Post-process outputs - Q: {q.shape}, K: {k.shape}, V: {v.shape}")
         
         # Test Rotary Embedding
         print("Testing Rotary Embedding...")
         rotary_embedding_op = operations[4]
-        q_rope, k_rope = rotary_embedding_op(q, k, rotary_pos_emb)
+        with nvtx_range("Rotary Embedding"):
+            q_rope, k_rope = rotary_embedding_op(q, k, rotary_pos_emb)
         print(f"✓ Rotary Embedding outputs - Q: {q_rope.shape}, K: {k_rope.shape}")
 
         print(f"q_rope.dtype: {q_rope.dtype}")
@@ -360,24 +369,27 @@ class AttentionFuserTest:
         # Test Dot Product Attention
         print("Testing Dot Product Attention...")
         attention_op = operations[5]
-        attn_output = attention_op(q_rope, k_rope, v, attention_mask, AttnMaskType.causal)
+        with nvtx_range("Attention"):
+            attn_output = attention_op(q_rope, k_rope, v, attention_mask, AttnMaskType.causal)
         print(f"✓ Attention output shape: {attn_output.shape}")
         
         # Test Linear Projection
         print("Testing Linear Projection...")
         linear_proj_op = operations[6]
-        proj_output, _ = linear_proj_op(attn_output)
+        with nvtx_range("Linear Projection"):
+            proj_output, _ = linear_proj_op(attn_output)
         print(f"✓ Linear Projection output shape: {proj_output.shape}")
 
         # Test AllReduce
         print("Testing AllReduce...")
         if self.tensor_parallel_size > 1:
             allreduce_comm_op = operations[7]
-            allreduce_output = allreduce_comm_op(allreduce_inputs)
-            if allreduce_comm_op.is_async_pending():
-                print("  AllReduce operation is running asynchronously...")
-                allreduce_comm_op.sync()
-                print("  AllReduce operation synchronized successfully")
+            with nvtx_range("AllReduce"):
+                allreduce_output = allreduce_comm_op(allreduce_inputs, sm_num=4, block_size=1024)
+                if allreduce_comm_op.is_async_pending():
+                    print("  AllReduce operation is running asynchronously...")
+                    allreduce_comm_op.sync()
+                    print("  AllReduce operation synchronized successfully")
             print(f"✓ AllReduce output shape: {allreduce_output.shape}")
             
         # Verify AllReduce functionality
@@ -405,7 +417,8 @@ class AttentionFuserTest:
         # Test backward pass
         print("Testing individual operations backward...")
         # try:
-        loss.backward()
+        with nvtx_range("Individual loss.backward"):
+            loss.backward()
         print("✓ Individual operations backward pass successful")
         
         # Check gradients
@@ -436,12 +449,12 @@ class AttentionFuserTest:
         
         return True
 
-    def test_attention_fuser(self):
+    def test_attention_fuser(self, rank: int, world_size: int):
         """Test the complete attention fuser with all operations."""
         print("\n=== Testing Attention Fuser ===")
         
         hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = self.create_test_tensors()
-        operations = self.create_operations()
+        operations = self.create_operations(rank, world_size)
 
         if self.tensor_parallel_size > 1:
             allreduce_comm_op = operations[7]
@@ -450,7 +463,7 @@ class AttentionFuserTest:
         
         # Create attention fuser
         attention_fuser = AttentionFuser(
-            ops=operations,
+            ops=operations[:7],
             allreduce_comm_op=allreduce_comm_op,
             fuse_ops=False
         )
@@ -463,24 +476,28 @@ class AttentionFuserTest:
         # Test forward pass
         print("Testing fused forward pass...")
         # try:
-        if self.tensor_parallel_size > 1:
-            output, output_bias, output_residual, _ = attention_fuser(
-                hidden_states=hidden_states,
-                bias=bias,
-                residual=residual,
-                rotary_pos_emb=rotary_pos_emb,
-                attention_mask=attention_mask,
-                allreduce_inputs=allreduce_inputs,
-                allreduce_overlap_window=(0, 1)
-            )
-        else:
-            output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
-                hidden_states=hidden_states,
-                bias=bias,
-                residual=residual,
-                rotary_pos_emb=rotary_pos_emb,
-                attention_mask=attention_mask,
-            )
+        with nvtx_range("Attention Fuser"):
+            if self.tensor_parallel_size > 1:
+                output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
+                    hidden_states=hidden_states,
+                    bias=bias,
+                    residual=residual,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_mask=attention_mask,
+                    allreduce_input=allreduce_inputs,
+                    allreduce_overlap_window=(0, 1),
+                    allreduce_sm_configs=(4, 1024),
+                    allreduce_overlap_window_backward=(0, 1),
+                    allreduce_sm_configs_backward=(4, 1024),
+                )
+            else:
+                output, output_bias, output_residual, _ = attention_fuser(
+                    hidden_states=hidden_states,
+                    bias=bias,
+                    residual=residual,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_mask=attention_mask,
+                )
         
         print(f"✓ Fused forward pass successful")
         print(f"  Output shape: {output.shape}")
@@ -494,7 +511,8 @@ class AttentionFuserTest:
         if self.tensor_parallel_size > 1:
             loss += grad_allreduce_input.sum()
 
-        loss.backward()
+        with nvtx_range("Fuser loss.backward"):
+            loss.backward()
         
         print("✓ Fused backward pass successful")
         print(f"  Hidden states grad: {hidden_states.grad is not None}")
@@ -759,7 +777,7 @@ class AttentionFuserTest:
         
         return True
 
-    def run_all_tests(self):
+    def run_all_tests(self, rank: int, world_size: int):
         """Run all tests and return overall success status."""
         print("=" * 60)
         print("ATTENTION FUSER OPERATION TESTS")
@@ -768,13 +786,13 @@ class AttentionFuserTest:
         test_results = []
         
         # try:
-        test_results.append(self.test_individual_operations())
+        test_results.append(self.test_individual_operations(rank, world_size))
         # except Exception as e:
         #     print(f"Individual operations test failed: {e}")
         #     test_results.append(False)
         
         # try:
-        test_results.append(self.test_attention_fuser())
+        test_results.append(self.test_attention_fuser(rank, world_size))
         # except Exception as e:
         #     print(f"Attention fuser test failed: {e}")
         #     test_results.append(False)
@@ -804,7 +822,7 @@ class AttentionFuserTest:
         
         test_names = [
             "Individual Operations",
-            "Attention Fuser",
+            # "Attention Fuser",
             # "Individual vs Fuser Comparison",
             # "Gradient Flow",
             # "Performance Comparison"
@@ -833,7 +851,7 @@ def run_process(rank, world_size, args, master_port):
         device=args.device, 
         tensor_parallel_size=args.tensor_parallel_size
     )
-    success = test_runner.run_all_tests()
+    success = test_runner.run_all_tests(rank, world_size)
 
     # Clean up distributed if initialized
     if dist.is_initialized():

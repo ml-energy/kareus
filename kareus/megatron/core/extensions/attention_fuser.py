@@ -76,7 +76,9 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         attention_mask: Optional[torch.Tensor],
         allreduce_input: Optional[torch.Tensor],
         allreduce_overlap_window: Optional[Tuple[int, int]],
+        allreduce_sm_configs: Optional[Tuple[int, int]],
         allreduce_overlap_window_backward: Optional[Tuple[int, int]],
+        allreduce_sm_configs_backward: Optional[Tuple[int, int]],
         allreduce_comm_op: Optional[FusibleOperation],
         forward_ops: list[tuple[FusibleOperation, list[int]]],
         backward_ops: list[tuple[FusibleOperation, list[int]]],
@@ -125,8 +127,13 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         # Operation autograd contexts
         basic_op_ctxs = [OperationContext() for _ in range(len(basic_ops))]
 
+        current_stream = torch.cuda.current_stream()
         if allreduce_comm_op:
             ar_start, ar_end = allreduce_overlap_window
+            if allreduce_sm_configs:
+                sm_num, block_size = allreduce_sm_configs
+            else:
+                sm_num, block_size = None, None
         else:
             ar_start, ar_end = -1, -1
 
@@ -146,9 +153,12 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         if ar_start == -1 and allreduce_comm_op is not None:
             allreduce_comm_op.fuser_forward(
                 [None], allreduce_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{}]
+                basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
             )
             allreduce_comm_op.sync()
+        
+        if ar_start == 0:
+            allreduce_comm_op.wait_event.record(current_stream)
 
         # Apply forward ops
         x = hidden_states
@@ -195,10 +205,12 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             ]
 
             if ar_start == fused_idx:
+                # Wait for the event from the previous operation before starting allreduce
+                allreduce_comm_op.wait_event.wait(current_stream)
                 allreduce_comm_op.fuser_forward(
                     [OperationContext()],
                     allreduce_input,
-                    basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{}]
+                    basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
                 )
 
             x, fused_op_extra_outputs = op.fuser_forward(
@@ -209,6 +221,10 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
                 basic_op_next_ops=next_ops,
                 basic_op_kwargs=[{} for _ in basic_op_idxs],
             )
+
+            # Record event after the operation at fused_idx-1 completes
+            if fused_idx == ar_start - 1:
+                allreduce_comm_op.wait_event.record(current_stream)
 
             if ar_end == fused_idx:
                 allreduce_comm_op.sync()
@@ -261,6 +277,7 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
 
             # Other context
             func_ctx.allreduce_window_backward = allreduce_overlap_window_backward
+            func_ctx.allreduce_sm_configs_backward = allreduce_sm_configs_backward
             func_ctx.allreduce_comm_op = allreduce_comm_op
             func_ctx.backward_ops = backward_ops
             func_ctx.basic_ops = basic_ops
@@ -270,6 +287,7 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             # func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
+        current_stream.synchronize()
         # return x, *extra_outputs
         assert get_bias and get_residual
         return x, bias, residual, allreduce_input
@@ -292,6 +310,7 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         # Operations and autograd state
         allreduce_comm_op = func_ctx.allreduce_comm_op
         allreduce_overlap_window = func_ctx.allreduce_window_backward
+        allreduce_sm_configs = func_ctx.allreduce_sm_configs_backward
         backward_ops = func_ctx.backward_ops
         basic_ops = func_ctx.basic_ops
         basic_op_ctxs = func_ctx.basic_op_ctxs
@@ -301,8 +320,13 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             ctx.saved_tensors = func_ctx.saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
 
+        current_stream = torch.cuda.current_stream()
         if allreduce_comm_op:
             ar_start, ar_end = allreduce_overlap_window
+            if allreduce_sm_configs:
+                sm_num, block_size = allreduce_sm_configs
+            else:
+                sm_num, block_size = None, None
         else:
             ar_start, ar_end = -1, -1
 
@@ -320,9 +344,12 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         if ar_start == -1 and allreduce_comm_op is not None:
             allreduce_comm_op.fuser_forward(
                 [None], grad_allreduce_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{}]
+                basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
             )
             allreduce_comm_op.sync()
+    
+        if ar_start == 0:
+            allreduce_comm_op.wait_event.record(current_stream)
 
         # Apply backward ops
         dx = grad_output
@@ -350,9 +377,10 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
                 grad_extra_outputs = [(grad_bias,)]
 
             if ar_start == fused_idx:
+                allreduce_comm_op.wait_event.wait(current_stream)
                 allreduce_comm_op.fuser_forward(
                     [None], grad_allreduce_input,
-                    basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{}]
+                    basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
                 )
 
             # Backward op
@@ -367,6 +395,9 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
                 basic_op_ctxs[idx].saved_tensors = None
             # for idx, dxs in zip(basic_op_idxs, fused_op_grad_extra_inputs):
             #     grad_extra_inputs[idx] = dxs
+
+            if fused_idx == ar_start - 1:
+                allreduce_comm_op.wait_event.record(current_stream)
 
             if ar_end == fused_idx:
                 allreduce_comm_op.sync()
@@ -418,6 +449,7 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         if func_ctx.is_first_module and not _is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
+        current_stream.synchronize()
         assert get_grad_bias and get_grad_residual
         return (
             dx,  # hidden_states
@@ -427,7 +459,9 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             None,  # attention_mask
             grad_allreduce_input,  # allreduce_input
             None,  # allreduce_overlap_window
+            None,  # allreduce_sm_configs
             None,  # allreduce_overlap_window_backward
+            None,  # allreduce_sm_configs_backward
             None,  # allreduce_comm_op
             None,  # forward_ops
             None,  # backward_ops
@@ -529,7 +563,9 @@ class AttentionFuser:
         attention_mask: Optional[torch.Tensor],
         allreduce_input: Optional[torch.Tensor] = None,
         allreduce_overlap_window: Optional[Tuple[int, int]] = None,
+        allreduce_sm_configs: Optional[Tuple[int, int]] = None,
         allreduce_overlap_window_backward: Optional[Tuple[int, int]] = None,
+        allreduce_sm_configs_backward: Optional[Tuple[int, int]] = None,
         # input: torch.Tensor,  # pylint: disable=redefined-builtin
         # *extra_inputs: torch.Tensor,
         # basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
@@ -562,7 +598,9 @@ class AttentionFuser:
             attention_mask,
             allreduce_input,
             allreduce_overlap_window,
+            allreduce_sm_configs,
             allreduce_overlap_window_backward,
+            allreduce_sm_configs_backward,
             self._allreduce_comm_op,
             self._forward_ops,
             self._backward_ops,
