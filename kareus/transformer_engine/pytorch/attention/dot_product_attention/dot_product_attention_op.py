@@ -492,7 +492,7 @@ class DotProductAttentionOp(BasicOperation):
             )
 
         # Run FlashAttention
-        self.logger.info("Running with FlashAttention backend")
+        # self.logger.info("Running with FlashAttention backend")
         
         # Skip context parallel for now (not supported in standalone function)
         if context_parallel:

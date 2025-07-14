@@ -153,7 +153,7 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         if ar_start == -1 and allreduce_comm_op is not None:
             allreduce_comm_op.fuser_forward(
                 [None], allreduce_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
+                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
             )
             allreduce_comm_op.sync()
         
@@ -344,7 +344,7 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
         if ar_start == -1 and allreduce_comm_op is not None:
             allreduce_comm_op.fuser_forward(
                 [None], grad_allreduce_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[], basic_op_next_ops=[], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
+                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
             )
             allreduce_comm_op.sync()
     
@@ -569,7 +569,7 @@ class AttentionFuser:
         # input: torch.Tensor,  # pylint: disable=redefined-builtin
         # *extra_inputs: torch.Tensor,
         # basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: # hidden_states, bias, residual
+    ) -> tuple[torch.Tensor, ...]: # hidden_states, bias, residual
 
         # Initialization before forward pass
         for op in self._basic_ops:
