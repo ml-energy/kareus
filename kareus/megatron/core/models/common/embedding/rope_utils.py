@@ -197,6 +197,7 @@ def _apply_rotary_pos_emb_bshd_backward(
     grad_t_re[..., half:] -= sg1
 
     grad_freqs = grad_re * (-t_re * sin_ + r_t * cos_)
+    grad_freqs = grad_freqs.sum(dim=(1, 2), keepdim=True)
     grad_t = torch.cat((grad_t_re, grad_pass), dim=-1)
 
     return grad_t, grad_freqs

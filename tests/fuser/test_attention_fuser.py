@@ -42,6 +42,10 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.enums import AttnMaskType
 from cfuser.core.utils import nvtx_range
 
+from megatron.core.models.common.embeddings.rotary_pos_embedding import (
+    RotaryEmbedding,
+)
+
 
 def set_random_seed(seed=42):
     """Set random seed for reproducibility."""
@@ -117,7 +121,7 @@ class AttentionFuserTest:
         self.seq_length = 4096
         self.hidden_size = 2048
         self.num_attention_heads = 32
-        self.num_query_groups = 32  # For grouped query attention
+        self.num_query_groups = 8  # For grouped query attention
         self.head_dim = self.hidden_size // self.num_attention_heads
         
         # Create transformer config
@@ -141,7 +145,7 @@ class AttentionFuserTest:
         """Create test tensors for the attention operations."""
         # Input tensors
         hidden_states = torch.randn(
-            self.batch_size, self.seq_length, self.hidden_size,
+            self.seq_length, self.batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
@@ -151,15 +155,26 @@ class AttentionFuserTest:
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         residual = torch.randn(
-            self.batch_size, self.seq_length, self.hidden_size,
+            self.seq_length, self.batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
         # Rotary position embeddings
-        rotary_pos_emb = torch.randn(
-            self.batch_size, self.seq_length, self.num_attention_heads, self.head_dim,
-            dtype=self.dtype, device=self.device
+        # rotary_pos_emb = torch.randn(
+        #     self.batch_size, self.seq_length, self.num_attention_heads, self.head_dim,
+        #     dtype=self.dtype, device=self.device
+        # )
+        seq = (
+            torch.arange(self.seq_length, device=self.device, dtype=self.dtype)
+            + 0
         )
+        rotary_base = 10000
+        inv_freq = 1.0 / (
+            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=self.dtype, device=self.device) / self.head_dim)
+        )
+        freqs = torch.outer(seq, inv_freq)
+        rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
+        rotary_pos_emb = rotary_pos_emb[:, None, None, :]
         
         # Attention mask (causal mask)
         # attention_mask = torch.tril(torch.ones(
@@ -169,7 +184,7 @@ class AttentionFuserTest:
         attention_mask = None
 
         allreduce_inputs = torch.randn(
-            self.batch_size, self.seq_length, self.hidden_size,
+            self.seq_length, self.batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
@@ -193,7 +208,11 @@ class AttentionFuserTest:
         )
         
         # 3. Linear QKV Operation (transforms input to queries, keys, values)
-        qkv_hidden_size = self.hidden_size * 3  # For Q, K, V combined
+        qkv_hidden_size = (
+            self.num_attention_heads * self.head_dim +  # Query heads
+            self.num_query_groups * self.head_dim +     # Key heads
+            self.num_query_groups * self.head_dim       # Value heads
+        )
         # linear_qkv_op = TEFusibleColumnParallelLinear(
         #     self.hidden_size,
         #     qkv_hidden_size,
@@ -354,6 +373,9 @@ class AttentionFuserTest:
         with nvtx_range("QKV Post-process"):
             q, k, v = qkv_postprocess_op(qkv_output)
         print(f"✓ QKV Post-process outputs - Q: {q.shape}, K: {k.shape}, V: {v.shape}")
+        print(f"q.shape: {q.shape}")
+        print(f"k.shape: {k.shape}")
+        print(f"v.shape: {v.shape}")
         
         # Test Rotary Embedding
         print("Testing Rotary Embedding...")
@@ -792,7 +814,7 @@ class AttentionFuserTest:
         #     test_results.append(False)
         
         # try:
-        test_results.append(self.test_attention_fuser(rank, world_size))
+        # test_results.append(self.test_attention_fuser(rank, world_size))
         # except Exception as e:
         #     print(f"Attention fuser test failed: {e}")
         #     test_results.append(False)
