@@ -21,7 +21,7 @@ import argparse
 import random
 
 # Add the project root to Python path
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 
 # Import required operations
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
@@ -342,33 +342,58 @@ class AttentionFuserTest:
         hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = self.create_test_tensors()
         operations = self.create_operations(rank, world_size)
         
+        # Helper function to check for infinite/NaN values
+        def check_tensor_health(tensor, name):
+            if torch.isnan(tensor).any():
+                print(f"⚠️  NaN detected in {name}")
+                return False
+            if torch.isinf(tensor).any():
+                print(f"⚠️  Inf detected in {name}")
+                return False
+            print(f"✓ {name} is healthy (min: {tensor.min().item():.4f}, max: {tensor.max().item():.4f})")
+            return True
+        
+        # Check initial tensors
+        print("\n--- Checking Initial Tensors ---")
+        check_tensor_health(hidden_states, "hidden_states")
+        check_tensor_health(bias, "bias")
+        check_tensor_health(residual, "residual")
+        check_tensor_health(rotary_pos_emb, "rotary_pos_emb")
+        
         # Test BDA
-        print("Testing BiasDropoutAddOp...")
+        print("\nTesting BiasDropoutAddOp...")
         bda_op = operations[0]
         with nvtx_range("BDA"):
             bda_output = bda_op(hidden_states, bias, residual)
         print(f"✓ BDA output shape: {bda_output.shape}")
+        if not check_tensor_health(bda_output, "bda_output"):
+            print("❌ BDA operation produced invalid values!")
+            return False
         
         # Test LayerNorm
-        print("Testing LayerNorm...")
+        print("\nTesting LayerNorm...")
         layernorm_op = operations[1]
         with nvtx_range("LayerNorm"):
             ln_output = layernorm_op(bda_output)
         print(f"✓ LayerNorm output shape: {ln_output.shape}")
-
         print(f"ln_output.dtype: {ln_output.dtype}")
+        if not check_tensor_health(ln_output, "ln_output"):
+            print("❌ LayerNorm operation produced invalid values!")
+            return False
         
         # Test Linear QKV
-        print("Testing Linear QKV...")
+        print("\nTesting Linear QKV...")
         linear_qkv_op = operations[2]
         with nvtx_range("Linear QKV"):
             qkv_output, _ = linear_qkv_op(ln_output)
         print(f"✓ Linear QKV output shape: {qkv_output.shape}")
-
         print(f"qkv_output.dtype: {qkv_output.dtype}")
+        if not check_tensor_health(qkv_output, "qkv_output"):
+            print("❌ Linear QKV operation produced invalid values!")
+            return False
         
         # Test QKV Post-process
-        print("Testing QKV Post-process...")
+        print("\nTesting QKV Post-process...")
         qkv_postprocess_op = operations[3]
         with nvtx_range("QKV Post-process"):
             q, k, v = qkv_postprocess_op(qkv_output)
@@ -376,31 +401,43 @@ class AttentionFuserTest:
         print(f"q.shape: {q.shape}")
         print(f"k.shape: {k.shape}")
         print(f"v.shape: {v.shape}")
+        if not (check_tensor_health(q, "q") and check_tensor_health(k, "k") and check_tensor_health(v, "v")):
+            print("❌ QKV Post-process operation produced invalid values!")
+            return False
         
         # Test Rotary Embedding
-        print("Testing Rotary Embedding...")
+        print("\nTesting Rotary Embedding...")
         rotary_embedding_op = operations[4]
         with nvtx_range("Rotary Embedding"):
             q_rope, k_rope = rotary_embedding_op(q, k, rotary_pos_emb)
         print(f"✓ Rotary Embedding outputs - Q: {q_rope.shape}, K: {k_rope.shape}")
-
         print(f"q_rope.dtype: {q_rope.dtype}")
         print(f"k_rope.dtype: {k_rope.dtype}")
         print(f"v.dtype: {v.dtype}")
+        if not (check_tensor_health(q_rope, "q_rope") and check_tensor_health(k_rope, "k_rope")):
+            print("❌ Rotary Embedding operation produced invalid values!")
+            return False
         
         # Test Dot Product Attention
-        print("Testing Dot Product Attention...")
+        print("\nTesting Dot Product Attention...")
         attention_op = operations[5]
         with nvtx_range("Attention"):
             attn_output = attention_op(q_rope, k_rope, v, attention_mask, AttnMaskType.causal)
         print(f"✓ Attention output shape: {attn_output.shape}")
+        print(f"attn_output.shape: {attn_output.shape}")
+        if not check_tensor_health(attn_output, "attn_output"):
+            print("❌ Attention operation produced invalid values!")
+            return False
         
         # Test Linear Projection
-        print("Testing Linear Projection...")
+        print("\nTesting Linear Projection...")
         linear_proj_op = operations[6]
         with nvtx_range("Linear Projection"):
             proj_output, _ = linear_proj_op(attn_output)
         print(f"✓ Linear Projection output shape: {proj_output.shape}")
+        if not check_tensor_health(proj_output, "proj_output"):
+            print("❌ Linear Projection operation produced invalid values!")
+            return False
 
         # Test AllReduce
         print("Testing AllReduce...")
@@ -423,9 +460,14 @@ class AttentionFuserTest:
         # Test backward pass for individual operations
         print("\n--- Testing Individual Operations Backward Pass ---")
         
-        # Create a loss from the final output
-        loss = proj_output.sum()
+        # Create a loss from the final output (use float32 to avoid overflow)
+        loss = proj_output.float().sum()
         print(f"Loss value: {loss.item()}")
+        
+        # Check if loss is finite
+        if not torch.isfinite(loss):
+            print("❌ Loss is not finite! Cannot proceed with backward pass.")
+            return False
         
         # Clear any existing gradients
         for op in operations:
@@ -528,10 +570,10 @@ class AttentionFuserTest:
         
         # Test backward pass
         print("Testing fused backward pass...")
-        loss = output.sum() + output_bias.sum() + output_residual.sum()
+        loss = output.float().sum() + output_bias.float().sum() + output_residual.float().sum()
 
         if self.tensor_parallel_size > 1:
-            loss += grad_allreduce_input.sum()
+            loss += grad_allreduce_input.float().sum()
 
         with nvtx_range("Fuser loss.backward"):
             loss.backward()
@@ -552,253 +594,6 @@ class AttentionFuserTest:
         #     traceback.print_exc()
         #     return False
 
-    def test_gradient_flow(self):
-        """Test that gradients flow correctly through the fused operations."""
-        print("\n=== Testing Gradient Flow ===")
-        
-        hidden_states, bias, residual, rotary_pos_emb, attention_mask = self.create_test_tensors()
-        operations = self.create_operations()
-        
-        attention_fuser = AttentionFuser(
-            ops=operations,
-            fuse_ops=True
-        )
-        
-        # Forward pass
-        output, output_bias, output_residual = attention_fuser(
-            hidden_states=hidden_states,
-            bias=bias,
-            residual=residual,
-            rotary_pos_emb=rotary_pos_emb,
-            attention_mask=attention_mask
-        )
-        
-        # Create a simple loss
-        loss = output.mean() + output_bias.mean() + output_residual.mean()
-        
-        # Backward pass
-        loss.backward()
-        
-        # Check gradients
-        grad_checks = {
-            "hidden_states": hidden_states.grad is not None and torch.isfinite(hidden_states.grad).all(),
-            "bias": bias.grad is not None and torch.isfinite(bias.grad).all(),
-            "residual": residual.grad is not None and torch.isfinite(residual.grad).all(),
-        }
-        
-        # Check operation parameter gradients
-        for i, op in enumerate(operations):
-            for name, param in op.named_parameters():
-                if param.grad is not None:
-                    finite_grad = torch.isfinite(param.grad).all()
-                    grad_checks[f"op_{i}_{name}"] = finite_grad
-                    if not finite_grad:
-                        print(f"✗ Non-finite gradient in op {i} param {name}")
-        
-        all_grads_ok = all(grad_checks.values())
-        if all_grads_ok:
-            print("✓ All gradients are finite and properly computed")
-        else:
-            print("✗ Some gradients are missing or non-finite")
-            for name, status in grad_checks.items():
-                if not status:
-                    print(f"  - {name}: {status}")
-        
-        return all_grads_ok
-
-    def test_individual_vs_fuser_comparison(self):
-        """Compare individual operations vs fuser with identical inputs."""
-        print("\n=== Testing Individual vs Fuser Comparison ===")
-        
-        # Create identical test tensors for both tests
-        set_random_seed(42)
-        hidden_states1, bias1, residual1, rotary_pos_emb1, attention_mask1 = self.create_test_tensors()
-        
-        set_random_seed(42)
-        hidden_states2, bias2, residual2, rotary_pos_emb2, attention_mask2 = self.create_test_tensors()
-        
-        # Create identical operations for both tests
-        set_random_seed(42)
-        operations1 = self.create_operations()
-        
-        set_random_seed(42)
-        operations2 = self.create_operations()
-        
-        # Copy parameters to ensure they're identical
-        for op1, op2 in zip(operations1, operations2):
-            for (name1, param1), (name2, param2) in zip(op1.named_parameters(), op2.named_parameters()):
-                param2.data.copy_(param1.data)
-        
-        print("=== Running Individual Operations ===")
-        
-        # Run individual operations
-        x = hidden_states1
-        
-        # BDA
-        x = operations1[0](x, bias1, residual1)
-        print(f"Individual BDA output shape: {x.shape}")
-        
-        # LayerNorm
-        x = operations1[1](x)
-        print(f"Individual LayerNorm output shape: {x.shape}")
-        
-        # Linear QKV
-        qkv_output, _ = operations1[2](x)
-        print(f"Individual Linear QKV output shape: {qkv_output.shape}")
-        
-        # QKV Post-process
-        q, k, v = operations1[3](qkv_output)
-        print(f"Individual QKV Post-process - Q: {q.shape}, K: {k.shape}, V: {v.shape}")
-        
-        # Rotary Embedding
-        q_rope, k_rope = operations1[4](q, k, rotary_pos_emb1)
-        print(f"Individual Rotary Embedding - Q: {q_rope.shape}, K: {k_rope.shape}")
-        
-        # Attention
-        attn_output = operations1[5](q_rope, k_rope, v, attention_mask1, AttnMaskType.causal)
-        print(f"Individual Attention output shape: {attn_output.shape}")
-        
-        # Linear Projection
-        individual_output, individual_output_bias = operations1[6](attn_output)
-        print(f"Individual Linear Projection output shape: {individual_output.shape}")
-        
-        # Individual backward
-        individual_loss = individual_output.sum()
-        print(f"Individual loss: {individual_loss.item()}")
-        
-        # Clear gradients
-        for op in operations1:
-            for param in op.parameters():
-                param.grad = None
-        hidden_states1.grad = None
-        bias1.grad = None
-        residual1.grad = None
-        
-        try:
-            individual_loss.backward()
-            print("✓ Individual backward successful")
-            individual_backward_success = True
-        except Exception as e:
-            print(f"✗ Individual backward failed: {str(e)}")
-            individual_backward_success = False
-        
-        print("\n=== Running Fuser Operations ===")
-        
-        # Run fuser
-        attention_fuser = AttentionFuser(ops=operations2, fuse_ops=False)
-        
-        try:
-            fuser_output, fuser_output_bias, fuser_output_residual = attention_fuser(
-                hidden_states=hidden_states2,
-                bias=bias2,
-                residual=residual2,
-                rotary_pos_emb=rotary_pos_emb2,
-                attention_mask=attention_mask2
-            )
-            print(f"Fuser output shape: {fuser_output.shape}")
-            print(f"Fuser output bias shape: {fuser_output_bias.shape}")
-            print(f"Fuser output residual shape: {fuser_output_residual.shape}")
-            
-            fuser_loss = fuser_output.sum() + fuser_output_bias.sum() + fuser_output_residual.sum()
-            print(f"Fuser loss: {fuser_loss.item()}")
-            
-            # Clear gradients
-            for op in operations2:
-                for param in op.parameters():
-                    param.grad = None
-            hidden_states2.grad = None
-            bias2.grad = None
-            residual2.grad = None
-            
-            try:
-                fuser_loss.backward()
-                print("✓ Fuser backward successful")
-                fuser_backward_success = True
-            except Exception as e:
-                print(f"✗ Fuser backward failed: {str(e)}")
-                print("This is where the cuBLAS error occurs!")
-                import traceback
-                traceback.print_exc()
-                fuser_backward_success = False
-                
-        except Exception as e:
-            print(f"✗ Fuser forward failed: {str(e)}")
-            fuser_backward_success = False
-        
-        print("\n=== Comparison Results ===")
-        print(f"Individual operations backward: {'✓ SUCCESS' if individual_backward_success else '✗ FAILED'}")
-        print(f"Fuser operations backward: {'✓ SUCCESS' if fuser_backward_success else '✗ FAILED'}")
-        
-        if individual_backward_success and not fuser_backward_success:
-            print("\n🔍 ANALYSIS: Individual operations work but fuser fails.")
-            print("   This confirms the issue is in the fuser's gradient handling,")
-            print("   specifically how it passes grad_extra_outputs to operations.")
-        
-        return individual_backward_success and fuser_backward_success
-
-    def test_performance_comparison(self):
-        """Compare performance of fused vs unfused operations."""
-        print("\n=== Testing Performance Comparison ===")
-        
-        hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = self.create_test_tensors()
-        operations = self.create_operations()
-        
-        # Test unfused operations
-        print("Testing unfused operations...")
-        set_random_seed(42)
-        
-        start_time = torch.cuda.Event(enable_timing=True)
-        end_time = torch.cuda.Event(enable_timing=True)
-        
-        torch.cuda.synchronize()
-        start_time.record()
-        
-        # Manual unfused forward pass
-        x = operations[0](hidden_states, bias, residual)  # BDA
-        x = operations[1](x)  # LayerNorm
-        qkv, _ = operations[2](x)  # Linear QKV
-        q, k, v = operations[3](qkv)  # QKV post-process
-        q_rope, k_rope = operations[4](q, k, rotary_pos_emb)  # Rotary embedding
-        attn_out = operations[5](q_rope, k_rope, v, attention_mask, AttnMaskType.causal)  # Attention
-        final_out, _ = operations[6](attn_out)  # Linear projection
-        allreduce_out = operations[7](allreduce_inputs)  # AllReduce
-        if operations[7].is_async_pending():
-            operations[7].sync()
-        
-        end_time.record()
-        torch.cuda.synchronize()
-        unfused_time = start_time.elapsed_time(end_time)
-        
-        print(f"Unfused operations time: {unfused_time:.3f} ms")
-        
-        # Test fused operations (if available)
-        print("Testing fused operations...")
-        set_random_seed(42)
-        
-        attention_fuser = AttentionFuser(ops=operations, fuse_ops=True)
-        
-        torch.cuda.synchronize()
-        start_time.record()
-        
-        output, output_bias, output_residual = attention_fuser(
-            hidden_states=hidden_states,
-            bias=bias,
-            residual=residual,
-            rotary_pos_emb=rotary_pos_emb,
-            attention_mask=attention_mask
-        )
-        
-        end_time.record()
-        torch.cuda.synchronize()
-        fused_time = start_time.elapsed_time(end_time)
-        
-        print(f"Fused operations time: {fused_time:.3f} ms")
-        
-        speedup = unfused_time / fused_time if fused_time > 0 else float('inf')
-        print(f"Speedup: {speedup:.2f}x")
-        
-        return True
-
     def run_all_tests(self, rank: int, world_size: int):
         """Run all tests and return overall success status."""
         print("=" * 60)
@@ -814,27 +609,9 @@ class AttentionFuserTest:
         #     test_results.append(False)
         
         # try:
-        # test_results.append(self.test_attention_fuser(rank, world_size))
+        test_results.append(self.test_attention_fuser(rank, world_size))
         # except Exception as e:
         #     print(f"Attention fuser test failed: {e}")
-        #     test_results.append(False)
-        
-        # try:
-        #     test_results.append(self.test_gradient_flow())
-        # except Exception as e:
-        #     print(f"Gradient flow test failed: {e}")
-        #     test_results.append(False)
-        
-        # try:
-        # test_results.append(self.test_individual_vs_fuser_comparison())
-        # except Exception as e:
-        #     print(f"Individual vs fuser comparison test failed: {e}")
-        #     test_results.append(False)
-        
-        # try:
-        #     test_results.append(self.test_performance_comparison())
-        # except Exception as e:
-        #     print(f"Performance comparison test failed: {e}")
         #     test_results.append(False)
         
         # Summary
@@ -844,7 +621,7 @@ class AttentionFuserTest:
         
         test_names = [
             "Individual Operations",
-            # "Attention Fuser",
+            "Attention Fuser",
             # "Individual vs Fuser Comparison",
             # "Gradient Flow",
             # "Performance Comparison"

@@ -281,7 +281,7 @@ class AttentionFuserTest:
     def get_overlap_windows(self):
         overlap_windows = [
             (-1, -1),
-            (0, 1), (2,), (3, 4), (5,), (6,),
+            (0, 1), (2, 2), (3, 4), (5, 5), (6, 6),
             (0, 2), (2, 4), (3, 5), (5, 6),
             (0, 4), (2, 5), (3, 6),
             (0, 5), (2, 6),
@@ -403,19 +403,25 @@ class AttentionFuserTest:
                 title += "\n"
                 f.write(title)
         
+        # skip = True
         overlap_windows = self.get_overlap_windows()
         for overlap_window in overlap_windows:
+            # if overlap_window[0] == 2 and overlap_window[1] == 2:
+            #     skip = False
+            # if skip:
+            #     continue
             for sm_num in range(1, 21):
                 for block_size in [512, 1024]:
                     sm_configs = (sm_num, block_size)
+                    print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
                     with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
                         self.test_config(
                             monitor, 
                             test_tensors, attention_fuser, 
                             overlap_window, sm_configs
                         )
-                    return
-                    time.sleep(60)
+                    # return
+                    time.sleep(30)
 
 
 def overlap_test(rank, world_size, args, master_port):
