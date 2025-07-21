@@ -143,7 +143,7 @@ class AttentionFuserTest:
     
     def create_test_tensors(self):
         """Create test tensors for the attention operations."""
-        nano_batch_size = self.batch_size // 2
+        nano_batch_size = self.batch_size
         hidden_states = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
@@ -259,9 +259,9 @@ class AttentionFuserTest:
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
                 async_op=True,  # Use async mode as set in the modified AllReduce
-                backend="msccl",
-                rank=self.rank,
-                world_size=self.world_size,
+                backend="nccl",
+                # rank=self.rank,
+                # world_size=self.world_size,
             )
         
             return [
@@ -278,16 +278,16 @@ class AttentionFuserTest:
         else:
             raise ValueError("Tensor parallel size must be greater than 1")
     
-    def get_overlap_windows(self):
-        overlap_windows = [
-            (-1, -1),
-            (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
-            (0, 3), (2, 5), (4, 6), (6, 8),
-            (0, 5), (2, 6), (4, 8),
-            (0, 6), (2, 8),
-            (0, 8),
-        ]
-        return overlap_windows
+    # def get_overlap_windows(self):
+    #     overlap_windows = [
+    #         (-1, -1),
+    #         (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
+    #         (0, 3), (2, 5), (4, 6), (6, 8),
+    #         (0, 5), (2, 6), (4, 8),
+    #         (0, 6), (2, 8),
+    #         (0, 8),
+    #     ]
+    #     return overlap_windows
     
     def test_config(self, monitor, test_tensors, attention_fuser, overlap_window, sm_configs):
         hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = test_tensors
@@ -371,7 +371,7 @@ class AttentionFuserTest:
             #     f.write(file_str)
         
         if self.rank == 0:
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "a") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results_baseline.csv", "a") as f:
                 line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
                 for i in range(self.repeat_num):
                     line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
@@ -397,37 +397,24 @@ class AttentionFuserTest:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
             os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            # with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
-            #     title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
-            #     for i in range(self.repeat_num):
-            #         title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
-            #     title = title.rstrip(",")
-            #     title += "\n"
-            #     f.write(title)
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results_baseline.csv", "w") as f:
+                title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
+                for i in range(self.repeat_num):
+                    title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
+                title = title.rstrip(",")
+                title += "\n"
+                f.write(title)
         
-        skip = True
-        overlap_windows = self.get_overlap_windows()
-        for overlap_window in overlap_windows:
-            # if overlap_window[0] == 2 and overlap_window[1] == 2:
-            #     skip = False
-            # if skip:
-            #     continue
-            for sm_num in range(1, 21):
-                for block_size in [512, 1024]:
-                    if sm_num == 5 and block_size == 512 and overlap_window[0] == 2 and overlap_window[1] == 6:
-                        skip = False
-                    if skip:
-                        continue
-                    sm_configs = (sm_num, block_size)
-                    print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
-                    with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
-                        self.test_config(
-                            monitor, 
-                            test_tensors, attention_fuser, 
-                            overlap_window, sm_configs
-                        )
-                    # return
-                    time.sleep(30)
+        overlap_window = (-1, -1)
+        sm_num, block_size = None, None
+        sm_configs = (sm_num, block_size)
+        print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
+        with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
+            self.test_config(
+                monitor, 
+                test_tensors, attention_fuser, 
+                overlap_window, sm_configs
+            )
 
 
 def overlap_test(rank, world_size, args, master_port):

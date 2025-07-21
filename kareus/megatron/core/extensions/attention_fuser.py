@@ -158,7 +158,8 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             allreduce_comm_op.sync()
         
         if ar_start == 0:
-            allreduce_comm_op.wait_event.record(current_stream)
+            # allreduce_comm_op.wait_event.record(current_stream)
+            allreduce_comm_op.event_record(current_stream)
 
         # Apply forward ops
         x = hidden_states
@@ -206,7 +207,7 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
 
             if ar_start == fused_idx:
                 # Wait for the event from the previous operation before starting allreduce
-                allreduce_comm_op.wait_event.wait(current_stream)
+                allreduce_comm_op.event_wait()
                 allreduce_comm_op.fuser_forward(
                     [OperationContext()],
                     allreduce_input,
@@ -224,7 +225,8 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
 
             # Record event after the operation at fused_idx-1 completes
             if fused_idx == ar_start - 1:
-                allreduce_comm_op.wait_event.record(current_stream)
+                # allreduce_comm_op.wait_event.record(current_stream)
+                allreduce_comm_op.event_record(current_stream)
 
             if ar_end == fused_idx:
                 allreduce_comm_op.sync()
@@ -349,7 +351,8 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             allreduce_comm_op.sync()
     
         if ar_start == 0:
-            allreduce_comm_op.wait_event.record(current_stream)
+            # allreduce_comm_op.wait_event.record(current_stream)
+            allreduce_comm_op.event_record(current_stream)
 
         # Apply backward ops
         dx = grad_output
@@ -377,7 +380,8 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
                 grad_extra_outputs = [(grad_bias,)]
 
             if ar_start == fused_idx:
-                allreduce_comm_op.wait_event.wait(current_stream)
+                # allreduce_comm_op.wait_event.wait(current_stream)
+                allreduce_comm_op.event_wait()
                 allreduce_comm_op.fuser_forward(
                     [None], grad_allreduce_input,
                     basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
@@ -397,7 +401,8 @@ class _AttentionFuserAutogradFunction(torch.autograd.Function):
             #     grad_extra_inputs[idx] = dxs
 
             if fused_idx == ar_start - 1:
-                allreduce_comm_op.wait_event.record(current_stream)
+                # allreduce_comm_op.wait_event.record(current_stream)
+                allreduce_comm_op.event_record(current_stream)
 
             if ar_end == fused_idx:
                 allreduce_comm_op.sync()

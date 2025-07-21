@@ -54,6 +54,8 @@ RUN pip install "nemo_toolkit[all]"==2.3.1
 RUN pip install omegaconf
 RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 RUN pip install zeus
+RUN pip install nemo_run
+RUN pip install mamba-ssm --no-build-isolation
 
 WORKDIR /workspaces/Kareus
 

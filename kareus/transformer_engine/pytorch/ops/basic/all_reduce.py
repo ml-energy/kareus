@@ -47,7 +47,16 @@ class AllReduce(BasicOperation):
         self._work_handle: Optional[torch.distributed.Work] = None
         if self.backend == "msccl":
             msccl_comm.msccl_AllReduce_init(rank, world_size)
+            self.comm_stream = msccl_comm.COMM_STREAM
         self.wait_event = torch.cuda.Event()
+    
+    def event_record(self, stream: torch.cuda.Stream):
+        if self.backend == "msccl":
+            self.wait_event.record(stream)
+    
+    def event_wait(self):
+        if self.backend == "msccl":
+            self.comm_stream.wait_event(self.wait_event)
 
     def op_forward(
         self,
