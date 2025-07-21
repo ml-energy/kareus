@@ -116,7 +116,7 @@ class AttentionFuserTest:
         self.seq_length = args.seq_len
         self.hidden_size = 2048
         self.num_attention_heads = 32
-        self.num_query_groups = 32  # For grouped query attention
+        self.num_query_groups = 8  # For grouped query attention
         self.head_dim = self.hidden_size // self.num_attention_heads
         self.ffn_hidden_size = 4 * self.hidden_size
         
