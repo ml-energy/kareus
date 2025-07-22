@@ -4,6 +4,8 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from transformer_engine.pytorch.ops.op import OperationContext
 from typing import Optional
 
+from kareus.apex.transformer.functional import fused_apply_rotary_pos_emb, fused_apply_rotary_pos_emb_backward
+
 
 def apply_rotary_pos_emb(
     ctx,
@@ -17,39 +19,40 @@ def apply_rotary_pos_emb(
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
     """
-    global fused_apply_rotary_pos_emb, fused_apply_rotary_pos_emb_thd
 
     if config.apply_rope_fusion:
-        raise NotImplementedError("RoPE fusion is not available.")
-        # if cu_seqlens is None:
-        #     # NOTE: TE backends do not support mRoPE in bshd format when bs > 1
-        #     if config.mrope_section is not None and freqs.shape[1] > 1:
-        #         return _apply_rotary_pos_emb_bshd(
-        #             t,
-        #             freqs,
-        #             rotary_interleaved=config.rotary_interleaved,
-        #             multi_latent_attention=config.multi_latent_attention,
-        #             mscale=mscale,
-        #         )
-        #     else:
-        #         if config.rotary_interleaved:
-        #             try:
-        #                 from megatron.core.extensions.transformer_engine import (
-        #                     fused_apply_rotary_pos_emb,
-        #                 )
+        if cu_seqlens is None:
+            # NOTE: TE backends do not support mRoPE in bshd format when bs > 1
+            if config.mrope_section is not None and freqs.shape[1] > 1:
+                return _apply_rotary_pos_emb_bshd(
+                    ctx,
+                    t,
+                    freqs,
+                    rotary_interleaved=config.rotary_interleaved,
+                    multi_latent_attention=config.multi_latent_attention,
+                    mscale=mscale,
+                )
+            else:
+                if config.rotary_interleaved:
+                    raise NotImplementedError("Interleaved RoPE is not supported")
+                    # try:
+                    #     from megatron.core.extensions.transformer_engine import (
+                    #         fused_apply_rotary_pos_emb,
+                    #     )
 
-        #                 return fused_apply_rotary_pos_emb(t, freqs, interleaved=True)
-        #             except ImportError:
-        #                 raise ImportError(
-        #                     "TE interleaved fused RoPE is not available."
-        #                     "Please install TE >= 2.2.0.dev0."
-        #                 )
-        #         else:
-        #             assert (
-        #                 fused_apply_rotary_pos_emb is not None
-        #             ), "apply_rope_fusion is not available."
-        #             return fused_apply_rotary_pos_emb(t, freqs, transpose_output_memory=True)
-        # else:
+                    #     return fused_apply_rotary_pos_emb(t, freqs, interleaved=True)
+                    # except ImportError:
+                    #     raise ImportError(
+                    #         "TE interleaved fused RoPE is not available."
+                    #         "Please install TE >= 2.2.0.dev0."
+                    #     )
+                else:
+                    # assert (
+                    #     fused_apply_rotary_pos_emb is not None
+                    # ), "apply_rope_fusion is not available."
+                    return fused_apply_rotary_pos_emb(ctx, t, freqs, transpose_output_memory=True)
+        else:
+            raise NotImplementedError("cu_seqlens is not supported")
         #     assert fused_apply_rotary_pos_emb_thd is not None, "apply_rope_fusion is not available."
         #     cp_size = parallel_state.get_context_parallel_world_size()
         #     if cp_size > 1:
@@ -87,12 +90,16 @@ def apply_rotary_pos_emb(
 
 def apply_rotary_pos_emb_backward(
     ctx,
+    config: TransformerConfig,
     grad_output: Tensor,
 ) -> Tensor:
-    return _apply_rotary_pos_emb_bshd_backward(
-        ctx,
-        grad_output,
-    )
+    if config.apply_rope_fusion:
+        return fused_apply_rotary_pos_emb_backward(ctx, grad_output)
+    else:
+        return _apply_rotary_pos_emb_bshd_backward(
+            ctx,
+            grad_output,
+        )
 
 
 def _apply_rotary_pos_emb_bshd(

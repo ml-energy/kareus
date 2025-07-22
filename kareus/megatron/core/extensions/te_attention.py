@@ -179,11 +179,11 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             self.kept_packed_seq_params.discard("cu_seqlens_q_padded")
             self.kept_packed_seq_params.discard("cu_seqlens_kv_padded")
         
-        # overwrite self.qkv_format depending on self.config.apply_rope_fusion, which can be set
-        # after init
-        if self.config.apply_rope_fusion and is_te_min_version("0.13.0", check_equality=False):
-            self.qkv_format = 'bshd'
-            raise NotImplementedError("Rope fusion is not implemented")
+        # # overwrite self.qkv_format depending on self.config.apply_rope_fusion, which can be set
+        # # after init
+        # if self.config.apply_rope_fusion and is_te_min_version("0.13.0", check_equality=False):
+        #     self.qkv_format = 'bshd'
+        #     raise NotImplementedError("Rope fusion is not implemented")
 
         # if self.te_forward_mask_type:
         #     raise NotImplementedError("TE forward mask type is not implemented")

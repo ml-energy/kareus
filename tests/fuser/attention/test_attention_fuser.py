@@ -137,7 +137,7 @@ class AttentionFuserTest:
             apply_query_key_layer_scaling=False,
             rotary_interleaved=False,
             flash_decode=False,
-            apply_rope_fusion=False,
+            apply_rope_fusion=True,
             params_dtype=self.dtype,
         )
 
@@ -165,12 +165,12 @@ class AttentionFuserTest:
         #     dtype=self.dtype, device=self.device
         # )
         seq = (
-            torch.arange(self.seq_length, device=self.device, dtype=self.dtype)
+            torch.arange(self.seq_length, device=self.device, dtype=torch.float32)
             + 0
         )
         rotary_base = 10000
         inv_freq = 1.0 / (
-            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=self.dtype, device=self.device) / self.head_dim)
+            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
         )
         freqs = torch.outer(seq, inv_freq)
         rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
@@ -359,6 +359,12 @@ class AttentionFuserTest:
         check_tensor_health(bias, "bias")
         check_tensor_health(residual, "residual")
         check_tensor_health(rotary_pos_emb, "rotary_pos_emb")
+
+        print(f"\nhidden_states.shape: {hidden_states.shape}")
+        print(f"bias.shape: {bias.shape}")
+        print(f"residual.shape: {residual.shape}")
+        print(f"rotary_pos_emb.shape: {rotary_pos_emb.shape}")
+        print(f"allreduce_inputs.shape: {allreduce_inputs.shape}")
         
         # Test BDA
         print("\nTesting BiasDropoutAddOp...")
@@ -542,7 +548,7 @@ class AttentionFuserTest:
         # try:
         with nvtx_range("Attention Fuser"):
             if self.tensor_parallel_size > 1:
-                output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
+                output, output_bias, output_residual, allreduce_output = attention_fuser(
                     hidden_states=hidden_states,
                     bias=bias,
                     residual=residual,
@@ -572,9 +578,6 @@ class AttentionFuserTest:
         print("Testing fused backward pass...")
         loss = output.float().sum() + output_bias.float().sum() + output_residual.float().sum()
 
-        if self.tensor_parallel_size > 1:
-            loss += grad_allreduce_input.float().sum()
-
         with nvtx_range("Fuser loss.backward"):
             loss.backward()
         
@@ -584,7 +587,7 @@ class AttentionFuserTest:
         print(f"  Residual grad: {residual.grad is not None}")
 
         if self.tensor_parallel_size > 1:
-            print(f"  Grad allreduce input grad: {grad_allreduce_input.grad is not None}")
+            print(f"  Allreduce output: {allreduce_output.grad is not None}")
         
         return True
             

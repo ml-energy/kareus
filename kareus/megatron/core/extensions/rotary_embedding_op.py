@@ -158,27 +158,28 @@ class RotaryEmbeddingOp(BasicOperation):
         if hasattr(ctx, 'query_ctx'):
             query_rope_applied = True
             grad_query_input, grad_q_freqs = apply_rotary_pos_emb_backward(
-                ctx.query_ctx, grad_query
+                ctx.query_ctx, self.config, grad_query
             )
             
         if hasattr(ctx, 'key_ctx'):
             key_rope_applied = True
             grad_key_input, grad_k_freqs = apply_rotary_pos_emb_backward(
-                ctx.key_ctx, grad_key
+                ctx.key_ctx, self.config, grad_key
             )
-            
-        # Combine frequency gradients if both query and key had rotary embeddings applied
-        if query_rope_applied and key_rope_applied:
-            # If the same frequency tensor was used for both, combine gradients
-            if ctx.duplicate_rotary_pos_emb:
-                grad_rotary_pos_emb = grad_q_freqs + grad_k_freqs
-            else:
-                # Different frequency tensors were used
-                grad_rotary_pos_emb = (grad_q_freqs, grad_k_freqs)
-        elif query_rope_applied:
-            grad_rotary_pos_emb = (grad_q_freqs, None)
-        elif key_rope_applied:
-            grad_rotary_pos_emb = (None, grad_k_freqs)
+        
+        # # Combine frequency gradients if both query and key had rotary embeddings applied
+        # if query_rope_applied and key_rope_applied:
+        #     # If the same frequency tensor was used for both, combine gradients
+        #     if ctx.duplicate_rotary_pos_emb:
+        #         grad_rotary_pos_emb = grad_q_freqs + grad_k_freqs
+        #     else:
+        #         # Different frequency tensors were used
+        #         grad_rotary_pos_emb = (grad_q_freqs, grad_k_freqs)
+        # elif query_rope_applied:
+        #     grad_rotary_pos_emb = (grad_q_freqs, None)
+        # elif key_rope_applied:
+        #     grad_rotary_pos_emb = (None, grad_k_freqs)
+        grad_rotary_pos_emb = None
 
         return grad_query_input, grad_key_input, grad_rotary_pos_emb
 

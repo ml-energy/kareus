@@ -7,7 +7,7 @@ data/
 compare_results/
 nemo_experiments/
 *.pt
-apex/
+# apex/
 *.png
 
 # Byte-compiled / optimized / DLL files

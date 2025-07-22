@@ -133,7 +133,7 @@ class AttentionFuserTest:
             apply_query_key_layer_scaling=False,
             rotary_interleaved=False,
             flash_decode=False,
-            apply_rope_fusion=False,
+            apply_rope_fusion=True,
             params_dtype=self.dtype,
             tensor_model_parallel_size=world_size,
         )
@@ -158,12 +158,12 @@ class AttentionFuserTest:
         )
         
         seq = (
-            torch.arange(self.seq_length, device=self.device, dtype=self.dtype)
+            torch.arange(self.seq_length, device=self.device, dtype=torch.float32)
             + 0
         )
         rotary_base = 10000
         inv_freq = 1.0 / (
-            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=self.dtype, device=self.device) / self.head_dim)
+            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
         )
         freqs = torch.outer(seq, inv_freq)
         rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
@@ -304,7 +304,7 @@ class AttentionFuserTest:
         for i in range(10):
             if i == 2:
                 time_start = time.time()
-            output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
+            output, output_bias, output_residual, allreduce_output = attention_fuser(
                 hidden_states=hidden_states,
                 bias=bias,
                 residual=residual,
@@ -338,7 +338,7 @@ class AttentionFuserTest:
                 monitor.begin_window("step")
 
             for i in range(iterations):
-                output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
+                output, output_bias, output_residual, allreduce_output = attention_fuser(
                     hidden_states=hidden_states,
                     bias=bias,
                     residual=residual,
@@ -397,15 +397,15 @@ class AttentionFuserTest:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
             os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            # with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
-            #     title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
-            #     for i in range(self.repeat_num):
-            #         title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
-            #     title = title.rstrip(",")
-            #     title += "\n"
-            #     f.write(title)
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
+                title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
+                for i in range(self.repeat_num):
+                    title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
+                title = title.rstrip(",")
+                title += "\n"
+                f.write(title)
         
-        skip = True
+        # skip = True
         overlap_windows = self.get_overlap_windows()
         for overlap_window in overlap_windows:
             # if overlap_window[0] == 2 and overlap_window[1] == 2:
@@ -414,10 +414,10 @@ class AttentionFuserTest:
             #     continue
             for sm_num in range(1, 21):
                 for block_size in [512, 1024]:
-                    if sm_num == 5 and block_size == 512 and overlap_window[0] == 2 and overlap_window[1] == 6:
-                        skip = False
-                    if skip:
-                        continue
+                    # if sm_num == 5 and block_size == 512 and overlap_window[0] == 2 and overlap_window[1] == 6:
+                    #     skip = False
+                    # if skip:
+                    #     continue
                     sm_configs = (sm_num, block_size)
                     print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
                     with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
