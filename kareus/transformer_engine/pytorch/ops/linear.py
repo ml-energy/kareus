@@ -79,6 +79,11 @@ class Linear(FusedOperation):
         self.return_bias: bool = return_bias
         self.apply_bias = bias and not return_bias
 
+        if tensor_parallel_mode == "column":
+            bias_fusable = True
+        else:
+            bias_fusable = False
+
         # Tensor parallel configuration
         (
             tensor_parallel_mode,
@@ -109,6 +114,7 @@ class Linear(FusedOperation):
             "sequence_parallel": False,
             "rng_state_tracker_function": rng_state_tracker_function,
             "accumulate_into_main_grad": accumulate_into_main_grad,
+            "bias_fusable": bias_fusable,
         }
         bias_kwargs = {
             "has_bias": self._has_bias,

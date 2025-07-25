@@ -16,12 +16,8 @@ from transformer_engine.pytorch.ops.op import (
     FusibleOperation,
     OperationContext,
 )
-from transformer_engine.pytorch.ops.fused import (
-    fuse_backward_linear_add,
+from kareus.transformer_engine.pytorch.ops.fused import (
     fuse_forward_linear_bias_activation,
-    fuse_forward_linear_bias_add,
-    fuse_userbuffers_backward_linear,
-    fuse_userbuffers_forward_linear,
 )
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
 from transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
@@ -539,8 +535,8 @@ class AttentionFuser:
         ops: list[tuple[FusibleOperation, list[int]]],
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in forward pass"""
-        ops = fuse_userbuffers_forward_linear(ops)
-        ops = fuse_forward_linear_bias_add(ops)
+        # ops = fuse_userbuffers_forward_linear(ops)
+        # ops = fuse_forward_linear_bias_add(ops)
         ops = fuse_forward_linear_bias_activation(ops)
         return ops
 
@@ -550,14 +546,14 @@ class AttentionFuser:
         ops: list[tuple[FusibleOperation, list[int]]],
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in backward pass"""
-        ops = fuse_userbuffers_backward_linear(ops)
-        ops = fuse_backward_linear_add(ops)
+        # ops = fuse_userbuffers_backward_linear(ops)
+        # ops = fuse_backward_linear_add(ops)
         return ops
 
     def fuse_ops(self) -> None:
         """Attempt to fuse operations"""
         self._forward_ops = self._fuse_forward_ops(self._forward_ops)
-        self._backward_ops = self._fuse_backward_ops(self._backward_ops)
+        # self._backward_ops = self._fuse_backward_ops(self._backward_ops)
 
     def __call__(
         self,

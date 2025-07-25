@@ -96,6 +96,7 @@ class BasicLinear(BasicOperation):
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
         userbuffers_options: Optional[dict[str, Any]] = None,
+        bias_fusable: bool = False,
     ) -> None:
         super().__init__()
 
@@ -155,6 +156,9 @@ class BasicLinear(BasicOperation):
 
         # Userbuffers options
         self._userbuffers_options: Optional[dict[str, Any]] = userbuffers_options
+
+        # Whether bias is fusable
+        self.bias_fusable: bool = bias_fusable
 
     @classmethod
     def _canonicalize_tensor_parallelism(

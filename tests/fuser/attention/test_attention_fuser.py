@@ -535,14 +535,14 @@ class AttentionFuserTest:
         attention_fuser = AttentionFuser(
             ops=operations[:7],
             allreduce_comm_op=allreduce_comm_op,
-            fuse_ops=False
+            fuse_ops=True
         )
         
         print("Attention fuser created successfully")
         print(f"Number of basic operations: {len(attention_fuser._basic_ops)}")
-        print(f"Number of forward ops: {len(attention_fuser._forward_ops)}")
-        print(f"Number of backward ops: {len(attention_fuser._backward_ops)}")
-        
+        print(f"forward ops: {attention_fuser._forward_ops}")
+        print(f"backward ops: {attention_fuser._backward_ops}")
+
         # Test forward pass
         print("Testing fused forward pass...")
         # try:

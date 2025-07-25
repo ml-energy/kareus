@@ -427,7 +427,7 @@ class AttentionFuserTest:
                             overlap_window, sm_configs
                         )
                     # return
-                    time.sleep(30)
+                    time.sleep(60)
 
 
 def overlap_test(rank, world_size, args, master_port):
