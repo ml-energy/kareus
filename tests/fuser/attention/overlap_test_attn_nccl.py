@@ -139,7 +139,8 @@ class AttentionFuserTest:
         )
 
         self.frequency = args.frequency
-        self.repeat_num = 3
+        self.repeat_num = 1
+        self.sm_num = args.sm_num
     
     def create_test_tensors(self):
         """Create test tensors for the attention operations."""
@@ -259,7 +260,7 @@ class AttentionFuserTest:
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
                 async_op=True,  # Use async mode as set in the modified AllReduce
-                backend="msccl",
+                backend="nccl",
                 rank=self.rank,
                 world_size=self.world_size,
             )
@@ -371,7 +372,7 @@ class AttentionFuserTest:
             #     f.write(file_str)
         
         if self.rank == 0:
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "a") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results_nccl.csv", "a") as f:
                 line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
                 for i in range(self.repeat_num):
                     line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
@@ -397,13 +398,14 @@ class AttentionFuserTest:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
             os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
-                title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
-                for i in range(self.repeat_num):
-                    title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
-                title = title.rstrip(",")
-                title += "\n"
-                f.write(title)
+            if not os.path.exists(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results_nccl.csv"):
+                with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results_nccl.csv", "w") as f:
+                    title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
+                    for i in range(self.repeat_num):
+                        title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
+                    title = title.rstrip(",")
+                    title += "\n"
+                    f.write(title)
         
         # skip = True
         overlap_windows = self.get_overlap_windows()
@@ -412,22 +414,22 @@ class AttentionFuserTest:
             #     skip = False
             # if skip:
             #     continue
-            for sm_num in range(1, 21):
-                for block_size in [512, 1024]:
-                    # if sm_num == 17 and block_size == 512 and overlap_window[0] == 4 and overlap_window[1] == 5:
-                    #     skip = False
-                    # if skip:
-                    #     continue
-                    sm_configs = (sm_num, block_size)
-                    print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
-                    with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
-                        self.test_config(
-                            monitor, 
-                            test_tensors, attention_fuser, 
-                            overlap_window, sm_configs
-                        )
-                    # return
-                    time.sleep(60)
+            sm_num = self.sm_num
+            block_size = None
+            # if sm_num == 17 and block_size == 512 and overlap_window[0] == 4 and overlap_window[1] == 5:
+            #     skip = False
+            # if skip:
+            #     continue
+            sm_configs = (sm_num, block_size)
+            print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
+            with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
+                self.test_config(
+                    monitor, 
+                    test_tensors, attention_fuser, 
+                    overlap_window, sm_configs
+                )
+            # return
+            time.sleep(45)
 
 
 def overlap_test(rank, world_size, args, master_port):
@@ -455,6 +457,7 @@ def overlap_test(rank, world_size, args, master_port):
             dist.destroy_process_group()
             print("Destroyed process group")
 
+# CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 overlap_test_attn_nccl.py
 
 if __name__ == "__main__":
     import argparse
@@ -463,6 +466,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", "-b", type=int, default=4)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
+    parser.add_argument("--sm_num", "-sm", type=int, default=1)
     args = parser.parse_args()
 
     print("Running overlap test for attention fuser")
@@ -483,4 +487,20 @@ if __name__ == "__main__":
         nprocs=args.world_size,
         join=True,
     )
+    # import os
+    # import random
+    # rank = int(os.environ.get("RANK", 0))
+    # world_size = int(os.environ.get("WORLD_SIZE", 1))
+    # local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    # master_port = random.randint(8000, 65535)
+    
+    # print(f"Using torchrun: rank={rank}, world_size={world_size}, local_rank={local_rank}")
+    
+    # # Set master port if not set
+    # if "MASTER_PORT" not in os.environ:
+    #     os.environ["MASTER_PORT"] = f"{master_port}"
+    # if "MASTER_ADDR" not in os.environ:
+    #     os.environ["MASTER_ADDR"] = "localhost"
+        
+    # overlap_test(rank, world_size, args, master_port)
     

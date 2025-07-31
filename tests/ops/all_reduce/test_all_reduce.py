@@ -150,14 +150,26 @@ class AllReduceTest:
         )
         return allreduce_inputs
 
-    def create_operations(self, rank: int, world_size: int):
+    def create_operations(self, rank: int, world_size: int, allreduce_inputs: torch.Tensor):
         """Create all the required operations for the attention fuser."""
+        allreduce_msccl_cached = AllReduce(
+            process_group=self.tp_group,
+            async_op=True,
+            backend="msccl",
+            rank=rank,
+            world_size=world_size,
+        )
         allreduce_msccl = AllReduce(
             process_group=self.tp_group,
             async_op=True,
             backend="msccl",
             rank=rank,
             world_size=world_size,
+            use_persistent_output=True,
+            input_buffer=allreduce_inputs,
+            tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
+            device=self.device,
+            dtype=self.dtype,
         )
         allreduce_nccl = AllReduce(
             process_group=self.tp_group,
@@ -166,7 +178,7 @@ class AllReduceTest:
             rank=rank,
             world_size=world_size,
         )
-        return allreduce_msccl, allreduce_nccl
+        return allreduce_msccl_cached, allreduce_msccl, allreduce_nccl
 
     def test_individual_operations(self, allreduce_comm_op, allreduce_inputs, sm_num=None, block_size=None):
         """Test each operation individually to ensure they work correctly."""
@@ -175,30 +187,38 @@ class AllReduceTest:
         return True
 
     def run_all_tests(self, rank: int, world_size: int):
-        allreduce_msccl, allreduce_nccl = self.create_operations(rank, world_size)
         allreduce_inputs = self.create_test_tensors()
+        allreduce_msccl_cached, allreduce_msccl, allreduce_nccl = self.create_operations(rank, world_size, allreduce_inputs)
 
-        with nvtx_range("nccl"):
+        # for sm_num in range(1, 21):
+        #     block_size = 1024
+        sm_num = 8
+        block_size = 1024
+        with nvtx_range(f"nccl - {sm_num} - {block_size}"):
             for i in range(5):
-                self.test_individual_operations(allreduce_nccl, allreduce_inputs)
+                self.test_individual_operations(allreduce_nccl, allreduce_inputs, sm_num=sm_num, block_size=block_size)
 
-        start_time = time.perf_counter()
-        for i in range(10):
-            self.test_individual_operations(allreduce_nccl, allreduce_inputs)
-        end_time = time.perf_counter()
-        print(f"Time taken for nccl: {(end_time - start_time) / 10} seconds")
+            # start_time = time.perf_counter()
+            # for i in range(10):
+            #     self.test_individual_operations(allreduce_nccl, allreduce_inputs)
+            # end_time = time.perf_counter()
+            # print(f"Time taken for nccl with sm_num={sm_num} and block_size={block_size}: {(end_time - start_time) / 10} seconds")
 
         for sm_num in range(1, 21):
             block_size = 1024
+            with nvtx_range(f"msccl cached - {sm_num}"):
+                for i in range(5):
+                    self.test_individual_operations(allreduce_msccl_cached, allreduce_inputs, sm_num=sm_num, block_size=block_size)
+            
             with nvtx_range(f"msccl - {sm_num}"):
                 for i in range(5):
                     self.test_individual_operations(allreduce_msccl, allreduce_inputs, sm_num=sm_num, block_size=block_size)
             
-            start_time = time.perf_counter()
-            for i in range(10):
-                self.test_individual_operations(allreduce_msccl, allreduce_inputs, sm_num=sm_num, block_size=block_size)
-            end_time = time.perf_counter()
-            print(f"Time taken for msccl with sm_num={sm_num} and block_size={block_size}: {(end_time - start_time) / 10} seconds")
+            # start_time = time.perf_counter()
+            # for i in range(10):
+            #     self.test_individual_operations(allreduce_msccl, allreduce_inputs, sm_num=sm_num, block_size=block_size)
+            # end_time = time.perf_counter()
+            # print(f"Time taken for msccl with sm_num={sm_num} and block_size={block_size}: {(end_time - start_time) / 10} seconds")
         
 
         # self.test_individual_operations(allreduce_msccl, allreduce_inputs, sm_num=4, block_size=1024)

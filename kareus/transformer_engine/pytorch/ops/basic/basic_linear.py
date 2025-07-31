@@ -97,6 +97,9 @@ class BasicLinear(BasicOperation):
         accumulate_into_main_grad: bool = False,
         userbuffers_options: Optional[dict[str, Any]] = None,
         bias_fusable: bool = False,
+        use_persistent_output: bool = False,
+        batch_size: Optional[int] = None,
+        seq_length: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -159,6 +162,18 @@ class BasicLinear(BasicOperation):
 
         # Whether bias is fusable
         self.bias_fusable: bool = bias_fusable
+
+        self.use_persistent_output: bool = use_persistent_output
+        if use_persistent_output:
+            assert batch_size is not None and seq_length is not None, "batch_size and seq_length must be provided when use_persistent_output is True"
+            self.persistent_output = torch.empty(
+                seq_length,
+                batch_size,
+                self.local_out_features,
+                device=device,
+                dtype=dtype,
+                memory_format=torch.contiguous_format
+            )
 
     @classmethod
     def _canonicalize_tensor_parallelism(
@@ -906,6 +921,8 @@ class BasicLinear(BasicOperation):
         output, x_local, _ = BasicLinear._functional_forward(
             input=input_,
             weight=self.weight,
+            out=self.persistent_output if self.use_persistent_output else None,
+            accumulate_into_out=False,
             dtype=dtype,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,

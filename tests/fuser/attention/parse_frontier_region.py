@@ -7,7 +7,7 @@ tp = 2
 bs = 4
 seq = 4096
 
-freqs = [str(i) for i in range(1400, 900, -100)]
+freqs = [str(i) for i in range(1700, 1400, -100)]
 
 seq_times = []
 seq_energies = []
@@ -17,30 +17,48 @@ ovlp_bestenergy_energies = []
 overlap_data = {}
 
 for freq in freqs:
-    df_base = pd.read_csv(f"logs/tp{tp}_bs{bs}_seq{seq}/{freq}/backward_energy_results_baseline.csv")
-    df = pd.read_csv(f"logs/tp{tp}_bs{bs}_seq{seq}/{freq}/backward_energy_results.csv")
+    df_base = pd.read_csv(f"logs/tp{tp}-bs{bs}-seq{seq}/{freq}/energy_results_baseline.csv")
+    df = pd.read_csv(f"logs/tp{tp}-bs{bs}-seq{seq}/{freq}/energy_results.csv")
+    df_nccl = pd.read_csv(f"logs/tp{tp}-bs{bs}-seq{seq}/{freq}/energy_results_nccl.csv")
 
     row = df_base.iloc[0]
-    # seq_times.append(row['0:time (s)'])
-    # seq_energies.append(row['0:total energy (J)'])
     seq_time = row['0:time (s)']
     seq_energy = row['0:total energy (J)']
+    seq_times.append(seq_time)
+    seq_energies.append(seq_energy)
 
     overlap_rows = df[(df['overlap_start'] != -1) & 
-                         (df['overlap_end'] != -1)]
-    times = overlap_rows['time (s)'].values
-    energies = overlap_rows['total energy (J)'].values
+                         (df['overlap_end'] != -1)].copy()
+    overlap_rows['0:time (s)'] = overlap_rows['0:time (s)'] * 2
+    overlap_rows['0:total energy (J)'] = overlap_rows['0:total energy (J)'] * 2
 
-    idx_min_max_time = df['0:total energy (J)'].idxmin()
-    min_row = df.loc[idx_min_max_time]
-    # ovlp_bestenergy_times.append(min_row['0:time (s)'])
-    # ovlp_bestenergy_energies.append(min_row['0:total energy (J)'])
+    overlap_rows = overlap_rows[overlap_rows['0:total energy (J)'] < seq_energy]
+    overlap_rows = overlap_rows[overlap_rows['0:time (s)'] < seq_time]
+
+    overlap_nccl_rows = df_nccl[(df_nccl['overlap_start'] != -1) & 
+                         (df_nccl['overlap_end'] != -1)].copy()
+    overlap_nccl_rows['0:time (s)'] = overlap_nccl_rows['0:time (s)'] * 2
+    overlap_nccl_rows['0:total energy (J)'] = overlap_nccl_rows['0:total energy (J)'] * 2
+
+    overlap_nccl_rows = overlap_nccl_rows[overlap_nccl_rows['0:total energy (J)'] < seq_energy]
+    overlap_nccl_rows = overlap_nccl_rows[overlap_nccl_rows['0:time (s)'] < seq_time]
+
+    times = overlap_rows['0:time (s)'].values
+    energies = overlap_rows['0:total energy (J)'].values
+
+    times_nccl = overlap_nccl_rows['0:time (s)'].values
+    energies_nccl = overlap_nccl_rows['0:total energy (J)'].values
+
+    idx_min_max_time = overlap_rows['0:total energy (J)'].idxmin()
+    min_row = overlap_rows.loc[idx_min_max_time]
     min_energy = min_row['0:total energy (J)']
     min_energy_time = min_row['0:time (s)']
 
     overlap_data[freq] = {
         'times': times,
         'energies': energies,
+        'times_nccl': times_nccl,
+        'energies_nccl': energies_nccl,
         'min_energy': min_energy,
         'min_energy_time': min_energy_time,
         'seq_energy': seq_energy,
@@ -54,28 +72,42 @@ plt.figure(figsize=(12, 9))
 plt.scatter(seq_times, seq_energies, label='No overlap', alpha=0.7, s=80, color='blue')
 
 # Define colormap for the frequency areas
-colors = plt.cm.viridis(np.linspace(0, 1, len(freqs)))
+colors = plt.cm.viridis(np.linspace(0, 1, len(freqs) * 2))
 
+from scipy.spatial import ConvexHull
 # Plot overlap data for each frequency
 for i, freq in enumerate(freqs):
     if freq in overlap_data:
         data = overlap_data[freq]
         
-        # Find the convex hull of the points to create area
-        if len(data['times']) >= 3:  # Need at least 3 points for convex hull
-            from scipy.spatial import ConvexHull
-            points = np.column_stack([data['times'], data['energies']])
-            hull = ConvexHull(points)
-            
-            # Create polygon vertices from convex hull
-            hull_points = points[hull.vertices]
-            
-            # Plot convex hull as polygon
-            polygon = Polygon(hull_points, alpha=0.2, color=colors[i], label=f'Overlap with different configs')
-            plt.gca().add_patch(polygon)
-        else:
-            # If not enough points, just plot the points
-            plt.scatter(data['times'], data['energies'], alpha=0.2, color=colors[i])
+        # # Find the convex hull of the points to create area
+        # if len(data['times']) >= 3:  # Need at least 3 points for convex hull
+        points = np.column_stack([data['times'], data['energies']])
+        hull = ConvexHull(points)
+        
+        # Create polygon vertices from convex hull
+        hull_points = points[hull.vertices]
+        
+        # Plot convex hull as polygon
+        polygon = Polygon(hull_points, alpha=0.2, color=colors[2 *i], label=f'MSCCL')
+        plt.gca().add_patch(polygon)
+        # else:
+        #     # If not enough points, just plot the points
+        #     plt.scatter(data['times'], data['energies'], alpha=0.2, color=colors[i])
+
+        # if len(data['times_nccl']) >= 3:  # Need at least 3 points for convex hull
+        points_2 = np.column_stack([data['times_nccl'], data['energies_nccl']])
+        hull_2 = ConvexHull(points_2)
+        
+        # Create polygon vertices from convex hull
+        hull_points_2 = points_2[hull_2.vertices]
+
+        # Plot convex hull as polygon
+        polygon_2 = Polygon(hull_points_2, alpha=0.2, color=colors[2 * i + 1], label=f'NCCL')
+        plt.gca().add_patch(polygon_2)
+        # else:
+        #     # If not enough points, just plot the points
+        #     plt.scatter(data['times_nccl'], data['energies_nccl'], alpha=0.2, color=colors[i])
         
         # Highlight minimum energy point
         plt.scatter(data['min_energy_time'], data['min_energy'], color=colors[i], 
@@ -117,5 +149,5 @@ for handle, label in zip(handles, labels):
 plt.legend(unique_handles, unique_labels, fontsize=16, loc='best')
 
 # Save the figure
-plt.savefig("energy_time_regions.png", dpi=300, bbox_inches='tight')
+plt.savefig("energy_time_regions_+nccl.png", dpi=300, bbox_inches='tight')
 plt.show() 

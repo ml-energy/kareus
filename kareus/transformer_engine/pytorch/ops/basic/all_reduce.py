@@ -5,7 +5,9 @@
 """Fusible operation for all-reduce."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Dict, Any
+import contextlib
+import os
 
 import torch
 
@@ -28,6 +30,8 @@ class AllReduce(BasicOperation):
         Process group for communication
     async_op: bool, default = False
         Whether to perform asynchronous all-reduce operation
+    backend: str, default = "nccl"
+        Backend to use for communication ("nccl" or "msccl")
 
     """
 
@@ -38,24 +42,49 @@ class AllReduce(BasicOperation):
         backend: str = "nccl",
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
+        use_persistent_output: bool = False,
+        input_buffer: Optional[torch.Tensor] = None,
+        tensor_size: Optional[list[int]] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.async_op: bool = async_op
         self.backend: str = backend
-
+        
+        self.comm_stream: Optional[torch.cuda.Stream] = None
         self._work_handle: Optional[torch.distributed.Work] = None
-        if self.backend == "msccl":
-            msccl_comm.msccl_AllReduce_init(rank, world_size)
-            self.comm_stream = msccl_comm.COMM_STREAM
         self.wait_event = torch.cuda.Event()
+
+        self.use_persistent_output: bool = use_persistent_output
+        if use_persistent_output:
+            assert self.backend == "msccl", "use_persistent_output is only supported for msccl backend"
+            assert input_buffer is not None and tensor_size is not None and device is not None and dtype is not None, \
+                "input_buffer, tensor_size, device, and dtype must be provided when use_persistent_output is True"
+            self.output_buffer = torch.empty(
+                *tensor_size,
+                device=device,
+                dtype=dtype,
+            )
+            self.input_buffer = input_buffer
+
+        if self.backend == "msccl":
+            if use_persistent_output:
+                msccl_comm.msccl_AllReduce_init(rank, world_size, input_buffer, self.output_buffer)
+            else:
+                msccl_comm.msccl_AllReduce_init_cached(rank, world_size)
+            self.comm_stream = msccl_comm.COMM_STREAM
+    
+    def set_stream(self, stream: torch.cuda.Stream):
+        self.comm_stream = stream
     
     def event_record(self, stream: torch.cuda.Stream):
-        if self.backend == "msccl":
+        if self.comm_stream is not None:
             self.wait_event.record(stream)
     
     def event_wait(self):
-        if self.backend == "msccl":
+        if self.comm_stream is not None:
             self.comm_stream.wait_event(self.wait_event)
 
     def op_forward(
@@ -80,18 +109,21 @@ class AllReduce(BasicOperation):
         
         if self.backend == "msccl":
             assert sm_num is not None and block_size is not None, "sm_num and block_size must be provided for msccl backend"
-            msccl_comm.msccl_AllReduce(x, x, sm_num, block_size)
+            if self.use_persistent_output:
+                msccl_comm.msccl_AllReduce(sm_num, block_size)
+                return self.output_buffer
+            else:
+                # output = torch.empty_like(x)
+                msccl_comm.msccl_AllReduce_cached(x, x, sm_num, block_size)
+                return x
         else:
             if self.async_op:
-                # Perform asynchronous all-reduce
                 self._work_handle = torch.distributed.all_reduce(
                     x, group=self.process_group, async_op=True
                 )
             else:
-                # Perform synchronous all-reduce
                 torch.distributed.all_reduce(x, group=self.process_group)
-            
-        return x
+            return x
 
     def sync(self) -> None:
         """Synchronize pending asynchronous all-reduce operation.

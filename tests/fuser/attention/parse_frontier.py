@@ -5,7 +5,7 @@ tp = 2
 bs = 4
 seq = 4096
 
-freqs = [str(i) for i in range(1400, 900, -100)]
+freqs = [str(i) for i in range(1700, 1200, -100)]
 
 seq_times = []
 seq_energies = []
@@ -13,8 +13,8 @@ ovlp_bestenergy_times = []
 ovlp_bestenergy_energies = []
 
 for freq in freqs:
-    df_base = pd.read_csv(f"logs/tp{tp}_bs{bs}_seq{seq}/{freq}/energy_results_baseline.csv")
-    df = pd.read_csv(f"logs/tp{tp}_bs{bs}_seq{seq}/{freq}/energy_results.csv")
+    df_base = pd.read_csv(f"logs/tp{tp}-bs{bs}-seq{seq}/{freq}/energy_results_baseline.csv")
+    df = pd.read_csv(f"logs/tp{tp}-bs{bs}-seq{seq}/{freq}/energy_results.csv")
 
     row = df_base.iloc[0]
     seq_times.append(row['0:time (s)'])

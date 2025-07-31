@@ -133,7 +133,7 @@ class AttentionFuserTest:
             apply_query_key_layer_scaling=False,
             rotary_interleaved=False,
             flash_decode=False,
-            apply_rope_fusion=False,
+            apply_rope_fusion=True,
             params_dtype=self.dtype,
             tensor_model_parallel_size=world_size,
         )
@@ -158,12 +158,12 @@ class AttentionFuserTest:
         )
         
         seq = (
-            torch.arange(self.seq_length, device=self.device, dtype=self.dtype)
+            torch.arange(self.seq_length, device=self.device, dtype=torch.float32)
             + 0
         )
         rotary_base = 10000
         inv_freq = 1.0 / (
-            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=self.dtype, device=self.device) / self.head_dim)
+            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
         )
         freqs = torch.outer(seq, inv_freq)
         rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
