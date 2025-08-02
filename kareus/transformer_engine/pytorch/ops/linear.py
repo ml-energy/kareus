@@ -73,6 +73,9 @@ class Linear(FusedOperation):
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
+        use_persistent_output: bool = False,
+        batch_size: Optional[int] = None,
+        seq_length: Optional[int] = None,
     ) -> None:
         
         self._has_bias: bool = bias
@@ -115,6 +118,9 @@ class Linear(FusedOperation):
             "rng_state_tracker_function": rng_state_tracker_function,
             "accumulate_into_main_grad": accumulate_into_main_grad,
             "bias_fusable": bias_fusable,
+            "use_persistent_output": use_persistent_output,
+            "batch_size": batch_size,
+            "seq_length": seq_length,
         }
         bias_kwargs = {
             "has_bias": self._has_bias,
@@ -142,6 +148,22 @@ class Linear(FusedOperation):
         #     self.backward_comm_op = AllReduce(process_group=tensor_parallel_group)
         # elif tensor_parallel_mode == "row":
         #     self.forward_comm_op = AllReduce(process_group=tensor_parallel_group)
+    
+    @property
+    def bias_fusable(self) -> bool:
+        return self.basic_ops[0].bias_fusable
+    
+    @bias_fusable.setter
+    def bias_fusable(self, value: bool) -> None:
+        self.basic_ops[0].bias_fusable = value
+    
+    @property
+    def use_persistent_output(self) -> bool:
+        return self.basic_ops[0].use_persistent_output
+    
+    @property
+    def persistent_output(self) -> torch.Tensor:
+        return self.basic_ops[0].persistent_output
 
     @property
     def weight(self) -> torch.nn.Parameter:

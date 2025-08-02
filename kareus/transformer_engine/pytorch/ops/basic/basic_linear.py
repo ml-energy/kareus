@@ -164,6 +164,7 @@ class BasicLinear(BasicOperation):
         self.bias_fusable: bool = bias_fusable
 
         self.use_persistent_output: bool = use_persistent_output
+        self.persistent_output: Optional[torch.Tensor] = None
         if use_persistent_output:
             assert batch_size is not None and seq_length is not None, "batch_size and seq_length must be provided when use_persistent_output is True"
             self.persistent_output = torch.empty(
@@ -793,16 +794,17 @@ class BasicLinear(BasicOperation):
 
             # Check if accumulating into grad input tensor
             if accumulate_into_grad_input:
-                if dx is None:
-                    raise ValueError(
-                        "Attempted to accumulate into grad input tensor "
-                        "without providing grad input tensor"
-                    )
-                if tensor_parallel_mode == "column":
-                    raise ValueError(
-                        "Accumulating into grad input tensor "
-                        "is not supported with column tensor parallelism"
-                    )
+                raise NotImplementedError("Accumulate into grad input is not supported")
+                # if dx is None:
+                #     raise ValueError(
+                #         "Attempted to accumulate into grad input tensor "
+                #         "without providing grad input tensor"
+                #     )
+                # if tensor_parallel_mode == "column":
+                #     raise ValueError(
+                #         "Accumulating into grad input tensor "
+                #         "is not supported with column tensor parallelism"
+                #     )
 
             # Perform dgrad GEMM
             dx, *_ = general_gemm(
@@ -960,13 +962,14 @@ class BasicLinear(BasicOperation):
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weight = None
         if ctx.weight_requires_grad and accumulate_into_main_grad:
-            if not hasattr(self.weight, "main_grad"):
-                raise RuntimeError(
-                    "BasicLinear op is configured with "
-                    "accumulate_into_main_grad=True, "
-                    "but weight parameter does not have main_grad attribute"
-                )
-            grad_weight = self.weight.main_grad.detach()
+            raise NotImplementedError("Accumulate into main grad is not supported")
+            # if not hasattr(self.weight, "main_grad"):
+            #     raise RuntimeError(
+            #         "BasicLinear op is configured with "
+            #         "accumulate_into_main_grad=True, "
+            #         "but weight parameter does not have main_grad attribute"
+            #     )
+            # grad_weight = self.weight.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -978,6 +981,7 @@ class BasicLinear(BasicOperation):
             input_requires_grad=ctx.input_requires_grad,
             weight_requires_grad=ctx.weight_requires_grad,
             dtype=ctx.dtype,
+            grad_input=self.persistent_output if self.use_persistent_output else None,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             tensor_parallel_mode=self.tensor_parallel_mode,
