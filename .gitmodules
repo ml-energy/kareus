@@ -10,3 +10,6 @@
 [submodule "3rdparty/apex"]
 	path = 3rdparty/apex
 	url = https://github.com/NVIDIA/apex.git
+[submodule "3rdparty/zeus"]
+	path = 3rdparty/zeus
+	url = https://github.com/ml-energy/zeus.git
