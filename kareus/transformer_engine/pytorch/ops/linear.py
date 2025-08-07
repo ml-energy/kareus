@@ -82,7 +82,7 @@ class Linear(FusedOperation):
         self.return_bias: bool = return_bias
         self.apply_bias = bias and not return_bias
 
-        if tensor_parallel_mode == "column":
+        if tensor_parallel_mode == "column" and return_bias == False:
             bias_fusable = True
         else:
             bias_fusable = False

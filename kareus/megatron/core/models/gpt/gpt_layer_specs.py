@@ -182,7 +182,7 @@ def get_gpt_layer_with_transformer_engine_spec(
                 self_attn_bda=te_fusible_get_bias_dropout_add,
                 pre_mlp_layernorm=TENorm if num_experts else IdentityOp,
                 mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
+                mlp_bda=te_fusible_get_bias_dropout_add,
             ),
         )
 
@@ -332,19 +332,20 @@ def get_mlp_module_spec(
             module=MLP,
             submodules=MLPSubmodules(
                 # linear_fc1=TELayerNormColumnParallelLinear if use_te else ColumnParallelLinear,
-                linear_fc1=TEFusibleColumnParallelLinear if use_te else ColumnParallelLinear,
+                linear_fc1=TEFusibleColumnParallelLinear,
                 # linear_fc2=TERowParallelLinear if use_te else RowParallelLinear,
-                linear_fc2=TEFusibleRowParallelLinear if use_te else RowParallelLinear,
+                linear_fc2=TEFusibleRowParallelLinear
             ),
         )
     else:
-        # Mixture of experts with modules in megatron core.
-        return get_moe_module_spec(
-            use_te=use_te,
-            num_experts=num_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
-            moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
-        )
+        raise NotImplementedError("MoE is not supported")
+        # # Mixture of experts with modules in megatron core.
+        # return get_moe_module_spec(
+        #     use_te=use_te,
+        #     num_experts=num_experts,
+        #     moe_grouped_gemm=moe_grouped_gemm,
+        #     moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+        # )
 
 
 def get_gpt_decoder_block_spec(
