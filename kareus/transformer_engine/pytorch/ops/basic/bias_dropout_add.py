@@ -110,10 +110,10 @@ class BiasDropoutAddOp(BasicOperation):
             training = self.training
             
         # Validate inputs
-        assert input_.is_cuda and bias.is_cuda and residual.is_cuda, \
-            "BiasDropoutAdd only supports CUDA tensors."
-        assert input_.dtype == bias.dtype == residual.dtype, \
-            "Input, bias and residual must have the same data type!"
+        # assert input_.is_cuda and bias.is_cuda and residual.is_cuda, \
+        #     "BiasDropoutAdd only supports CUDA tensors."
+        # assert input_.dtype == bias.dtype == residual.dtype, \
+        #     "Input, bias and residual must have the same data type!"
         
         # Enable gradients for proper JIT compilation and mixed precision compatibility
         with torch.enable_grad():

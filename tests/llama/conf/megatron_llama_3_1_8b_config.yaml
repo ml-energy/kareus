@@ -1,4 +1,4 @@
-name: megatron_llama_3_2_1b
+name: megatron_llama_3_1_8b
 trainer:
   devices: 2
   num_nodes: 1
@@ -22,7 +22,7 @@ trainer:
 exp_manager:
   explicit_log_dir: null
   exp_dir: null
-  name: megatron_llama_3_2_1b
+  name: megatron_llama_3_1_8b
   create_wandb_logger: False
   wandb_logger_kwargs:
     project: null
@@ -47,25 +47,25 @@ model:
   mcore_gpt: True
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
-  micro_batch_size: 2 # Increased for smaller model
+  micro_batch_size: 1 # Reduced for larger 8B model
   global_batch_size: 4 # will use more micro batches to reach global batch size
-  tensor_model_parallel_size: 2 # Reduced for smaller model
-  pipeline_model_parallel_size: 1 # inter-layer model parallelism
+  tensor_model_parallel_size: 4 # Increased for 8B model
+  pipeline_model_parallel_size: 2 # inter-layer model parallelism for 8B model
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
 
-  # model architecture - LLaMA 3.2 1B
+  # model architecture - LLaMA 3.1 8B
   encoder_seq_length: 4096 # Same as 3.1 8B for consistency
   max_position_embeddings: ${.encoder_seq_length}
-  num_layers: 16 # LLaMA 3.2 1B: 16 layers (half of 8B)
-  hidden_size: 2048 # LLaMA 3.2 1B: 2048 (half of 8B)
-  ffn_hidden_size: 8192 # LLaMA 3.2 1B: 8192 (4 * hidden_size)
-  num_attention_heads: 32 # LLaMA 3.2 1B: 32 (same as 8B for head_dim=64)
+  num_layers: 32 # LLaMA 3.1 8B: 32 layers
+  hidden_size: 4096 # LLaMA 3.1 8B: 4096
+  ffn_hidden_size: 14336 # LLaMA 3.1 8B: 14336 (intermediate size)
+  num_attention_heads: 32 # LLaMA 3.1 8B: 32 attention heads
   init_method_std: 0.02 # Standard deviation of the zero mean normal distribution used for weight initialization.')
   use_scaled_init_method: True # use scaled residuals initialization
   hidden_dropout: 0.0 # Dropout probability for hidden state transformer.
   attention_dropout: 0.0 # Dropout probability for attention
   ffn_dropout: 0.0 # Dropout probability in the feed-forward layer.
-  kv_channels: 64 # LLaMA 3.2 1B: 64 (hidden_size // num_attention_heads = 2048 // 32)
+  kv_channels: 128 # LLaMA 3.1 8B: 128 (hidden_size // num_attention_heads = 4096 // 32)
   apply_query_key_layer_scaling: True # scale Q * K^T by 1 / layer-number.
   normalization: 'rmsnorm' # Normalization layer to use. Options are 'layernorm', 'rmsnorm'
   layernorm_epsilon: 1e-5
@@ -86,7 +86,7 @@ model:
   share_embeddings_and_output_weights: False # Share embedding and output layer weights.
   overlap_p2p_comm: False # Overlap p2p communication with computes. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
   batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
-  num_query_groups: 8 # LLaMA 3.2 1B uses grouped query attention with 8 key-value heads
+  num_query_groups: 8 # LLaMA 3.1 8B uses grouped query attention with 8 key-value heads
 
   tokenizer:
     library: 'megatron'

@@ -124,7 +124,7 @@ class Bias(BasicOperation):
 
     def pre_forward(self, *args, **kwargs) -> None:
         super().pre_forward(*args, **kwargs)
-        if self.bias.device.type == "meta":
+        if self.has_bias and self.bias.device.type == "meta":
             self.reset_parameters()
 
     def op_forward(
@@ -141,7 +141,7 @@ class Bias(BasicOperation):
         else:
             out = input_
 
-        if self.return_bias:
+        if self.return_bias and self.has_bias:
             return out, self.bias
         else:
             return out, None

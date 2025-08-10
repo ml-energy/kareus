@@ -9,6 +9,7 @@ nemo_experiments/
 *.pt
 # apex/
 *.png
+dump/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

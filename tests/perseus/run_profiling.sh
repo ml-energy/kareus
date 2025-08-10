@@ -1,4 +1,4 @@
-for frequency in $(seq 1620 -15 210); do
+for frequency in $(seq 1740 -15 210); do
     nvidia-smi -i 0,1,2,3 --lock-gpu-clocks=${frequency},${frequency}
     python megatron_gpt_pretraining.py
 done

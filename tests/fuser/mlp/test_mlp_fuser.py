@@ -25,8 +25,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 
 # Import required operations
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
-from transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
-from transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
+from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
+from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
@@ -104,7 +104,7 @@ class MLPFuserTest:
 
     def __init__(self, device='cuda', tensor_parallel_size: int = 1):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.dtype = torch.float16
+        self.dtype = torch.bfloat16
         self.tensor_parallel_size = tensor_parallel_size
         
         # Initialize distributed processing
@@ -131,7 +131,7 @@ class MLPFuserTest:
             gated_linear_unit=True,  # Use SwiGLU
             activation_func=F.silu,
             bias_activation_fusion=True,
-            add_bias_linear=True,
+            add_bias_linear=False,
             params_dtype=self.dtype,
         )
 
@@ -150,10 +150,11 @@ class MLPFuserTest:
         )
         
         # Bias and residual for BDA
-        bias = torch.randn(
-            self.hidden_size,
-            dtype=self.dtype, device=self.device, requires_grad=True
-        )
+        # bias = torch.randn(
+        #     self.hidden_size,
+        #     dtype=self.dtype, device=self.device, requires_grad=True
+        # )
+        bias = None
 
         # AllReduce inputs for tensor parallelism
         allreduce_inputs = torch.randn(
@@ -176,7 +177,7 @@ class MLPFuserTest:
         operations.append(prev_attn_bda_op)
         
         # 2. LayerNorm Operation - pre_mlp_layernorm
-        layernorm_op = LayerNorm(
+        layernorm_op = RMSNorm(
             normalized_shape=self.hidden_size,
             eps=self.config.layernorm_epsilon,
             device=self.device,
@@ -191,7 +192,7 @@ class MLPFuserTest:
             out_features=2 * self.ffn_hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=True,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -211,7 +212,7 @@ class MLPFuserTest:
             out_features=self.hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=True,  # Return bias for post_mlp_bda
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -262,11 +263,11 @@ class MLPFuserTest:
         print("\n--- Checking Initial Tensors ---")
         check_tensor_health(hidden_states, "hidden_states")
         check_tensor_health(residual, "residual")
-        check_tensor_health(bias, "bias")
+        # check_tensor_health(bias, "bias")
 
         print(f"\nhidden_states.shape: {hidden_states.shape}")
         print(f"residual.shape: {residual.shape}")
-        print(f"bias.shape: {bias.shape}")
+        # print(f"bias.shape: {bias.shape}")
         print(f"allreduce_inputs.shape: {allreduce_inputs.shape}")
         
         # Test prev_self_attn_bda
@@ -315,8 +316,8 @@ class MLPFuserTest:
         with nvtx_range("Linear FC2"):
             fc2_output, fc2_output_bias = linear_fc2_op(swiglu_output)
         print(f"✓ Linear FC2 output shape: {fc2_output.shape}")
-        print(f"✓ Linear FC2 bias shape: {fc2_output_bias.shape}")
-        if not (check_tensor_health(fc2_output, "fc2_output") and check_tensor_health(fc2_output_bias, "fc2_output_bias")):
+        # print(f"✓ Linear FC2 bias shape: {fc2_output_bias.shape}")
+        if not check_tensor_health(fc2_output, "fc2_output"):
             print("❌ Linear FC2 operation produced invalid values!")
             return False
         
@@ -347,8 +348,6 @@ class MLPFuserTest:
         
         # Create a loss from the final output
         loss = mlp_final_output.float().sum()
-        if is_last_layer and len(operations) > 5:
-            loss = loss + fc2_output_bias.float().sum()
         print(f"Loss value: {loss.item()}")
         
         # Check if loss is finite
@@ -363,7 +362,7 @@ class MLPFuserTest:
         
         hidden_states.grad = None
         residual.grad = None
-        bias.grad = None
+        # bias.grad = None
         
         # Test backward pass
         print("Testing individual operations backward...")
@@ -375,7 +374,7 @@ class MLPFuserTest:
         print("Checking individual operation gradients...")
         print(f"  Hidden states grad: {hidden_states.grad is not None}")
         print(f"  Residual grad: {residual.grad is not None}")
-        print(f"  Bias grad: {bias.grad is not None}")
+        # print(f"  Bias grad: {bias.grad is not None}")
         
         # Check operation parameter gradients
         for i, op in enumerate(operations):
@@ -429,12 +428,12 @@ class MLPFuserTest:
         
         print(f"✓ Fused forward pass successful")
         print(f"  Output shape: {output.shape}")
-        print(f"  Output FC2 bias shape: {output_fc2_bias.shape}")
+        # print(f"  Output FC2 bias shape: {output_fc2_bias.shape}")
         print(f"  Residual shape: {out_residual.shape}")
         
         # Test backward pass
         print("Testing fused backward pass...")
-        loss = output.float().sum() + output_fc2_bias.float().sum() + out_residual.float().sum()
+        loss = output.float().sum() + out_residual.float().sum()
 
         with nvtx_range("Fuser loss.backward"):
             loss.backward()
@@ -442,7 +441,7 @@ class MLPFuserTest:
         print("✓ Fused backward pass successful")
         print(f"  Hidden states grad: {hidden_states.grad is not None}")
         print(f"  Residual grad: {residual.grad is not None}")
-        print(f"  Bias grad: {bias.grad is not None}")
+        # print(f"  Bias grad: {bias.grad is not None}")
 
         if self.tensor_parallel_size > 1:
             print(f"  Allreduce output grad: {allreduce_inputs.grad is not None}")

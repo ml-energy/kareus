@@ -25,7 +25,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 
 # Import required operations
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
-from transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
+from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
+from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.qkv_postprocess_op import create_qkv_postprocess_op
@@ -36,6 +37,7 @@ from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAtte
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 # Import attention fuser
 from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
+from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 
 # Import configuration
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -110,7 +112,7 @@ class AttentionFuserTest:
 
     def __init__(self, device='cuda', tensor_parallel_size: int = 1):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.dtype = torch.float16
+        self.dtype = torch.bfloat16
         self.tensor_parallel_size = tensor_parallel_size
         
         # Initialize distributed processing
@@ -138,6 +140,7 @@ class AttentionFuserTest:
             rotary_interleaved=False,
             flash_decode=False,
             apply_rope_fusion=True,
+            add_bias_linear=False,
             params_dtype=self.dtype,
         )
 
@@ -150,10 +153,11 @@ class AttentionFuserTest:
         )
         
         # Bias and residual for BDA
-        bias = torch.randn(
-            self.hidden_size,
-            dtype=self.dtype, device=self.device, requires_grad=True
-        )
+        # bias = torch.randn(
+        #     self.hidden_size,
+        #     dtype=self.dtype, device=self.device, requires_grad=True
+        # )
+        bias = None
         residual = torch.randn(
             self.seq_length, self.batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
@@ -200,7 +204,7 @@ class AttentionFuserTest:
         )
         
         # 2. LayerNorm Operation
-        layernorm_op = LayerNorm(
+        layernorm_op = RMSNorm(
             normalized_shape=self.hidden_size,
             eps=self.config.layernorm_epsilon,
             device=self.device,
@@ -230,7 +234,7 @@ class AttentionFuserTest:
             out_features=qkv_hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=False,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -285,7 +289,7 @@ class AttentionFuserTest:
             out_features=self.hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=True,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -356,12 +360,12 @@ class AttentionFuserTest:
         # Check initial tensors
         print("\n--- Checking Initial Tensors ---")
         check_tensor_health(hidden_states, "hidden_states")
-        check_tensor_health(bias, "bias")
+        # check_tensor_health(bias, "bias")
         check_tensor_health(residual, "residual")
         check_tensor_health(rotary_pos_emb, "rotary_pos_emb")
 
         print(f"\nhidden_states.shape: {hidden_states.shape}")
-        print(f"bias.shape: {bias.shape}")
+        # print(f"bias.shape: {bias.shape}")
         print(f"residual.shape: {residual.shape}")
         print(f"rotary_pos_emb.shape: {rotary_pos_emb.shape}")
         print(f"allreduce_inputs.shape: {allreduce_inputs.shape}")
@@ -451,10 +455,7 @@ class AttentionFuserTest:
             allreduce_comm_op = operations[7]
             with nvtx_range("AllReduce"):
                 allreduce_output = allreduce_comm_op(allreduce_inputs, sm_num=4, block_size=1024)
-                if allreduce_comm_op.is_async_pending():
-                    print("  AllReduce operation is running asynchronously...")
-                    allreduce_comm_op.sync()
-                    print("  AllReduce operation synchronized successfully")
+                allreduce_comm_op.sync()
             print(f"✓ AllReduce output shape: {allreduce_output.shape}")
             
         # Verify AllReduce functionality
@@ -481,7 +482,7 @@ class AttentionFuserTest:
                 param.grad = None
         
         hidden_states.grad = None
-        bias.grad = None
+        # bias.grad = None
         residual.grad = None
         
         # Test backward pass
@@ -494,7 +495,7 @@ class AttentionFuserTest:
         # Check gradients
         print("Checking individual operation gradients...")
         print(f"  Hidden states grad: {hidden_states.grad is not None}")
-        print(f"  Bias grad: {bias.grad is not None}")
+        # print(f"  Bias grad: {bias.grad is not None}")
         print(f"  Residual grad: {residual.grad is not None}")
         
         # Check operation parameter gradients
@@ -532,7 +533,7 @@ class AttentionFuserTest:
             allreduce_comm_op = None
         
         # Create attention fuser
-        attention_fuser = AttentionFuser(
+        attention_fuser = PartitionFuser(
             ops=operations[:7],
             allreduce_comm_op=allreduce_comm_op,
             fuse_ops=True
@@ -571,19 +572,27 @@ class AttentionFuserTest:
         
         print(f"✓ Fused forward pass successful")
         print(f"  Output shape: {output.shape}")
-        print(f"  Output bias shape: {output_bias.shape}")
+        # print(f"  Output bias shape: {output_bias.shape}")
         print(f"  Output residual shape: {output_residual.shape}")
         
         # Test backward pass
         print("Testing fused backward pass...")
-        loss = output.float().sum() + output_bias.float().sum() + output_residual.float().sum()
+        # loss = output.float().sum() + output_residual.float().sum()
 
         with nvtx_range("Fuser loss.backward"):
-            loss.backward()
+            # loss.backward()
+            output_grad = torch.randn_like(output)
+            residual_grad = torch.randn_like(output_residual)
+            allreduce_input_grad = torch.randn_like(allreduce_output)
+            torch.autograd.backward(
+                tensors=[output, output_residual, allreduce_output],
+                grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
+                retain_graph=True,
+            )
         
         print("✓ Fused backward pass successful")
         print(f"  Hidden states grad: {hidden_states.grad is not None}")
-        print(f"  Bias grad: {bias.grad is not None}")
+        # print(f"  Bias grad: {bias.grad is not None}")
         print(f"  Residual grad: {residual.grad is not None}")
 
         if self.tensor_parallel_size > 1:

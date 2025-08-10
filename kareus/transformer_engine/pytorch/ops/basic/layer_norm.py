@@ -13,17 +13,17 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
-from ...fp8 import FP8GlobalStateManager
-from ...constants import TE_DType
-from ...tensor import QuantizedTensor
-from ...utils import (
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.tensor import QuantizedTensor
+from transformer_engine.pytorch.utils import (
     canonicalize_device,
     canonicalize_dtype,
     clear_tensor_data,
     devices_match,
 )
-from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, reshape
+from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+from transformer_engine.pytorch.ops._common import maybe_autocast_dtype, reshape
 
 
 class LayerNorm(BasicOperation):
@@ -278,10 +278,10 @@ class LayerNorm(BasicOperation):
         )
 
         # Clear saved tensors if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x)
-        clear_tensor_data(means)
-        clear_tensor_data(rstdevs)
+        # if ctx.has_prev_op:
+        #     clear_tensor_data(x)
+        # clear_tensor_data(means)
+        # clear_tensor_data(rstdevs)
 
         # Reshape results
         grad_input = reshape(dx, grad_output.size())

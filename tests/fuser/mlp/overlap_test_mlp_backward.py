@@ -148,9 +148,11 @@ class MLPFuserTest:
 
         self.frequency = args.frequency
         self.repeat_num = 1
+        self.overlap_window_forward = (-1, -1)
+        self.sm_configs_forward = (20, 1024)
     
     def create_test_tensors(self):
-        """Create test tensors for the attention operations."""
+        """Create test tensors for the mlp operations."""
         nano_batch_size = self.batch_size // 2
         hidden_states = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
@@ -172,6 +174,30 @@ class MLPFuserTest:
         )
         
         return hidden_states, bias, residual, allreduce_inputs
+    
+    def create_gradient_tensors(self):
+        """Create gradient tensors for backward pass testing."""
+        nano_batch_size = self.batch_size // 2
+        output_grad = torch.randn(
+            self.seq_length, nano_batch_size, self.hidden_size,
+            dtype=self.dtype, device=self.device, requires_grad=True
+        )
+        # bias_grad = torch.randn(
+        #     self.hidden_size,
+        #     dtype=self.dtype, device=self.device, requires_grad=True
+        # )
+        bias_grad = None
+        residual_grad = torch.randn(
+            self.seq_length, nano_batch_size, self.hidden_size,
+            dtype=self.dtype, device=self.device, requires_grad=True
+        )
+
+        allreduce_input_grad = torch.randn(
+            self.seq_length, nano_batch_size, self.hidden_size,
+            dtype=self.dtype, device=self.device, requires_grad=True
+        )
+        
+        return output_grad, bias_grad, residual_grad, allreduce_input_grad
     
     def create_operations(self, allreduce_inputs):
         """Create all the required operations for the attention fuser."""
@@ -250,15 +276,17 @@ class MLPFuserTest:
     def get_overlap_windows(self):
         overlap_windows = [
             (-1, -1),
-            (0, 1), (2, 3), (4, 4), (5, 6),
-            (0, 3), (2, 4), (4, 5),
+            (0, 1), (2, 2), (3, 4), (5, 6),
+            (0, 2), (2, 4), (3, 5),
             (0, 4), (2, 6),
             (0, 6),
         ]
         return overlap_windows
     
-    def test_config(self, monitor, test_tensors, mlp_fuser, overlap_window, sm_configs):
+    def test_config(self, monitor, test_tensors, grad_tensors, mlp_fuser, overlap_window, sm_configs):
         hidden_states, bias, residual, allreduce_inputs = test_tensors
+        output_grad, bias_grad, residual_grad, allreduce_input_grad = grad_tensors
+
         t_results_list = []
         e_results_list = []
         ranks_energy_list = []
@@ -272,18 +300,30 @@ class MLPFuserTest:
         for i in range(10):
             if i == 2:
                 time_start = time.time()
-            output, output_bias, output_residual, allreduce_output = mlp_fuser(
-                hidden_states=hidden_states,
-                bias=bias,
-                residual=residual,
-                allreduce_input=allreduce_inputs,
-                allreduce_overlap_window=overlap_window,
-                allreduce_sm_configs=sm_configs,
+
+            if i == 0:
+                output, output_bias, output_residual, allreduce_output = mlp_fuser(
+                    hidden_states=hidden_states,
+                    bias=bias,
+                    residual=residual,
+                    allreduce_input=allreduce_inputs,
+                    allreduce_overlap_window=self.overlap_window_forward,
+                    allreduce_sm_configs=self.sm_configs_forward,
+                    allreduce_overlap_window_backward=overlap_window,
+                    allreduce_sm_configs_backward=sm_configs,
+                )
+
+            torch.autograd.backward(
+                tensors=[output, output_residual, allreduce_output],
+                grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
+                retain_graph=True,
             )
+
         torch.cuda.synchronize()
         dist.barrier()
         time_end = time.time()
         duration = (time_end - time_start) / 8
+
         if self.rank == 0:
             iterations = int(10 / duration)
             dist_list = [iterations]
@@ -304,14 +344,21 @@ class MLPFuserTest:
                 monitor.begin_window("step")
 
             for i in range(iterations):
-                output, output_bias, output_residual, allreduce_output = mlp_fuser(
-                    hidden_states=hidden_states,
-                    bias=bias,
-                    residual=residual,
-                    allreduce_input=allreduce_inputs,
-                    allreduce_overlap_window=overlap_window,
-                    allreduce_sm_configs=sm_configs,
+                # output, output_bias, output_residual, allreduce_output = mlp_fuser(
+                #     hidden_states=hidden_states,
+                #     bias=bias,
+                #     residual=residual,
+                #     allreduce_input=allreduce_inputs,
+                #     allreduce_overlap_window=overlap_window,
+                #     allreduce_sm_configs=sm_configs,
+                # )
+
+                torch.autograd.backward(
+                    tensors=[output, output_residual, allreduce_output],
+                    grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
+                    retain_graph=True,
                 )
+
             torch.cuda.synchronize()
             dist.barrier()
 
@@ -335,7 +382,7 @@ class MLPFuserTest:
             #     f.write(file_str)
         
         if self.rank == 0:
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "a") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_energy_results.csv", "a") as f:
                 line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
                 for i in range(self.repeat_num):
                     line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
@@ -344,6 +391,7 @@ class MLPFuserTest:
     
     def run_overlap_test(self):
         test_tensors = self.create_test_tensors()
+        grad_tensors = self.create_gradient_tensors()
         operations = self.create_operations(test_tensors[-1])
         comp_ops = operations[:-1]
         allreduce_comm_op = operations[-1]
@@ -361,7 +409,7 @@ class MLPFuserTest:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
             os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_energy_results.csv", "w") as f:
                 title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
                 for i in range(self.repeat_num):
                     title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
@@ -383,11 +431,11 @@ class MLPFuserTest:
                     # if skip:
                     #     continue
                     sm_configs = (sm_num, block_size)
-                    print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
-                    with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
+                    print(f"Backward Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
+                    with nvtx_range(f"Backward Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
                         self.test_config(
                             monitor, 
-                            test_tensors, mlp_fuser, 
+                            test_tensors, grad_tensors, mlp_fuser, 
                             overlap_window, sm_configs
                         )
                     # return

@@ -994,9 +994,9 @@ class BasicLinear(BasicOperation):
             grad_input_quantizer=ctx.grad_input_quantizer,
         )
 
-        # Clear input tensor if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        # # Clear input tensor if possible
+        # if ctx.has_prev_op:
+        #     clear_tensor_data(x_local)
 
         if accumulate_into_main_grad:
             grad_weight = None

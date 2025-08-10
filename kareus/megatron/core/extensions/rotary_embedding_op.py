@@ -151,8 +151,8 @@ class RotaryEmbeddingOp(BasicOperation):
         key_rope_applied = False
 
         for ctx_ in [ctx.query_ctx, ctx.key_ctx]:
-            ctx_.saved_tensors = ctx.saved_tensors[slice(*ctx_._saved_tensors_range)]
-            ctx_._saved_tensors_range = None
+            if ctx_._saved_tensors_range is not None:
+                ctx_.saved_tensors = ctx.saved_tensors[slice(*ctx_._saved_tensors_range)]
 
         # Apply backward pass for rotary embeddings if they were applied in forward
         if hasattr(ctx, 'query_ctx'):

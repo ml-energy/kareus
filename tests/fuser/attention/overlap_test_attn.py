@@ -9,7 +9,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
-from transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
+from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
+from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
 from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
@@ -103,7 +104,7 @@ class AttentionFuserTest:
 
     def __init__(self, args, rank: int = 0, world_size: int = 1):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.dtype = torch.float16
+        self.dtype = torch.bfloat16
         self.rank = rank
         self.world_size = world_size
         self.tensor_parallel_size = world_size
@@ -114,11 +115,11 @@ class AttentionFuserTest:
         # Test configuration
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len
-        self.hidden_size = 2048
-        self.num_attention_heads = 32
+        self.hidden_size = 3072
+        self.num_attention_heads = 24
         self.num_query_groups = 8  # For grouped query attention
         self.head_dim = self.hidden_size // self.num_attention_heads
-        self.ffn_hidden_size = 4 * self.hidden_size
+        self.ffn_hidden_size = 8192
         
         # Create transformer config
         self.config = TransformerConfig(
@@ -136,10 +137,11 @@ class AttentionFuserTest:
             apply_rope_fusion=True,
             params_dtype=self.dtype,
             tensor_model_parallel_size=world_size,
+            add_bias_linear=False,
         )
 
         self.frequency = args.frequency
-        self.repeat_num = 3
+        self.repeat_num = 1
     
     def create_test_tensors(self):
         """Create test tensors for the attention operations."""
@@ -148,10 +150,11 @@ class AttentionFuserTest:
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
-        bias = torch.randn(
-            self.hidden_size,
-            dtype=self.dtype, device=self.device, requires_grad=True
-        )
+        # bias = torch.randn(
+        #     self.hidden_size,
+        #     dtype=self.dtype, device=self.device, requires_grad=True
+        # )
+        bias = None
         residual = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
@@ -178,7 +181,7 @@ class AttentionFuserTest:
         
         return hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs
     
-    def create_operations(self):
+    def create_operations(self, allreduce_inputs):
         """Create all the required operations for the attention fuser."""
         
         # 1. BDA Operation (Bias Dropout Add)
@@ -188,7 +191,7 @@ class AttentionFuserTest:
         )
         
         # 2. LayerNorm Operation
-        layernorm_op = LayerNorm(
+        layernorm_op = RMSNorm(
             normalized_shape=self.hidden_size,
             eps=self.config.layernorm_epsilon,
             device=self.device,
@@ -207,7 +210,7 @@ class AttentionFuserTest:
             out_features=qkv_hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=False,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -247,7 +250,7 @@ class AttentionFuserTest:
             out_features=self.hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=True,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -258,10 +261,15 @@ class AttentionFuserTest:
         if self.tensor_parallel_size > 1:
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
-                async_op=True,  # Use async mode as set in the modified AllReduce
+                async_op=True,
                 backend="msccl",
                 rank=self.rank,
                 world_size=self.world_size,
+                use_persistent_output=True,
+                input_buffer=allreduce_inputs,
+                tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
+                device=self.device,
+                dtype=self.dtype,
             )
         
             return [
@@ -380,7 +388,7 @@ class AttentionFuserTest:
     
     def run_overlap_test(self):
         test_tensors = self.create_test_tensors()
-        operations = self.create_operations()
+        operations = self.create_operations(test_tensors[-1])
         comp_ops = operations[:7]
         allreduce_comm_op = operations[7]
 
@@ -427,7 +435,7 @@ class AttentionFuserTest:
                             overlap_window, sm_configs
                         )
                     # return
-                    time.sleep(60)
+                    time.sleep(30)
 
 
 def overlap_test(rank, world_size, args, master_port):

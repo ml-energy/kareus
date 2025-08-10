@@ -59,7 +59,10 @@ def fused_bias_swiglu_backward(
     grad_input = grad_x_plus_bias
     
     # Gradient w.r.t. bias - same as input gradient (following Megatron implementation)
-    grad_bias = grad_x_plus_bias
+    if bias is not None:
+        grad_bias = grad_x_plus_bias
+    else:
+        grad_bias = None
     
     return grad_input, grad_bias
 
