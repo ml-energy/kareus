@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 import time
 import sys
 import traceback
@@ -12,6 +13,7 @@ from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDro
 from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
+from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
 from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
@@ -100,8 +102,8 @@ def temperature_end(p, temperature_data):
     return filtered_data
 
 
-class AttentionFuserBackwardTest:
-    """Test suite for attention fuser backward pass operations."""
+class MLPFuserTest:
+    """Test suite for attention fuser operations."""
 
     def __init__(self, args, rank: int = 0, world_size: int = 1):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -138,6 +140,9 @@ class AttentionFuserBackwardTest:
             apply_rope_fusion=True,
             params_dtype=self.dtype,
             tensor_model_parallel_size=world_size,
+            gated_linear_unit=True,  # Use SwiGLU
+            activation_func=F.silu,
+            bias_activation_fusion=True,
             add_bias_linear=False,
         )
 
@@ -147,8 +152,8 @@ class AttentionFuserBackwardTest:
         self.sm_configs_forward = (20, 1024)
     
     def create_test_tensors(self):
-        """Create test tensors for the attention operations with gradients enabled."""
-        nano_batch_size = self.batch_size // 2
+        """Create test tensors for the attention operations."""
+        nano_batch_size = self.batch_size
         hidden_states = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
@@ -162,43 +167,24 @@ class AttentionFuserBackwardTest:
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
-        
-        seq = (
-            torch.arange(self.seq_length, device=self.device, dtype=torch.float32)
-            + 0
-        )
-        rotary_base = 10000
-        inv_freq = 1.0 / (
-            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
-        )
-        freqs = torch.outer(seq, inv_freq)
-        rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
-        rotary_pos_emb = rotary_pos_emb[:, None, None, :]
-        
-        attention_mask = None
 
         allreduce_inputs = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
-        return hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs
+        return hidden_states, bias, residual, allreduce_inputs
     
     def create_gradient_tensors(self):
         """Create gradient tensors for backward pass testing."""
-        nano_batch_size = self.batch_size // 2
+        nano_batch_size = self.batch_size
         
         # Gradient for main output
         output_grad = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device
         )
-        
-        # Gradient for bias output
-        # bias_grad = torch.randn(
-        #     self.hidden_size,
-        #     dtype=self.dtype, device=self.device
-        # )
+
         bias_grad = None
         
         # Gradient for residual output
@@ -206,16 +192,15 @@ class AttentionFuserBackwardTest:
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device
         )
-        
-        # Gradient for allreduce input
+
         allreduce_input_grad = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device
         )
-        
+
         return output_grad, bias_grad, residual_grad, allreduce_input_grad
     
-    def create_operations(self, allreduce_inputs):
+    def create_operations(self):
         """Create all the required operations for the attention fuser."""
         
         # 1. BDA Operation (Bias Dropout Add)
@@ -232,55 +217,30 @@ class AttentionFuserBackwardTest:
             dtype=self.dtype
         )
         
-        # 3. Linear QKV Operation (transforms input to queries, keys, values)
-        qkv_hidden_size = (
-            self.num_attention_heads * self.head_dim +  # Query heads
-            self.num_query_groups * self.head_dim +     # Key heads
-            self.num_query_groups * self.head_dim       # Value heads
-        )
-        qkv_hidden_size = qkv_hidden_size // self.tensor_parallel_size
-        linear_qkv_op = Linear(
+        # 3. Linear FC1 Operation (input to intermediate with gating)
+        # Since gated_linear_unit=True, output is 2 * ffn_hidden_size
+        fc1_hidden_size = 2 * self.ffn_hidden_size // self.tensor_parallel_size
+        linear_fc1_op = Linear(
             in_features=self.hidden_size,
-            out_features=qkv_hidden_size,
+            out_features=fc1_hidden_size,
             device=self.device,
             dtype=self.dtype,
             bias=False,
-            return_bias=False,
+            return_bias=True,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
             tensor_parallel_size=None,
         )
         
-        # 4. QKV Post-process Operation
-        num_query_groups_per_partition = self.num_query_groups // self.tensor_parallel_size
-        num_attention_heads_per_partition = self.num_attention_heads // self.tensor_parallel_size
-        qkv_postprocess_op = QKVPostProcessOp(
-            num_query_groups_per_partition=num_query_groups_per_partition,
-            num_attention_heads_per_partition=num_attention_heads_per_partition,
-            hidden_size_per_attention_head=self.head_dim,
-            q_layernorm=None,
-            k_layernorm=None,
-            run_tests_fn=None,
-            test_mode=False,
-        ) 
-        
-        # 5. Rotary Embedding Operation
-        rotary_embedding_op = RotaryEmbeddingOp(
-            config=self.config,
-        ) 
-        
-        # 6. Dot Product Attention Operation
-        attention_op = TEFusibleDotProductAttention(
-            config=self.config,
-            layer_number=0,
-            attn_mask_type=AttnMaskType.causal,
-            attention_type="self",
+        # 4. BiasSwigluOp (activation function with bias)
+        bias_swiglu_op = BiasSwigluOp(
+            fp8_input_store=self.config.activation_func_fp8_input_store
         )
-        
-        # 7. Linear Projection Operation
-        hidden_size_in = self.hidden_size // self.tensor_parallel_size
-        linear_proj_op = Linear(
-            in_features=hidden_size_in,
+
+        # 5. Linear FC2 Operation (intermediate back to hidden)
+        fc2_hidden_size = self.ffn_hidden_size // self.tensor_parallel_size
+        linear_fc2_op = Linear(
+            in_features=fc2_hidden_size,
             out_features=self.hidden_size,
             device=self.device,
             dtype=self.dtype,
@@ -295,76 +255,58 @@ class AttentionFuserBackwardTest:
         if self.tensor_parallel_size > 1:
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
-                async_op=True,
-                backend="msccl",
-                rank=self.rank,
-                world_size=self.world_size,
-                use_persistent_output=True,
-                input_buffer=allreduce_inputs,
-                tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
-                device=self.device,
-                dtype=self.dtype,
+                async_op=True,  # Use async mode as set in the modified AllReduce
+                backend="nccl",
+                # rank=self.rank,
+                # world_size=self.world_size,
             )
         
             return [
                 bda_op,
                 layernorm_op,
-                linear_qkv_op,
-                qkv_postprocess_op,
-                rotary_embedding_op,
-                attention_op,
-                linear_proj_op,
-                allreduce_comm_op
+                linear_fc1_op,
+                bias_swiglu_op,
+                linear_fc2_op,
+                allreduce_comm_op,
             ]
 
         else:
             raise ValueError("Tensor parallel size must be greater than 1")
     
-    def get_backward_overlap_windows(self):
-        overlap_windows = [
-            # (-1, -1),
-            (0, 1), (2, 2), (3, 4), (5, 6), (7, 8),
-            (0, 2), (2, 4), (3, 6), (5, 8),
-            (0, 4), (2, 6), (3, 8),
-            (0, 6), (2, 8),
-            (0, 8),
-        ]
-        return overlap_windows
+    # def get_overlap_windows(self):
+    #     overlap_windows = [
+    #         (-1, -1),
+    #         (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
+    #         (0, 3), (2, 5), (4, 6), (6, 8),
+    #         (0, 5), (2, 6), (4, 8),
+    #         (0, 6), (2, 8),
+    #         (0, 8),
+    #     ]
+    #     return overlap_windows
     
-    def test_backward_config(self, monitor, test_tensors, grad_tensors, attention_fuser, overlap_window, sm_configs):
-        """Test backward pass configuration with specific overlap window and SM configs."""
-        hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = test_tensors
+    def test_config(self, monitor, test_tensors, grad_tensors, mlp_fuser, overlap_window, sm_configs):
+        hidden_states, bias, residual, allreduce_inputs = test_tensors
         output_grad, bias_grad, residual_grad, allreduce_input_grad = grad_tensors
-        
+
         t_results_list = []
         e_results_list = []
         ranks_energy_list = []
+        # if self.rank == 0:
+        #     os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/" \
+        #         f"{self.frequency}/overlap_{overlap_window[0]}_{overlap_window[1]}_sm_{sm_configs[0]}_{sm_configs[1]}", exist_ok=True)
 
-        # Warmup for backward pass
+        # Warmup
         torch.cuda.synchronize()
         dist.barrier()
         for i in range(10):
             if i == 2:
                 time_start = time.time()
-
-            # # Clear gradients
-            # if hidden_states.grad is not None:
-            #     hidden_states.grad.zero_()
-            # # if bias.grad is not None:
-            # #     bias.grad.zero_()
-            # if residual.grad is not None:
-            #     residual.grad.zero_()
-            # if allreduce_inputs.grad is not None:
-            #     allreduce_inputs.grad.zero_()
-                
-            # Forward pass
+            
             if i == 0:
-                output, output_bias, output_residual, allreduce_output = attention_fuser(
+                output, output_bias, output_residual, allreduce_output = mlp_fuser(
                     hidden_states=hidden_states,
                     bias=bias,
                     residual=residual,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_mask=attention_mask,
                     allreduce_input=allreduce_inputs,
                     allreduce_overlap_window=self.overlap_window_forward,
                     allreduce_sm_configs=self.sm_configs_forward,
@@ -372,7 +314,6 @@ class AttentionFuserBackwardTest:
                     allreduce_sm_configs_backward=sm_configs,
                 )
             
-            # Backward pass - this is what we're testing
             torch.autograd.backward(
                 tensors=[output, output_residual, allreduce_output],
                 grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
@@ -382,57 +323,32 @@ class AttentionFuserBackwardTest:
         torch.cuda.synchronize()
         dist.barrier()
         time_end = time.time()
-        duration = (time_end - time_start) / 8  # 8 iterations after warmup
-        
+        duration = (time_end - time_start) / 8
         if self.rank == 0:
-            iterations = int(8 / duration)
+            iterations = int(10 / duration)
             dist_list = [iterations]
         else:
             dist_list = [None]
         dist.broadcast_object_list(dist_list, src=0, group=self.tp_group)
         iterations = dist_list[0]
-        if iterations is None:
-            iterations = 10  # fallback value
-        print(f"Total Duration: {duration * 1000} ms, Required iterations: {iterations}")
+        print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
 
         for repeat in range(self.repeat_num):
+            # manager = multiprocessing.Manager()
+            # temperature_data = manager.list()
+            # proc = temperature_start(temperature_data, self.rank)
+
             torch.cuda.synchronize()
             dist.barrier()
             if self.rank == 0:
                 monitor.begin_window("step")
 
             for i in range(iterations):
-                # # Clear gradients
-                # if hidden_states.grad is not None:
-                #     hidden_states.grad.zero_()
-                # if bias.grad is not None:
-                #     bias.grad.zero_()
-                # if residual.grad is not None:
-                #     residual.grad.zero_()
-                # if allreduce_inputs.grad is not None:
-                #     allreduce_inputs.grad.zero_()
-                
-                # # Forward pass
-                # output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
-                #     hidden_states=hidden_states,
-                #     bias=bias,
-                #     residual=residual,
-                #     rotary_pos_emb=rotary_pos_emb,
-                #     attention_mask=attention_mask,
-                #     allreduce_input=allreduce_inputs,
-                #     allreduce_overlap_window=self.overlap_window_forward,
-                #     allreduce_sm_configs=self.sm_configs_forward,
-                #     allreduce_overlap_window_backward=overlap_window,
-                #     allreduce_sm_configs_backward=sm_configs,
-                # )
-                
-                # Backward pass - this is what we're measuring
                 torch.autograd.backward(
                     tensors=[output, output_residual, allreduce_output],
                     grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
                     retain_graph=True,
                 )
-                
             torch.cuda.synchronize()
             dist.barrier()
 
@@ -444,36 +360,46 @@ class AttentionFuserBackwardTest:
                 t_results_list.append(t_result)
                 e_results_list.append(e_result)
                 ranks_energy_list.append(ranks_energy)
+
+            # temperature_end(proc, temperature_data)
+            # with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/" \
+            #     f"{self.frequency}/overlap_{overlap_window[0]}_{overlap_window[1]}_sm_{sm_configs[0]}_{sm_configs[1]}/" \
+            #     f"gpu{self.rank}_iter{repeat}.csv", "w") as f:
+                
+            #     file_str = "timestamp,temperature,clock,power\n"
+            #     for data in temperature_data:
+            #         file_str += ",".join(map(str, data)) + "\n"
+            #     f.write(file_str)
         
         if self.rank == 0:
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_energy_results.csv", "a") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_energy_results_baseline.csv", "a") as f:
                 line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
                 for i in range(self.repeat_num):
                     line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
                 f.write(line_str.rstrip(",") + "\n")
+            
     
     def run_overlap_test(self):
-        """Run backward pass overlap tests."""
         test_tensors = self.create_test_tensors()
         grad_tensors = self.create_gradient_tensors()
-        operations = self.create_operations(test_tensors[-1])
-        comp_ops = operations[:7]
-        allreduce_comm_op = operations[7]
+        operations = self.create_operations()
+        comp_ops = operations[:-1]
+        allreduce_comm_op = operations[-1]
 
-        attention_fuser = PartitionFuser(
+        mlp_fuser = PartitionFuser(
             ops=comp_ops,
             allreduce_comm_op=allreduce_comm_op,
             fuse_ops=False
         )
-        print(f"attention_fuser._forward_ops: {attention_fuser._forward_ops}")
-        print(f"attention_fuser._backward_ops: {attention_fuser._backward_ops}")
+        print(f"mlp_fuser._forward_ops: {mlp_fuser._forward_ops}")
+        print(f"mlp_fuser._backward_ops: {mlp_fuser._backward_ops}")
 
         monitor = None
         if self.rank == 0:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
             os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_energy_results.csv", "w") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_energy_results_baseline.csv", "w") as f:
                 title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
                 for i in range(self.repeat_num):
                     title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
@@ -481,40 +407,28 @@ class AttentionFuserBackwardTest:
                 title += "\n"
                 f.write(title)
         
-        # skip = True
-        overlap_windows = self.get_backward_overlap_windows()
-        for overlap_window in overlap_windows:
-            for sm_num in range(1, 21):
-                for block_size in [512, 1024]:
-                    # if sm_num == 5 and block_size == 512 and overlap_window[0] == 2 and overlap_window[1] == 8:
-                    #     skip = False
-                    # if skip:
-                    #     continue
-                    sm_configs = (sm_num, block_size)
-                    print(f"Backward Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
-                    with nvtx_range(f"Backward Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
-                        self.test_backward_config(
-                            monitor, 
-                            test_tensors, 
-                            grad_tensors,
-                            attention_fuser, 
-                            overlap_window, 
-                            sm_configs
-                        )
-                    # return
-                    time.sleep(30)
+        overlap_window = (-1, -1)
+        sm_num, block_size = None, None
+        sm_configs = (sm_num, block_size)
+        print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
+        with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
+            self.test_config(
+                monitor, 
+                test_tensors, grad_tensors, mlp_fuser, 
+                overlap_window, sm_configs
+            )
 
 
 def overlap_test(rank, world_size, args, master_port):
-    """Run the attention fuser backward pass tests in a distributed environment."""
+    """Run the attention fuser tests in a distributed environment."""
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = f"{master_port}"
 
-    # Create test instance and run backward tests
-    test_runner = AttentionFuserBackwardTest(args, rank, world_size)
+    # Create test instance and run tests
+    test_runner = MLPFuserTest(args, rank, world_size)
     try:
         test_runner.run_overlap_test()
     except Exception as e:
@@ -540,7 +454,7 @@ if __name__ == "__main__":
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()
 
-    print("Running backward pass overlap test for attention fuser")
+    print("Running overlap test for mlp fuser")
     print(f"World size: {args.world_size}")
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
@@ -557,4 +471,5 @@ if __name__ == "__main__":
         ),
         nprocs=args.world_size,
         join=True,
-    ) 
+    )
+    

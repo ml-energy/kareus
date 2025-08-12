@@ -275,7 +275,7 @@ class MLPFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1),
+            # (-1, -1),
             (0, 1), (2, 2), (3, 4), (5, 6),
             (0, 2), (2, 4), (3, 5),
             (0, 4), (2, 6),
@@ -325,7 +325,7 @@ class MLPFuserTest:
         duration = (time_end - time_start) / 8
 
         if self.rank == 0:
-            iterations = int(10 / duration)
+            iterations = int(8 / duration)
             dist_list = [iterations]
         else:
             dist_list = [None]

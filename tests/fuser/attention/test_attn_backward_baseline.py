@@ -9,13 +9,15 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
-from transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
+from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
+from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
 from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
+from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range
@@ -114,11 +116,11 @@ class AttentionFuserBackwardTest:
         # Test configuration
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len
-        self.hidden_size = 2048
-        self.num_attention_heads = 32
-        self.num_query_groups = 32  # For grouped query attention
+        self.hidden_size = 3072
+        self.num_attention_heads = 24
+        self.num_query_groups = 8  # For grouped query attention
         self.head_dim = self.hidden_size // self.num_attention_heads
-        self.ffn_hidden_size = 4 * self.hidden_size
+        self.ffn_hidden_size = 8192
         
         # Create transformer config
         self.config = TransformerConfig(
@@ -133,15 +135,16 @@ class AttentionFuserBackwardTest:
             apply_query_key_layer_scaling=False,
             rotary_interleaved=False,
             flash_decode=False,
-            apply_rope_fusion=False,
+            apply_rope_fusion=True,
             params_dtype=self.dtype,
             tensor_model_parallel_size=world_size,
+            add_bias_linear=False,
         )
 
         self.frequency = args.frequency
-        self.repeat_num = 3
-        self.overlap_window_forward = (2, 6)
-        self.sm_configs_forward = (9, 1024)
+        self.repeat_num = 1
+        self.overlap_window_forward = (-1, -1)
+        self.sm_configs_forward = (20, 1024)
     
     def create_test_tensors(self):
         """Create test tensors for the attention operations with gradients enabled."""
@@ -150,22 +153,23 @@ class AttentionFuserBackwardTest:
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
-        bias = torch.randn(
-            self.hidden_size,
-            dtype=self.dtype, device=self.device, requires_grad=True
-        )
+        # bias = torch.randn(
+        #     self.hidden_size,
+        #     dtype=self.dtype, device=self.device, requires_grad=True
+        # )
+        bias = None
         residual = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
         seq = (
-            torch.arange(self.seq_length, device=self.device, dtype=self.dtype)
+            torch.arange(self.seq_length, device=self.device, dtype=torch.float32)
             + 0
         )
         rotary_base = 10000
         inv_freq = 1.0 / (
-            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=self.dtype, device=self.device) / self.head_dim)
+            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
         )
         freqs = torch.outer(seq, inv_freq)
         rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
@@ -191,10 +195,11 @@ class AttentionFuserBackwardTest:
         )
         
         # Gradient for bias output
-        bias_grad = torch.randn(
-            self.hidden_size,
-            dtype=self.dtype, device=self.device
-        )
+        # bias_grad = torch.randn(
+        #     self.hidden_size,
+        #     dtype=self.dtype, device=self.device
+        # )
+        bias_grad = None
         
         # Gradient for residual output
         residual_grad = torch.randn(
@@ -220,7 +225,7 @@ class AttentionFuserBackwardTest:
         )
         
         # 2. LayerNorm Operation
-        layernorm_op = LayerNorm(
+        layernorm_op = RMSNorm(
             normalized_shape=self.hidden_size,
             eps=self.config.layernorm_epsilon,
             device=self.device,
@@ -239,7 +244,7 @@ class AttentionFuserBackwardTest:
             out_features=qkv_hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=False,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -279,7 +284,7 @@ class AttentionFuserBackwardTest:
             out_features=self.hidden_size,
             device=self.device,
             dtype=self.dtype,
-            bias=True,
+            bias=False,
             return_bias=True,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
@@ -338,33 +343,35 @@ class AttentionFuserBackwardTest:
                 time_start = time.time()
 
             # Clear gradients
-            if hidden_states.grad is not None:
-                hidden_states.grad.zero_()
-            if bias.grad is not None:
-                bias.grad.zero_()
-            if residual.grad is not None:
-                residual.grad.zero_()
-            if allreduce_inputs.grad is not None:
-                allreduce_inputs.grad.zero_()
+            # if hidden_states.grad is not None:
+            #     hidden_states.grad.zero_()
+            # if bias.grad is not None:
+            #     bias.grad.zero_()
+            # if residual.grad is not None:
+            #     residual.grad.zero_()
+            # if allreduce_inputs.grad is not None:
+            #     allreduce_inputs.grad.zero_()
                 
             # Forward pass
-            output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
-                hidden_states=hidden_states,
-                bias=bias,
-                residual=residual,
-                rotary_pos_emb=rotary_pos_emb,
-                attention_mask=attention_mask,
-                allreduce_input=allreduce_inputs,
-                allreduce_overlap_window=self.overlap_window_forward,
-                allreduce_sm_configs=self.sm_configs_forward,
-                allreduce_overlap_window_backward=overlap_window,
-                allreduce_sm_configs_backward=sm_configs,
-            )
+            if i == 0:
+                output, output_bias, output_residual, allreduce_output = attention_fuser(
+                    hidden_states=hidden_states,
+                    bias=bias,
+                    residual=residual,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_mask=attention_mask,
+                    allreduce_input=allreduce_inputs,
+                    allreduce_overlap_window=self.overlap_window_forward,
+                    allreduce_sm_configs=self.sm_configs_forward,
+                    allreduce_overlap_window_backward=overlap_window,
+                    allreduce_sm_configs_backward=sm_configs,
+                )
             
             # Backward pass - this is what we're testing
             torch.autograd.backward(
-                tensors=[output, output_bias, output_residual, grad_allreduce_input],
-                grad_tensors=[output_grad, bias_grad, residual_grad, allreduce_input_grad],
+                tensors=[output, output_residual, allreduce_output],
+                grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
+                retain_graph=True,
             )
             
         torch.cuda.synchronize()
@@ -390,34 +397,35 @@ class AttentionFuserBackwardTest:
                 monitor.begin_window("step")
 
             for i in range(iterations):
-                # Clear gradients
-                if hidden_states.grad is not None:
-                    hidden_states.grad.zero_()
-                if bias.grad is not None:
-                    bias.grad.zero_()
-                if residual.grad is not None:
-                    residual.grad.zero_()
-                if allreduce_inputs.grad is not None:
-                    allreduce_inputs.grad.zero_()
+                # # Clear gradients
+                # if hidden_states.grad is not None:
+                #     hidden_states.grad.zero_()
+                # if bias.grad is not None:
+                #     bias.grad.zero_()
+                # if residual.grad is not None:
+                #     residual.grad.zero_()
+                # if allreduce_inputs.grad is not None:
+                #     allreduce_inputs.grad.zero_()
                 
-                # Forward pass
-                output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
-                    hidden_states=hidden_states,
-                    bias=bias,
-                    residual=residual,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_mask=attention_mask,
-                    allreduce_input=allreduce_inputs,
-                    allreduce_overlap_window=self.overlap_window_forward,
-                    allreduce_sm_configs=self.sm_configs_forward,
-                    allreduce_overlap_window_backward=overlap_window,
-                    allreduce_sm_configs_backward=sm_configs,
-                )
+                # # Forward pass
+                # output, output_bias, output_residual, grad_allreduce_input = attention_fuser(
+                #     hidden_states=hidden_states,
+                #     bias=bias,
+                #     residual=residual,
+                #     rotary_pos_emb=rotary_pos_emb,
+                #     attention_mask=attention_mask,
+                #     allreduce_input=allreduce_inputs,
+                #     allreduce_overlap_window=self.overlap_window_forward,
+                #     allreduce_sm_configs=self.sm_configs_forward,
+                #     allreduce_overlap_window_backward=overlap_window,
+                #     allreduce_sm_configs_backward=sm_configs,
+                # )
                 
                 # Backward pass - this is what we're measuring
                 torch.autograd.backward(
-                    tensors=[output, output_bias, output_residual, grad_allreduce_input],
-                    grad_tensors=[output_grad, bias_grad, residual_grad, allreduce_input_grad],
+                    tensors=[output, output_residual, allreduce_output],
+                    grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
+                    retain_graph=True,
                 )
                 
             torch.cuda.synchronize()
@@ -447,7 +455,7 @@ class AttentionFuserBackwardTest:
         comp_ops = operations[:7]
         allreduce_comm_op = operations[7]
 
-        attention_fuser = AttentionFuser(
+        attention_fuser = PartitionFuser(
             ops=comp_ops,
             allreduce_comm_op=allreduce_comm_op,
             fuse_ops=False
@@ -514,7 +522,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=2)
+    parser.add_argument("--batch_size", "-b", type=int, default=4)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()

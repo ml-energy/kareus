@@ -17,6 +17,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
+from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range
@@ -288,7 +289,7 @@ class AttentionFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1),
+            # (-1, -1),
             (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
             (0, 3), (2, 5), (4, 6), (6, 8),
             (0, 5), (2, 6), (4, 8),
@@ -327,7 +328,7 @@ class AttentionFuserTest:
         time_end = time.time()
         duration = (time_end - time_start) / 8
         if self.rank == 0:
-            iterations = int(10 / duration)
+            iterations = int(8 / duration)
             dist_list = [iterations]
         else:
             dist_list = [None]
@@ -392,7 +393,7 @@ class AttentionFuserTest:
         comp_ops = operations[:7]
         allreduce_comm_op = operations[7]
 
-        attention_fuser = AttentionFuser(
+        attention_fuser = PartitionFuser(
             ops=comp_ops,
             allreduce_comm_op=allreduce_comm_op,
             fuse_ops=False
