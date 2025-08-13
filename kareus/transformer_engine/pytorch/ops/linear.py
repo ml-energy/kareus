@@ -11,7 +11,7 @@ from typing import Optional, Union
 import torch
 
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-from kareus.transformer_engine.pytorch.ops.op import FusedOperation
+from transformer_engine.pytorch.ops.op import FusedOperation
 
 from kareus.transformer_engine.pytorch.ops.basic import (
     AllReduce,

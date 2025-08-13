@@ -239,6 +239,8 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         #     # We unify them to the first one to pass the stride check in TE
         #     if value.shape == key.shape and value.shape[0] == 1 and value.stride() != key.stride():
         #         value = value.as_strided(value.shape, key.stride())
+        if value.shape == key.shape and value.shape[1] == 1 and value.stride() != key.stride():
+            value = value.as_strided(value.shape, key.stride())
 
         # attention_bias_kwargs = {}
         # if attention_bias is not None:
@@ -274,3 +276,64 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         #     return core_attn_out.transpose(0, 1)
         # else:
         return core_attn_out
+
+    def fuser_forward(
+        self,
+        basic_op_ctxs: list,
+        input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: list,
+        basic_op_prev_ops: list,
+        basic_op_next_ops: list,
+        basic_op_kwargs: list,
+    ) -> tuple[torch.Tensor, list[tuple[()]]]:
+        """Forward pass for the fuser.
+        
+        This method delegates to the parent DotProductAttentionOp's fuser_forward
+        method, which handles the fusing logic appropriately.
+        """
+        key, value= basic_op_extra_inputs[0]
+
+        ctx = basic_op_ctxs[0]
+        if value.shape == key.shape and value.shape[1] == 1 and value.stride() != key.stride():
+            ctx.modify_value_stride = True
+            ctx.value_shape = value.shape
+            ctx.value_stride = value.stride()
+            ctx.value_offset = value.storage_offset()
+            value = value.as_strided(value.shape, key.stride())
+            basic_op_extra_inputs[0] = (key, value)
+        else:
+            ctx.modify_value_stride = False
+
+        return super().fuser_forward(
+            basic_op_ctxs=basic_op_ctxs,
+            input_=input_,
+            basic_op_extra_inputs=basic_op_extra_inputs,
+            basic_op_prev_ops=basic_op_prev_ops,
+            basic_op_next_ops=basic_op_next_ops,
+            basic_op_kwargs=basic_op_kwargs,
+        )
+    
+    def fuser_backward(
+        self,
+        basic_op_ctxs: list,
+        grad_output: torch.Tensor,
+        *,
+        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+    ) -> tuple[
+        torch.Tensor,
+        list[tuple[Optional[torch.Tensor], ...]],
+        list[tuple[torch.Tensor, torch.Tensor]],
+    ]:
+        grad_input, grad_params, grad_extra_inputs = super().fuser_backward(
+            basic_op_ctxs=basic_op_ctxs,
+            grad_output=grad_output,
+            basic_op_grad_extra_outputs=basic_op_grad_extra_outputs,
+        )
+
+        ctx = basic_op_ctxs[0]
+        if ctx.modify_value_stride:
+            grad_key, grad_value = grad_extra_inputs[0]
+            grad_extra_inputs[0] = (grad_key, grad_value.as_strided(ctx.value_shape, ctx.value_stride, storage_offset=ctx.value_offset))
+
+        return grad_input, grad_params, grad_extra_inputs

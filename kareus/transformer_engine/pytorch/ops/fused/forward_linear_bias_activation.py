@@ -11,7 +11,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from kareus.transformer_engine.pytorch.ops.op import (
+from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusedOperation,
     FusibleOperation,

@@ -84,8 +84,11 @@ class MLP(MegatronModule):
             tp_comm_buffer_name='fc1',
         )
 
-        # self.activation_func = self.config.activation_func
-        self.bias_swiglu_op = BiasSwigluOp(self.config.activation_func_fp8_input_store)
+        self.activation_func = self.config.activation_func
+        if self.activation_func == F.silu and self.config.gated_linear_unit:
+            self.bias_swiglu_op = BiasSwigluOp(self.config.activation_func_fp8_input_store)
+        else:
+            raise NotImplementedError("Only support swiglu in MLP.")
 
         self.linear_fc2 = build_module(
             submodules.linear_fc2,

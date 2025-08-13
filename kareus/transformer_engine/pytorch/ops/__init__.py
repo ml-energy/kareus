@@ -10,5 +10,3 @@ This operation-based API is experimental and subject to change.
 
 from kareus.transformer_engine.pytorch.ops.basic import *
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.transformer_engine.pytorch.ops.op import FusibleOperation
-# from kareus.transformer_engine.pytorch.ops.sequential import Sequential
