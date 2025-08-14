@@ -1,6 +1,6 @@
 name: megatron_llama_3_2_3b
 trainer:
-  devices: 4
+  devices: 8
   num_nodes: 1
   accelerator: gpu
   precision: bf16
@@ -8,9 +8,9 @@ trainer:
   enable_checkpointing: False
   use_distributed_sampler: False
   max_epochs: 1 # PTL default. In practice, max_steps will be reached first. 
-  max_steps: 2 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
-  log_every_n_steps: 5
-  val_check_interval: 5
+  max_steps: 110 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
+  log_every_n_steps: 200
+  val_check_interval: 200
   limit_val_batches: 1
   limit_test_batches: 1
   accumulate_grad_batches: 1 # do not modify, grad acc is automatic for training megatron models
@@ -47,10 +47,10 @@ model:
   mcore_gpt: True
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
-  micro_batch_size: 2 # Reduced for larger 3B model
-  global_batch_size: 6 # will use more micro batches to reach global batch size
+  micro_batch_size: 4 # Reduced for larger 3B model
+  global_batch_size: 32 # will use more micro batches to reach global batch size
   tensor_model_parallel_size: 2 # Appropriate for 3B model
-  pipeline_model_parallel_size: 2 # inter-layer model parallelism for larger model
+  pipeline_model_parallel_size: 4 # inter-layer model parallelism for larger model
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
 
   # model architecture - LLaMA 3.2 3B
@@ -92,8 +92,8 @@ model:
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
-  enable_zeus_monitor: false
-  enable_perseus_optimizer: false
+  enable_zeus_monitor: true
+  enable_perseus_optimizer: true
 
   tokenizer:
     library: 'megatron'
