@@ -12,6 +12,9 @@ docker run -it \
     -v $HOME/workspace:/workspaces \
     ruofanwu7/kareus-dev
 
+# ssh-keygen -t ed25519 -C "ruofanw@umich.edu"
+# sudo usermod -aG docker ubuntu
+
 # git config --global --add safe.directory /workspaces/Kareus
 # install cfuser
 # pip install "numpy<2.0"
@@ -24,3 +27,5 @@ docker run -it \
 
 # pip install -e ".[all]" 
 # pip install -e . 
+
+# pip install zeus==0.12.1.post2

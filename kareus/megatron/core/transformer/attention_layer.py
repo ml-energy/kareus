@@ -58,8 +58,6 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         # [Module 1: Prev MLP BDA] Optional BDA on the previous MLP output
         self.prev_mlp_bda = build_module(
             submodules.prev_mlp_bda if not self.is_first_layer else IdentityFuncOp,
-            config=self.config,
-            hidden_size=self.config.hidden_size,
         )
 
         # [Module 2: Input Layernorm] Optional Layernorm on the input data
@@ -123,13 +121,8 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if not self.is_first_layer:
-            # with self.bias_dropout_add_exec_handler():
-            hidden_states = self.prev_mlp_bda(self.training, self.config.bias_dropout_fusion)(
-                hidden_states, residual, self.hidden_dropout
-            )
-            # hidden_states = make_viewless_tensor(
-            #     inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
-            # )
+            hidden_states = self.prev_mlp_bda(hidden_states[0], hidden_states[1], residual,
+                                            training=self.training, dropout_prob=self.hidden_dropout)
 
         # Residual connection.
         residual = hidden_states

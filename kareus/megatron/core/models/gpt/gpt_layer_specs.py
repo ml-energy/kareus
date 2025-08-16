@@ -35,23 +35,15 @@ from megatron.core.transformer.transformer_layer import (
 )
 from megatron.core.utils import is_te_min_version
 
-# try:
-from kareus.megatron.core.extensions.transformer_engine import (
-    TEColumnParallelLinear,
-    # TEDotProductAttention,
-    TELayerNormColumnParallelLinear,
-    TENorm,
-    TERowParallelLinear,
-)
 from kareus.megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from kareus.megatron.core.transformer.mlp import MLP, MLPSubmodules
 from kareus.megatron.core.extensions.te_linear import (
     TEFusibleColumnParallelLinear,
     TEFusibleRowParallelLinear,
 )
-# from kareus.megatron.core.extensions.transformer_engine import TEDotProductAttention
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
-from kareus.megatron.core.extensions.te_bias_dropout_add import te_fusible_get_bias_dropout_add
+from kareus.megatron.core.extensions.te_norm import TEFusibleNorm
+from kareus.transformer_engine.pytorch.ops import BiasDropoutAddOp as TEFusibleBiasDropoutAdd
 
 HAVE_TE = True
 # except ImportError:
@@ -153,22 +145,19 @@ def get_gpt_layer_with_transformer_engine_spec(
         # TENorm significantly harms convergence when used
         # for QKLayerNorm if TE Version < 1.9;
         # we instead use the Apex implementation.
-        qk_norm = TENorm if is_te_min_version("1.9.0") else FusedLayerNorm
+        qk_norm = TEFusibleNorm if is_te_min_version("1.9.0") else FusedLayerNorm
         if qk_l2_norm or qk_layernorm:
             raise NotImplementedError("qk_l2_norm and qk_layernorm not supported")
         return ModuleSpec(
             module=TransformerLayer,
             submodules=TransformerLayerSubmodules(
-                input_layernorm=TENorm,
+                input_layernorm=TEFusibleNorm,
                 self_attention=ModuleSpec(
                     module=SelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=SelfAttentionSubmodules(
-                        # linear_qkv=TEColumnParallelLinear,
                         linear_qkv=TEFusibleColumnParallelLinear,
-                        # core_attention=TEDotProductAttention,
                         core_attention=TEFusibleDotProductAttention,
-                        # linear_proj=TERowParallelLinear,
                         linear_proj=TEFusibleRowParallelLinear,
                         # q_layernorm=(
                         #     L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
@@ -178,11 +167,10 @@ def get_gpt_layer_with_transformer_engine_spec(
                         # ),
                     ),
                 ),
-                # self_attn_bda=get_bias_dropout_add,
-                self_attn_bda=te_fusible_get_bias_dropout_add,
-                pre_mlp_layernorm=TENorm if num_experts else IdentityOp,
+                self_attn_bda=TEFusibleBiasDropoutAdd,
+                pre_mlp_layernorm=TEFusibleNorm if num_experts else IdentityOp,
                 mlp=mlp,
-                mlp_bda=te_fusible_get_bias_dropout_add,
+                mlp_bda=TEFusibleBiasDropoutAdd,
             ),
         )
 
@@ -281,8 +269,7 @@ def get_gpt_layer_local_spec(
                 self_attn_bda=get_bias_dropout_add,
                 pre_mlp_layernorm=LNImpl,
                 mlp=mlp,
-                # mlp_bda=get_bias_dropout_add,
-                mlp_bda=te_fusible_get_bias_dropout_add,
+                mlp_bda=get_bias_dropout_add,
                 sharded_state_dict_keys_map={
                     'input_layernorm.': 'self_attention.linear_qkv.layer_norm_',
                     'pre_mlp_layernorm.': 'mlp.linear_fc1.layer_norm_',
@@ -331,9 +318,7 @@ def get_mlp_module_spec(
         return ModuleSpec(
             module=MLP,
             submodules=MLPSubmodules(
-                # linear_fc1=TELayerNormColumnParallelLinear if use_te else ColumnParallelLinear,
                 linear_fc1=TEFusibleColumnParallelLinear,
-                # linear_fc2=TERowParallelLinear if use_te else RowParallelLinear,
                 linear_fc2=TEFusibleRowParallelLinear
             ),
         )

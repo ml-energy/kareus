@@ -74,7 +74,6 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         
         self.post_mlp_bda = build_module(
             submodules.post_mlp_bda if self.is_last_layer else IdentityFuncOp,
-            config=self.config
         )
 
         self.recompute_pre_mlp_layernorm = False
@@ -98,10 +97,8 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
         
-        # with self.bias_dropout_add_exec_handler():
-        hidden_states = self.prev_self_attn_bda(self.training, self.config.bias_dropout_fusion)(
-            hidden_states, residual, self.hidden_dropout
-        )
+        hidden_states = self.prev_self_attn_bda(hidden_states[0], hidden_states[1], residual,
+                                            training=self.training, dropout_prob=self.hidden_dropout)
         
         # Residual connection.
         residual = hidden_states
@@ -113,10 +110,8 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         mlp_output_with_bias = self.mlp(input_layernorm_output)
         
         if self.is_last_layer:
-            # with self.bias_dropout_add_exec_handler():
-            hidden_states = self.post_mlp_bda(self.training, self.config.bias_dropout_fusion)(
-                mlp_output_with_bias, residual, self.hidden_dropout
-            )
+            hidden_states = self.post_mlp_bda(mlp_output_with_bias[0], mlp_output_with_bias[1], residual,
+                                            training=self.training, dropout_prob=self.hidden_dropout)
             # Jit compiled function creates 'view' tensor. This tensor
             # potentially gets saved in the MPU checkpoint function context,
             # which rejects view tensors. While making a viewless tensor here

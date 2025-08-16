@@ -2,6 +2,7 @@
 
 import torch
 from typing import Optional, Tuple
+import math
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 
@@ -11,55 +12,31 @@ def fused_bias_dropout_add_forward(
     x: torch.Tensor,
     bias: Optional[torch.Tensor],
     residual: torch.Tensor, 
-    mask: Optional[torch.Tensor]
+    dropout_prob: float,
+    training: bool,
 ) -> torch.Tensor:
     """Compiled forward function for fused bias dropout add operation."""
-    # Add bias if provided
     if bias is not None:
-        x_plus_bias = x + bias
+        x = x + bias
+        dropout_output, mask = torch.ops.aten.native_dropout(x, float(dropout_prob), training)
+        out = residual + dropout_output
+        return out, mask
     else:
-        x_plus_bias = x
-    
-    # Apply dropout mask if provided
-    if mask is not None:
-        dropout_output = x_plus_bias * mask
-    else:
-        dropout_output = x_plus_bias
-    
-    # Add residual connection
-    out = residual + dropout_output
-    return out
+        dropout_output, mask = torch.ops.aten.native_dropout(x, float(dropout_prob), training)
+        out = residual + dropout_output
+        return out, mask
 
 
 @torch.compile  
 def fused_bias_dropout_add_backward(
     grad_output: torch.Tensor,
     mask: Optional[torch.Tensor],
-    has_bias: bool,
+    scale: torch.Tensor,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     """Compiled backward function for fused bias dropout add operation."""
-    # Gradient w.r.t. residual is just grad_output
     grad_residual = grad_output
-    
-    # Gradient w.r.t. dropout output  
-    grad_dropout_output = grad_output
-    
-    # Apply dropout mask to gradient if provided
-    if mask is not None:
-        grad_x_plus_bias = grad_dropout_output * mask
-    else:
-        grad_x_plus_bias = grad_dropout_output
-    
-    # Gradient w.r.t. input
-    grad_input = grad_x_plus_bias
-    
-    # Gradient w.r.t. bias (sum over batch and sequence dimensions if bias exists)
-    if has_bias:
-        # For bias shape (hidden_size,), sum over batch and sequence dimensions
-        grad_bias = grad_x_plus_bias.sum(dim=tuple(range(grad_x_plus_bias.ndim - 1)))
-    else:
-        grad_bias = None
-    
+    grad_input = torch.ops.aten.native_dropout_backward(grad_output, mask, scale)
+    grad_bias = grad_input
     return grad_input, grad_bias, grad_residual
 
 
@@ -102,43 +79,20 @@ class BiasDropoutAddOp(BasicOperation):
         training: Optional[bool] = None,
     ) -> torch.Tensor:
         """Forward pass for bias dropout add."""
-        
         # Use instance defaults if not provided
         if dropout_prob is None:
             dropout_prob = self.dropout_prob
         if training is None:
             training = self.training
-            
-        # Validate inputs
-        # assert input_.is_cuda and bias.is_cuda and residual.is_cuda, \
-        #     "BiasDropoutAdd only supports CUDA tensors."
-        # assert input_.dtype == bias.dtype == residual.dtype, \
-        #     "Input, bias and residual must have the same data type!"
-        
-        # Enable gradients for proper JIT compilation and mixed precision compatibility
-        with torch.enable_grad():
-            # Generate dropout mask if needed
-            mask = None
-            if training and dropout_prob > 0.0:
-                # Generate dropout mask
-                noise = torch.rand_like(input_)
-                keep_mask = noise >= dropout_prob
-                
-                if dropout_prob < 1.0:
-                    # Scale by 1/(1-p) for unbiased estimation
-                    mask = keep_mask.to(dtype=input_.dtype) / (1.0 - dropout_prob)
-                else:
-                    mask = torch.zeros_like(input_)
-            
-            # Call compiled forward function
-            output = fused_bias_dropout_add_forward(
-                x=input_,
-                bias=bias,
-                residual=residual,
-                mask=mask
-            )
 
-        # Save context for backward pass
+        output, mask = fused_bias_dropout_add_forward(
+            x=input_,
+            bias=bias,
+            residual=residual,
+            dropout_prob=dropout_prob,
+            training=training,
+        )
+        ctx.scale = 0.0 if math.isclose(1.0 - dropout_prob, 0.0) else 1.0 / (1.0 - dropout_prob)
         ctx.has_bias = bias is not None
         ctx.save_for_backward(mask)
         
@@ -150,17 +104,18 @@ class BiasDropoutAddOp(BasicOperation):
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Backward pass for bias dropout add."""
-        
         # Retrieve saved context
         (mask,) = ctx.saved_tensors
         has_bias = ctx.has_bias
-        
-        # Call compiled backward function
+        scale = ctx.scale
+
         grad_input, grad_bias, grad_residual = fused_bias_dropout_add_backward(
             grad_output=grad_output,
             mask=mask,
-            has_bias=has_bias,
+            scale=scale,
         )
+        if not has_bias:
+            grad_bias = None
         
         return grad_input, (grad_bias, grad_residual)
 
