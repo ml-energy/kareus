@@ -67,7 +67,6 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
         )
-        # self.input_layernorm = create_operation_fuser(self.input_layernorm)
 
         attention_optional_kwargs = {}
         if config.context_parallel_size > 1 and config.cp_comm_type is not None:
@@ -96,6 +95,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         self,
         hidden_states: Union[Tensor, Tuple[Tensor, Tensor]],
         residual: Tensor = None,
+        comm_hidden_states: Optional[Tensor] = None, # TODO: comm_hidden_states to be all-reduced
         attention_mask: Optional[Tensor] = None,
         context: Optional[Tensor] = None,
         context_mask: Optional[Tensor] = None,
@@ -143,7 +143,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             sequence_len_offset=sequence_len_offset,
         )
 
-        return attention_output_with_bias, residual, context
+        return attention_output_with_bias, residual, comm_hidden_states, context
     
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: Optional[dict] = None

@@ -36,6 +36,7 @@ from megatron.core.transformer.transformer_block import (
 # Import the attention and MLP layers
 from kareus.megatron.core.transformer.attention_layer import AttentionLayer
 from kareus.megatron.core.transformer.mlp_layer import MLPLayer
+from kareus.megatron.core.transformer.mlp_output_layer import MLPOutputLayer
 
 # Import the partition function
 from kareus.megatron.core.transformer.partition_transformer_layer import (
@@ -76,21 +77,23 @@ class CombinedLayerWrapper:
     backward compatibility with pipeline parallel code that expects a single layer.
     """
     
-    def __init__(self, attention_layer, mlp_layer):
+    def __init__(self, attention_layer, mlp_layer, mlp_output_layer=None):
         self.attention_layer = attention_layer
         self.mlp_layer = mlp_layer
-        # Expose layer_number for pipeline parallel compatibility
-        self.layer_number = attention_layer.layer_number
+        self.mlp_output_layer = mlp_output_layer
     
     def __call__(self, *args, **kwargs):
         """Forward pass through both attention and MLP layers."""
         # Forward through attention layer
         pre_mlp_layernorm_output, residual, context = self.attention_layer(*args, **kwargs)
         
-        # Forward through MLP layer
-        hidden_states = self.mlp_layer(pre_mlp_layernorm_output, residual)
-        
-        return hidden_states, context
+        # Forward through MLP layer and output layer
+        mlp_output_with_bias, residual, _ = self.mlp_layer(pre_mlp_layernorm_output, residual, None)
+        if self.mlp_output_layer is not None:
+            hidden_states, _ = self.mlp_output_layer(mlp_output_with_bias, residual)
+            return hidden_states, context
+        else:
+            return mlp_output_with_bias, context
     
     def __getattr__(self, name):
         """Delegate attribute access to attention layer first, then MLP layer."""
@@ -153,7 +156,7 @@ class TransformerBlock(MegatronModule):
         self.num_layers_per_pipeline_rank = len(self.attention_layers)
 
     def _build_layers(self):
-        # Build separate attention and MLP layers instead of combined transformer layers
+        # Build separate attention and MLP layers; a single MLP-output layer is built at block level
         def build_attention_and_mlp_layers(layer_spec, layer_number):
             global_layer_number = layer_number + get_transformer_layer_offset(
                 self.config
@@ -167,10 +170,10 @@ class TransformerBlock(MegatronModule):
             
             # Handle both ModuleSpec and TransformerLayerSubmodules
             if isinstance(layer_spec, ModuleSpec):
-                attention_submodules, mlp_submodules = create_attention_and_mlp_layers_from_module_spec(layer_spec)
+                attention_submodules, mlp_submodules, mlp_output_submodules = create_attention_and_mlp_layers_from_module_spec(layer_spec)
             else:
                 # layer_spec is TransformerLayerSubmodules
-                attention_submodules, mlp_submodules = create_attention_and_mlp_layers_from_transformer_submodules(layer_spec)
+                attention_submodules, mlp_submodules, mlp_output_submodules = create_attention_and_mlp_layers_from_transformer_submodules(layer_spec)
             
             with fp8_init_context:
                 attention_layer = AttentionLayer(
@@ -183,19 +186,29 @@ class TransformerBlock(MegatronModule):
                     submodules=mlp_submodules, 
                     layer_number=layer_number
                 )
-            return attention_layer, mlp_layer
+            return attention_layer, mlp_layer, mlp_output_submodules
 
-        # Build separate attention and MLP layers
+        # Build separate attention and MLP layers; collect one set of output submodules to instantiate once
         attention_layers = []
         mlp_layers = []
+        mlp_output_submodules_first = None
         
         for i, layer_spec in enumerate(self.submodules.layer_specs):
-            attention_layer, mlp_layer = build_attention_and_mlp_layers(layer_spec, i + 1)
+            attention_layer, mlp_layer, mlp_output_submodules = build_attention_and_mlp_layers(layer_spec, i + 1)
             attention_layers.append(attention_layer)
             mlp_layers.append(mlp_layer)
+            if mlp_output_submodules_first is None:
+                mlp_output_submodules_first = mlp_output_submodules
 
         self.attention_layers = torch.nn.ModuleList(attention_layers)
         self.mlp_layers = torch.nn.ModuleList(mlp_layers)
+        # Single MLPOutputLayer that knows whether it's the last layer via layer_number==num_layers
+        with get_fp8_context(self.config, is_init=True):
+            self.mlp_output_layer = MLPOutputLayer(
+                config=self.config,
+                submodules=mlp_output_submodules_first,
+                layer_number=len(self.mlp_layers),
+            )
 
         # @TODO: add back account_for_embedding_in_pipeline_split (see issue #293)
         # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
@@ -389,6 +402,8 @@ class TransformerBlock(MegatronModule):
                 current_hidden_2 = hidden_states_2
                 residual_1 = None
                 residual_2 = None
+                comm_hidden_1 = None
+                comm_hidden_2 = None
                 current_context_1 = context_1
                 current_context_2 = context_2
                 
@@ -405,9 +420,10 @@ class TransformerBlock(MegatronModule):
                     with self.offload_context, inner_fp8_context:
                         # Process attention for both nano-batches
                         # Micro-batch 1 attention
-                        current_hidden_1, residual_1, current_context_1 = attention_layer(
+                        current_hidden_1, residual_1, comm_hidden_1, current_context_1 = attention_layer(
                             hidden_states=current_hidden_1,
                             residual=residual_1,
+                            comm_hidden_states=comm_hidden_1,
                             attention_mask=attention_mask_1,
                             context=current_context_1,
                             context_mask=context_mask_1,
@@ -419,11 +435,14 @@ class TransformerBlock(MegatronModule):
                             packed_seq_params=packed_seq_params,
                             sequence_len_offset=sequence_len_offset_1,
                         )
+                        comm_hidden_2 = current_hidden_1
+                        current_hidden_2 = comm_hidden_1 if comm_hidden_1 is not None else current_hidden_2
                         
                         # Micro-batch 2 attention
-                        current_hidden_2, residual_2, current_context_2 = attention_layer(
+                        current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(
                             hidden_states=current_hidden_2,
                             residual=residual_2,
+                            comm_hidden_states=comm_hidden_2,
                             attention_mask=attention_mask_2,
                             context=current_context_2,
                             context_mask=context_mask_2,
@@ -435,13 +454,23 @@ class TransformerBlock(MegatronModule):
                             packed_seq_params=packed_seq_params,
                             sequence_len_offset=sequence_len_offset_2,
                         )
+                        comm_hidden_1 = current_hidden_2
+                        current_hidden_1 = comm_hidden_2
                         
                         # Process MLP for both nano-batches
                         # Micro-batch 1 MLP
-                        current_hidden_1, residual_1 = mlp_layer(current_hidden_1, residual_1)
+                        current_hidden_1, residual_1, comm_hidden_1 = mlp_layer(
+                            current_hidden_1, residual_1, comm_hidden_1
+                        )
+                        comm_hidden_2 = current_hidden_1
+                        current_hidden_2 = comm_hidden_1
                         
                         # Micro-batch 2 MLP
-                        current_hidden_2, residual_2 = mlp_layer(current_hidden_2, residual_2)
+                        current_hidden_2, residual_2, comm_hidden_2 = mlp_layer(
+                            current_hidden_2, residual_2, comm_hidden_2
+                        )
+                        comm_hidden_1 = current_hidden_2
+                        current_hidden_1 = comm_hidden_2
                         
                         if (
                             torch.is_grad_enabled()
@@ -450,20 +479,18 @@ class TransformerBlock(MegatronModule):
                         ):
                             raise NotImplementedError("CPU offloading not implemented")
                 
-                hidden_states_1 = current_hidden_1
-                hidden_states_2 = current_hidden_2
-                # Concatenate results
-                hidden_states = torch.cat([hidden_states_1, hidden_states_2], dim=1)
+                # Apply the single MLPOutputLayer once at the end (handles concat and last-layer BDA)
+                hidden_states= self.mlp_output_layer(current_hidden_1, residual_1, comm_hidden_1, residual_2)
                 
-                # Set context from the last processed context
-                if current_context_1 is not None and current_context_2 is not None:
-                    context = torch.cat([current_context_1, current_context_2], dim=1)
-                elif current_context_1 is not None:
-                    context = current_context_1
-                elif current_context_2 is not None:
-                    context = current_context_2
-                else:
-                    context = None
+                # # Set context from the last processed context
+                # if current_context_1 is not None and current_context_2 is not None:
+                #     context = torch.cat([current_context_1, current_context_2], dim=1)
+                # elif current_context_1 is not None:
+                #     context = current_context_1
+                # elif current_context_2 is not None:
+                #     context = current_context_2
+                # else:
+                #     context = None
 
         # Final layer norm for both nano-batches
         if self.final_layernorm is not None:
@@ -553,8 +580,27 @@ class TransformerBlock(MegatronModule):
 
             sharded_state_dict.update(layer_sharded_state_dict)
 
+        # # Handle single MLP output layer
+        # mlp_output_layer_prefix = f'{prefix}mlp_output_layer.'
+        # global_layer_offset = self.mlp_output_layer.layer_number - 1
+        # state_dict_prefix = mlp_output_layer_prefix
+        # if non_homogeneous_layers:
+        #     sharded_prefix = f'{mlp_output_layer_prefix}{global_layer_offset}.'
+        #     sharded_pp_offset = []
+        # else:
+        #     sharded_prefix = mlp_output_layer_prefix
+        #     sharded_pp_offset = [
+        #         (0, global_layer_offset, num_layers)
+        #     ]
+        # layer_sharded_state_dict = self.mlp_output_layer.sharded_state_dict(
+        #     state_dict_prefix, sharded_pp_offset, metadata
+        # )
+        # replace_prefix_for_sharding(layer_sharded_state_dict, state_dict_prefix, sharded_prefix)
+        # sharded_state_dict.update(layer_sharded_state_dict)
+
         # Add modules other than self.attention_layers and self.mlp_layers
         for name, module in self.named_children():
+            # if not (module is self.attention_layers or module is self.mlp_layers or module is self.mlp_output_layer):
             if not (module is self.attention_layers or module is self.mlp_layers):
                 sharded_state_dict.update(
                     sharded_state_dict_default(
@@ -575,6 +621,9 @@ class TransformerBlock(MegatronModule):
         combined_layers = []
         for i in range(len(self.attention_layers)):
             # Add a wrapper that combines attention and MLP for this layer
-            combined_layer = CombinedLayerWrapper(self.attention_layers[i], self.mlp_layers[i])
+            combined_layer = CombinedLayerWrapper(
+                self.attention_layers[i], self.mlp_layers[i], 
+                self.mlp_output_layer if i == len(self.mlp_layers) - 1 else None
+            )
             combined_layers.append(combined_layer)
         return combined_layers

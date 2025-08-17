@@ -596,7 +596,7 @@ class AttentionFuserTest:
         print(f"  Residual grad: {residual.grad is not None}")
 
         if self.tensor_parallel_size > 1:
-            print(f"  Allreduce output: {allreduce_output.grad is not None}")
+            print(f"  Allreduce input grad: {allreduce_inputs.grad is not None}")
         
         return True
             

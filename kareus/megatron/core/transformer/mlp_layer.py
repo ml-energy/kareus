@@ -51,9 +51,6 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         self.layer_number = layer_number + get_transformer_layer_offset(self.config)
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
 
-        num_layers = get_num_layers_to_build(config)
-        self.is_last_layer = layer_number == num_layers
-        
         # [Module 1: Prev attention BDA] Optional BDA on the previous attention output
         self.prev_self_attn_bda = build_module(submodules.prev_self_attn_bda)
 
@@ -70,11 +67,7 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         if hasattr(self.mlp, 'set_layer_number'):
             self.mlp.set_layer_number(self.layer_number)
 
-        # [Module 4: Post MLP BDA] Optional BDA on the MLP output
-        
-        self.post_mlp_bda = build_module(
-            submodules.post_mlp_bda if self.is_last_layer else IdentityFuncOp,
-        )
+        # No post-MLP BDA here; handled by separate MLPOutputLayer
 
         self.recompute_pre_mlp_layernorm = False
         self.recompute_mlp = False
@@ -85,7 +78,7 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
         # self.bias_dropout_add_exec_handler = torch.enable_grad
         
-    def forward(self, hidden_states, residual):
+    def forward(self, hidden_states, residual, comm_hidden_states=None): # TODO: comm_hidden_states to be all-reduced
         """
         Perform a forward pass through the feed-forward layer.
 
@@ -108,19 +101,4 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
 
         # MLP.
         mlp_output_with_bias = self.mlp(input_layernorm_output)
-        
-        if self.is_last_layer:
-            hidden_states = self.post_mlp_bda(mlp_output_with_bias[0], mlp_output_with_bias[1], residual,
-                                            training=self.training, dropout_prob=self.hidden_dropout)
-            # Jit compiled function creates 'view' tensor. This tensor
-            # potentially gets saved in the MPU checkpoint function context,
-            # which rejects view tensors. While making a viewless tensor here
-            # won't result in memory savings (like the data loader, or
-            # p2p_communication), it serves to document the origin of this
-            # 'view' tensor.
-            output = make_viewless_tensor(
-                inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
-            )
-            return output, residual
-        else:
-            return mlp_output_with_bias, residual
+        return mlp_output_with_bias, residual, comm_hidden_states
