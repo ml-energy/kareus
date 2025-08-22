@@ -36,6 +36,7 @@ from megatron.core.transformer.transformer_block import (
 # Import the attention and MLP layers
 from kareus.megatron.core.transformer.attention_layer import AttentionLayer
 from kareus.megatron.core.transformer.mlp_layer import MLPLayer
+# from kareus.megatron.core.transformer.mlp_output_layer import MLPOutputLayer
 
 # Import the partition function
 from kareus.megatron.core.transformer.partition_transformer_layer import (
@@ -150,7 +151,12 @@ class TransformerBlock(MegatronModule):
             self.config._cpu_offloading_context = None
 
         self._build_layers()
+        self._init_layer_bda()
+        # self._init_layer_tensor_parallel_comm()
         self.num_layers_per_pipeline_rank = len(self.attention_layers)
+    
+    def set_tensor_parallel_group(self, tp_group: Optional[torch.distributed.ProcessGroup]=None) -> None:
+        self._init_layer_tensor_parallel_comm()
 
     def _build_layers(self):
         # Build separate attention and MLP layers instead of combined transformer layers
@@ -209,6 +215,65 @@ class TransformerBlock(MegatronModule):
             )
         else:
             self.final_layernorm = None  # Either this or nn.Identity
+    
+    def _init_layer_bda(self):
+        mlp_bda = None
+        for l_no in range(len(self.attention_layers)):
+            attention_layer = self.attention_layers[l_no]
+            mlp_layer = self.mlp_layers[l_no]
+
+            attention_layer.prev_mlp_bda = mlp_bda
+
+            mlp_layer.prev_self_attn_bda = attention_layer.post_self_attn_bda
+
+            mlp_bda = mlp_layer.post_mlp_bda
+    
+    def _init_layer_tensor_parallel_comm(self):
+        comm_tensor1 = None
+        num_layers = len(self.attention_layers)
+        for l_no in range(num_layers):
+            attention_layer = self.attention_layers[l_no]
+            mlp_layer = self.mlp_layers[l_no]
+
+            attention_layer.init_tensor_parallel_comm_fwd(1, comm_tensor1)
+            
+            current_hidden_1 = attention_layer.get_persistent_outputs_fwd(1)
+            comm_tensor2 = current_hidden_1
+            attention_layer.init_tensor_parallel_comm_fwd(2, comm_tensor2)
+
+            current_hidden_2 = attention_layer.get_persistent_outputs_fwd(2)
+            comm_tensor1 = current_hidden_2
+            mlp_layer.init_tensor_parallel_comm_fwd(1, comm_tensor1)
+
+            current_hidden_1 = mlp_layer.get_persistent_outputs_fwd(1)
+            comm_tensor2 = current_hidden_1
+            mlp_layer.init_tensor_parallel_comm_fwd(2, comm_tensor2)
+
+            current_hidden_2 = mlp_layer.get_persistent_outputs_fwd(2)
+            comm_tensor1 = current_hidden_2
+        
+        comm_tensor2 = None
+        for l_no in range(num_layers - 1, -1, -1):
+            mlp_layer = self.mlp_layers[l_no]
+            attention_layer = self.attention_layers[l_no]
+            
+            mlp_layer.init_tensor_parallel_comm_bwd(2, comm_tensor2)
+
+            current_grad_2 = mlp_layer.get_persistent_outputs_bwd(2)
+            comm_tensor1 = current_grad_2
+            mlp_layer.init_tensor_parallel_comm_bwd(1, comm_tensor1)
+
+            current_grad_1 = mlp_layer.get_persistent_outputs_bwd(1)
+            comm_tensor2 = current_grad_1
+            attention_layer.init_tensor_parallel_comm_bwd(2, comm_tensor2)
+
+            current_grad_2 = attention_layer.get_persistent_outputs_bwd(2)
+            comm_tensor1 = current_grad_2
+            attention_layer.init_tensor_parallel_comm_bwd(1, comm_tensor1)
+
+            current_grad_1 = attention_layer.get_persistent_outputs_bwd(1)
+            comm_tensor2 = current_grad_1
+            
 
     def _get_attention_layer(self, layer_number: int):
         return self.attention_layers[layer_number]
@@ -389,6 +454,7 @@ class TransformerBlock(MegatronModule):
                 current_hidden_2 = hidden_states_2
                 residual_1 = None
                 residual_2 = None
+                comm_hidden_1 = None
                 current_context_1 = context_1
                 current_context_2 = context_2
                 
@@ -405,9 +471,11 @@ class TransformerBlock(MegatronModule):
                     with self.offload_context, inner_fp8_context:
                         # Process attention for both nano-batches
                         # Micro-batch 1 attention
-                        current_hidden_1, residual_1, current_context_1 = attention_layer(
+                        current_hidden_1, residual_1, comm_hidden_1, current_context_1 = attention_layer(
+                            batch_idx=1,
                             hidden_states=current_hidden_1,
                             residual=residual_1,
+                            comm_hidden_states=comm_hidden_1,
                             attention_mask=attention_mask_1,
                             context=current_context_1,
                             context_mask=context_mask_1,
@@ -419,11 +487,15 @@ class TransformerBlock(MegatronModule):
                             packed_seq_params=packed_seq_params,
                             sequence_len_offset=sequence_len_offset_1,
                         )
+                        comm_hidden_2 = current_hidden_1
+                        current_hidden_2 = comm_hidden_1 if comm_hidden_1 is not None else current_hidden_2
                         
                         # Micro-batch 2 attention
-                        current_hidden_2, residual_2, current_context_2 = attention_layer(
+                        current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(
+                            batch_idx=2,
                             hidden_states=current_hidden_2,
                             residual=residual_2,
+                            comm_hidden_states=comm_hidden_2,
                             attention_mask=attention_mask_2,
                             context=current_context_2,
                             context_mask=context_mask_2,
@@ -435,13 +507,29 @@ class TransformerBlock(MegatronModule):
                             packed_seq_params=packed_seq_params,
                             sequence_len_offset=sequence_len_offset_2,
                         )
+                        comm_hidden_1 = current_hidden_2
+                        current_hidden_1 = comm_hidden_2
                         
                         # Process MLP for both nano-batches
                         # Micro-batch 1 MLP
-                        current_hidden_1, residual_1 = mlp_layer(current_hidden_1, residual_1)
+                        current_hidden_1, residual_1, comm_hidden_1 = mlp_layer(
+                            batch_idx=1,
+                            hidden_states=current_hidden_1,
+                            residual=residual_1,
+                            comm_hidden_states=comm_hidden_1
+                        )
+                        comm_hidden_2 = current_hidden_1
+                        current_hidden_2 = comm_hidden_1
                         
                         # Micro-batch 2 MLP
-                        current_hidden_2, residual_2 = mlp_layer(current_hidden_2, residual_2)
+                        current_hidden_2, residual_2, comm_hidden_2 = mlp_layer(
+                            batch_idx=2,
+                            hidden_states=current_hidden_2,
+                            residual=residual_2,
+                            comm_hidden_states=comm_hidden_2
+                        )
+                        comm_hidden_1 = current_hidden_2
+                        current_hidden_1 = comm_hidden_2
                         
                         if (
                             torch.is_grad_enabled()
@@ -455,15 +543,15 @@ class TransformerBlock(MegatronModule):
                 # Concatenate results
                 hidden_states = torch.cat([hidden_states_1, hidden_states_2], dim=1)
                 
-                # Set context from the last processed context
-                if current_context_1 is not None and current_context_2 is not None:
-                    context = torch.cat([current_context_1, current_context_2], dim=1)
-                elif current_context_1 is not None:
-                    context = current_context_1
-                elif current_context_2 is not None:
-                    context = current_context_2
-                else:
-                    context = None
+                # # Set context from the last processed context
+                # if current_context_1 is not None and current_context_2 is not None:
+                #     context = torch.cat([current_context_1, current_context_2], dim=1)
+                # elif current_context_1 is not None:
+                #     context = current_context_1
+                # elif current_context_2 is not None:
+                #     context = current_context_2
+                # else:
+                #     context = None
 
         # Final layer norm for both nano-batches
         if self.final_layernorm is not None:

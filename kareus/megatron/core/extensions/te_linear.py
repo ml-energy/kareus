@@ -28,6 +28,7 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import is_te_min_version
 
 from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs, condition_init_method
+from megatron.core.num_microbatches_calculator import get_micro_batch_size
 
 from kareus.transformer_engine.pytorch.ops import Linear
 
@@ -163,6 +164,11 @@ class TEFusibleLinear(Linear):
         if not is_expert:
             if parallel_mode != "duplicated":
                 rng_tracker_fn = _get_cuda_rng_tracker_fn()
+        
+        if parallel_mode == "row":
+            use_persistent_output = True
+        else:
+            use_persistent_output = False
 
         # Initialize the FusedOperation-based Linear layer
         super().__init__(
@@ -178,6 +184,10 @@ class TEFusibleLinear(Linear):
             sequence_parallel=config.sequence_parallel,
             rng_state_tracker_function=rng_tracker_fn,
             accumulate_into_main_grad=False,  # Let Megatron handle gradient accumulation
+            use_persistent_output=use_persistent_output,
+            num_batches=2,  # 2 nanobatches per microbatch
+            batch_size=get_micro_batch_size() // 2, # nanobatch size
+            seq_length=config.max_sequence_length,
         )
 
         # Handle CPU initialization if needed
@@ -254,10 +264,13 @@ class TEFusibleLinear(Linear):
                     # duplicated across TP ranks
                     setattr(param, 'sequence_parallel', self.config.sequence_parallel)
 
-    def forward(self, x):
+    def forward(self, x, batch_idx=0):
         """Forward pass."""
         # Call the FusedOperation forward
-        outputs = super().forward(x)
+        outputs = super().forward(
+            x,
+            basic_op_kwargs=[{"batch_idx": batch_idx}, {}],
+        )
         
         # Handle bias return logic to match TELinear behavior
         # if self.te_return_bias:

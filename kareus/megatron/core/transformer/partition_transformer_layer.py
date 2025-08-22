@@ -27,9 +27,9 @@ def create_attention_and_mlp_layers_from_transformer_submodules(
         raise NotImplementedError("Cross attention not implemented")
 
     attention_submodules = AttentionLayerSubmodules(
-        prev_mlp_bda=transformer_submodules.mlp_bda,
         input_layernorm=transformer_submodules.input_layernorm,
         self_attention=transformer_submodules.self_attention,
+        post_self_attn_bda=transformer_submodules.self_attn_bda,
         sharded_state_dict_keys_map=transformer_submodules.sharded_state_dict_keys_map,
     )
         # pre_cross_attn_layernorm=transformer_submodules.pre_cross_attn_layernorm,
@@ -37,7 +37,6 @@ def create_attention_and_mlp_layers_from_transformer_submodules(
         # cross_attn_bda=transformer_submodules.cross_attn_bda,
     
     mlp_submodules = MLPLayerSubmodules(
-        prev_self_attn_bda=transformer_submodules.self_attn_bda,
         pre_mlp_layernorm=transformer_submodules.pre_mlp_layernorm,
         mlp=transformer_submodules.mlp,
         post_mlp_bda=transformer_submodules.mlp_bda,

@@ -156,6 +156,9 @@ class Attention(MegatronModule, ABC):
             is_expert=False,
             tp_comm_buffer_name='proj',
         )
+    
+    def get_persistent_outputs(self):
+        return self.linear_proj.persistent_outputs
 
     def _checkpointed_attention_forward(
         self,
@@ -480,6 +483,7 @@ class Attention(MegatronModule, ABC):
 
     def forward(
         self,
+        batch_idx: int,
         hidden_states: Tensor,
         attention_mask: Tensor,
         key_value_states: Optional[Tensor] = None,
@@ -686,7 +690,7 @@ class Attention(MegatronModule, ABC):
         # Output. [sq, b, h]
         # =================
 
-        output, bias = self.linear_proj(core_attn_out)
+        output, bias = self.linear_proj(core_attn_out, batch_idx)
 
         return output, bias
 

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import torch
 
@@ -74,6 +74,7 @@ class Linear(FusedOperation):
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
         use_persistent_output: bool = False,
+        num_batches: Optional[int] = 1,
         batch_size: Optional[int] = None,
         seq_length: Optional[int] = None,
     ) -> None:
@@ -119,6 +120,7 @@ class Linear(FusedOperation):
             "accumulate_into_main_grad": accumulate_into_main_grad,
             "bias_fusable": bias_fusable,
             "use_persistent_output": use_persistent_output,
+            "num_batches": num_batches,
             "batch_size": batch_size,
             "seq_length": seq_length,
         }
@@ -162,8 +164,12 @@ class Linear(FusedOperation):
         return self.basic_ops[0].use_persistent_output
     
     @property
-    def persistent_output(self) -> torch.Tensor:
-        return self.basic_ops[0].persistent_output
+    def num_batches(self) -> int:
+        return self.basic_ops[0].num_batches
+    
+    @property
+    def persistent_outputs(self) -> List[torch.Tensor]:
+        return self.basic_ops[0].persistent_outputs
 
     @property
     def weight(self) -> torch.nn.Parameter:

@@ -16,17 +16,23 @@ from megatron.core.transformer.transformer_layer import (
     BaseTransformerLayer,
 )
 from megatron.core.utils import deprecate_inference_params, make_viewless_tensor
+from megatron.core.parallel_state import (
+    get_tensor_model_parallel_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 
 from kareus.megatron.core.extensions.transformer_engine import create_operation_fuser
 from kareus.utils.debug import save_tensors
+from kareus.transformer_engine.pytorch.ops import AllReduce
 
 @dataclass
 class AttentionLayerSubmodules:
     """Configuration class for specifying the submodules of an attention layer."""
     
-    prev_mlp_bda: Union[ModuleSpec, type] = IdentityFuncOp
     input_layernorm: Union[ModuleSpec, type] = IdentityOp
     self_attention: Union[ModuleSpec, type] = IdentityOp
+    post_self_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
     # pre_cross_attn_layernorm: Union[ModuleSpec, type] = IdentityOp
     # cross_attention: Union[ModuleSpec, type] = IdentityOp
     # cross_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
@@ -55,10 +61,10 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         self.layer_number = layer_number + get_transformer_layer_offset(self.config)
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
 
+        self.tp_comms = []
+
         # [Module 1: Prev MLP BDA] Optional BDA on the previous MLP output
-        self.prev_mlp_bda = build_module(
-            submodules.prev_mlp_bda if not self.is_first_layer else IdentityFuncOp,
-        )
+        self.prev_mlp_bda = None
 
         # [Module 2: Input Layernorm] Optional Layernorm on the input data
         self.input_layernorm = build_module(
@@ -83,6 +89,9 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             layer_number=layer_number,
             **attention_optional_kwargs,
         )
+
+        # [Module 4: Post Self-Attention BDA] Optional BDA on the Self-Attention output
+        self.post_self_attn_bda = build_module(submodules.post_self_attn_bda)
     
         self.recompute_input_layernorm = False
         if self.config.recompute_granularity == 'selective':
@@ -91,11 +100,47 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         # Set bias+dropout+add fusion grad_enable execution handler.
         # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
         # self.bias_dropout_add_exec_handler = torch.enable_grad
+    
+    def init_tensor_parallel_comm_fwd(self, batch_idx, comm_tensor):
+        if self.is_first_layer and batch_idx == 1:
+            fwd_comm = None
+        else:
+            fwd_comm = AllReduce(
+                process_group=get_tensor_model_parallel_group(check_initialized=False),
+                async_op=True,
+                backend="msccl",
+                rank=get_tensor_model_parallel_rank(),
+                world_size=get_tensor_model_parallel_world_size(),
+                use_persistent_output=True,
+                input_buffer=comm_tensor,
+            )
+        assert len(self.tp_comms) == batch_idx - 1, "batch_idx is not correct"
+        self.tp_comms.append([fwd_comm, None])
+    
+    def init_tensor_parallel_comm_bwd(self, batch_idx, comm_tensor):
+        bwd_comm = AllReduce(
+            process_group=get_tensor_model_parallel_group(check_initialized=False),
+            async_op=True,
+            backend="msccl",
+            rank=get_tensor_model_parallel_rank(),
+            world_size=get_tensor_model_parallel_world_size(),
+            use_persistent_output=True,
+            input_buffer=comm_tensor,
+        )
+        self.tp_comms[batch_idx - 1][1] = bwd_comm
+
+    def get_persistent_outputs_fwd(self, batch_idx: int):
+        return self.self_attention.get_persistent_outputs()[batch_idx - 1][0]
+    
+    def get_persistent_outputs_bwd(self, batch_idx: int):
+        return self.self_attention.get_persistent_outputs()[batch_idx - 1][1]
         
     def forward(
         self,
+        batch_idx: int,
         hidden_states: Union[Tensor, Tuple[Tensor, Tensor]],
         residual: Tensor = None,
+        comm_hidden_states: Optional[Tensor] = None,
         attention_mask: Optional[Tensor] = None,
         context: Optional[Tensor] = None,
         context_mask: Optional[Tensor] = None,
@@ -120,7 +165,14 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         """
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
+        # if comm_hidden_states is not None:
+        #     comm_tensor, bias = comm_hidden_states
+        #     comm_tensor = self.tp_comm(comm_tensor)
+        #     self.tp_comm.sync()
+        #     comm_hidden_states = (comm_tensor, bias)
+
         if not self.is_first_layer:
+            assert self.prev_mlp_bda is not None, "prev_mlp_bda is not initialized"
             hidden_states = self.prev_mlp_bda(hidden_states[0], hidden_states[1], residual,
                                             training=self.training, dropout_prob=self.hidden_dropout)
 
@@ -132,6 +184,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
 
         # Self attention.
         attention_output_with_bias = self.self_attention(
+            batch_idx - 1,
             input_layernorm_output,
             attention_mask=attention_mask,
             inference_context=inference_context,
@@ -143,7 +196,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             sequence_len_offset=sequence_len_offset,
         )
 
-        return attention_output_with_bias, residual, context
+        return attention_output_with_bias, residual, comm_hidden_states, context
     
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: Optional[dict] = None

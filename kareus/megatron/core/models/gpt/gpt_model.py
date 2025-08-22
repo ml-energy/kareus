@@ -99,6 +99,7 @@ class GPTModel(LanguageModule):
         self.kareus_debug = kareus_debug
         if self.kareus_debug:
             self.num_iter = 0
+        self.config.max_sequence_length = max_sequence_length
 
         if has_config_logger_enabled(config):
             log_config_to_disk(config, locals(), prefix=type(self).__name__)

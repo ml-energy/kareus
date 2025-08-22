@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 import math
-from typing import Any, Optional
+from typing import Any, Optional, List, Tuple
 
 import torch
 
@@ -98,6 +98,7 @@ class BasicLinear(BasicOperation):
         userbuffers_options: Optional[dict[str, Any]] = None,
         bias_fusable: bool = False,
         use_persistent_output: bool = False,
+        num_batches: int = 1,
         batch_size: Optional[int] = None,
         seq_length: Optional[int] = None,
     ) -> None:
@@ -164,17 +165,28 @@ class BasicLinear(BasicOperation):
         self.bias_fusable: bool = bias_fusable
 
         self.use_persistent_output: bool = use_persistent_output
-        self.persistent_output: Optional[torch.Tensor] = None
+        self.num_batches: int = num_batches
+        self.persistent_outputs: List[Tuple[torch.Tensor, torch.Tensor]] = []
         if use_persistent_output:
             assert batch_size is not None and seq_length is not None, "batch_size and seq_length must be provided when use_persistent_output is True"
-            self.persistent_output = torch.empty(
-                seq_length,
-                batch_size,
-                self.local_out_features,
-                device=device,
-                dtype=dtype,
-                memory_format=torch.contiguous_format
-            )
+            for _ in range(num_batches):
+                persistent_output = torch.empty(
+                    seq_length,
+                    batch_size,
+                    self.local_out_features,
+                    device=device,
+                    dtype=dtype,
+                    memory_format=torch.contiguous_format
+                )
+                persistent_grad_input = torch.empty(
+                    seq_length,
+                    batch_size,
+                    self.local_in_features,
+                    device=device,
+                    dtype=dtype,
+                    memory_format=torch.contiguous_format
+                )
+                self.persistent_outputs.append((persistent_output, persistent_grad_input))
 
     @classmethod
     def _canonicalize_tensor_parallelism(
@@ -882,6 +894,7 @@ class BasicLinear(BasicOperation):
         input_: torch.Tensor,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
+        batch_idx: int = 0,
     ) -> torch.Tensor:
 
         # Check which grads are required
@@ -917,13 +930,15 @@ class BasicLinear(BasicOperation):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
 
-        # from kareus.utils.debug import save_tensors
-        # save_tensors(self.weight, "linear_qkv_weight", "kareus")
         # Linear forward
+        if self.use_persistent_output and input_requires_grad:
+            persist_out = self.persistent_outputs[batch_idx][0]
+        else:
+            persist_out = None
         output, x_local, _ = BasicLinear._functional_forward(
             input=input_,
             weight=self.weight,
-            out=self.persistent_output if self.use_persistent_output else None,
+            out=persist_out,
             accumulate_into_out=False,
             dtype=dtype,
             tensor_parallel_mode=self.tensor_parallel_mode,
@@ -946,6 +961,7 @@ class BasicLinear(BasicOperation):
         ctx.input_requires_grad = input_requires_grad
         ctx.weight_requires_grad = weight_requires_grad
         ctx.has_prev_op = prev_op is not None
+        ctx.batch_idx = batch_idx
 
         return output
 
@@ -974,6 +990,10 @@ class BasicLinear(BasicOperation):
             accumulate_into_main_grad = False
 
         # Linear backward pass
+        if self.use_persistent_output and ctx.input_requires_grad:
+            persist_out = self.persistent_outputs[ctx.batch_idx][1]
+        else:
+            persist_out = None
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
@@ -981,7 +1001,7 @@ class BasicLinear(BasicOperation):
             input_requires_grad=ctx.input_requires_grad,
             weight_requires_grad=ctx.weight_requires_grad,
             dtype=ctx.dtype,
-            grad_input=self.persistent_output if self.use_persistent_output else None,
+            grad_input=persist_out,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             tensor_parallel_mode=self.tensor_parallel_mode,

@@ -33,6 +33,25 @@ import torch
 torch._dynamo.config.suppress_errors = True
 mp.set_start_method("spawn", force=True)
 
+# export MASTER_ADDR=141.211.141.41
+# export MASTER_PORT=29500
+
+# torchrun \                       
+# --nnodes=2 \
+# --nproc_per_node=4 \
+# --node_rank=1 \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# megatron_gpt_pretraining.py
+
+# torchrun \                       
+# --nnodes=2 \
+# --nproc_per_node=4 \
+# --node_rank=0 \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# megatron_gpt_pretraining.py
+
 
 @hydra_runner(config_path="conf", config_name="megatron_llama_3_2_3b_config_2nodes")
 def main(cfg) -> None:

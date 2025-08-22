@@ -6,6 +6,7 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import Tensor
 
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.mapping import (
@@ -102,8 +103,15 @@ class MLP(MegatronModule):
             is_expert=is_expert,
             tp_comm_buffer_name='fc2',
         )
+    
+    def get_persistent_outputs(self):
+        return self.linear_fc2.persistent_outputs
 
-    def forward(self, hidden_states, per_token_scale=None):
+    def forward(self, 
+        batch_idx: int,
+        hidden_states: Tensor, 
+        per_token_scale: Optional[Tensor] = None
+    ):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
@@ -163,7 +171,7 @@ class MLP(MegatronModule):
             #     intermediate_parallel = intermediate_parallel.to(original_dtype)
 
         # [s, b, h]
-        output, output_bias = self.linear_fc2(intermediate_parallel)
+        output, output_bias = self.linear_fc2(intermediate_parallel, batch_idx)
 
         # if per_token_scale is not None:
         #     assert output_bias is None, "Bias is not supported with per_token_scale"

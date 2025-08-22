@@ -5,7 +5,7 @@
 """Fusible operation for all-reduce."""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 import contextlib
 import os
 
@@ -60,13 +60,13 @@ class AllReduce(BasicOperation):
         self.use_persistent_output: bool = use_persistent_output
         if use_persistent_output:
             assert self.backend == "msccl", "use_persistent_output is only supported for msccl backend"
-            assert input_buffer is not None and tensor_size is not None and device is not None and dtype is not None, \
-                "input_buffer, tensor_size, device, and dtype must be provided when use_persistent_output is True"
-            self.output_buffer = torch.empty(
-                *tensor_size,
-                device=device,
-                dtype=dtype,
-            )
+            assert input_buffer is not None, "input_buffer must be provided when use_persistent_output is True"
+            # self.output_buffer = torch.empty(
+            #     *input_buffer.shape,
+            #     device=input_buffer.device,
+            #     dtype=input_buffer.dtype,
+            # )
+            self.output_buffer = input_buffer
             self.input_buffer = input_buffer
 
         if self.backend == "msccl":
@@ -117,6 +117,7 @@ class AllReduce(BasicOperation):
                 msccl_comm.msccl_AllReduce_cached(x, x, sm_num, block_size)
                 return x
         else:
+            assert self.process_group is not None, "process_group must be provided for nccl backend"
             if self.async_op:
                 self._work_handle = torch.distributed.all_reduce(
                     x, group=self.process_group, async_op=True
@@ -171,3 +172,15 @@ class AllReduce(BasicOperation):
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
         return grad_output, ()
+    
+    def set_tensor_parallel_group(self, tp_group: Optional[torch.distributed.ProcessGroup]=None) -> None:
+        """
+        Set the tensor parallel group for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        tp_group : ProcessGroup, default = `None`
+                  tensor parallel process group.
+        """
+        self.process_group = tp_group
