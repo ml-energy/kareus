@@ -6,12 +6,11 @@ from megatron.core.transformer.transformer_layer import TransformerLayerSubmodul
 
 from kareus.megatron.core.transformer.attention_layer import AttentionLayerSubmodules
 from kareus.megatron.core.transformer.mlp_layer import MLPLayerSubmodules
-from kareus.megatron.core.transformer.mlp_output_layer import MLPOutputLayerSubmodules
 
 
 def create_attention_and_mlp_layers_from_transformer_submodules(
     transformer_submodules: TransformerLayerSubmodules,
-) -> Tuple[AttentionLayerSubmodules, MLPLayerSubmodules, MLPOutputLayerSubmodules]:
+) -> Tuple[AttentionLayerSubmodules, MLPLayerSubmodules]:
     """
     Create AttentionLayerSubmodules and MLPLayerSubmodules from TransformerLayerSubmodules.
     
@@ -19,7 +18,7 @@ def create_attention_and_mlp_layers_from_transformer_submodules(
         transformer_submodules: The original transformer layer submodules
         
     Returns:
-        Tuple of (AttentionLayerSubmodules, MLPLayerSubmodules, MLPOutputLayerSubmodules)
+        Tuple of (AttentionLayerSubmodules, MLPLayerSubmodules)
     """
     # check if they ARE the Identity classes
     if (transformer_submodules.pre_cross_attn_layernorm is not IdentityOp) \
@@ -41,19 +40,16 @@ def create_attention_and_mlp_layers_from_transformer_submodules(
         prev_self_attn_bda=transformer_submodules.self_attn_bda,
         pre_mlp_layernorm=transformer_submodules.pre_mlp_layernorm,
         mlp=transformer_submodules.mlp,
-        sharded_state_dict_keys_map=transformer_submodules.sharded_state_dict_keys_map,
-    )
-    mlp_output_submodules = MLPOutputLayerSubmodules(
         post_mlp_bda=transformer_submodules.mlp_bda,
         sharded_state_dict_keys_map=transformer_submodules.sharded_state_dict_keys_map,
     )
     
-    return attention_submodules, mlp_submodules, mlp_output_submodules
+    return attention_submodules, mlp_submodules
 
 
 def create_attention_and_mlp_layers_from_module_spec(
     module_spec: ModuleSpec,
-) -> Tuple[AttentionLayerSubmodules, MLPLayerSubmodules, MLPOutputLayerSubmodules]:
+) -> Tuple[AttentionLayerSubmodules, MLPLayerSubmodules]:
     """
     Create AttentionLayerSubmodules and MLPLayerSubmodules from a ModuleSpec.
     
@@ -61,7 +57,7 @@ def create_attention_and_mlp_layers_from_module_spec(
         module_spec: The ModuleSpec for a transformer layer
         
     Returns:
-        Tuple of (AttentionLayerSubmodules, MLPLayerSubmodules, MLPOutputLayerSubmodules)
+        Tuple of (AttentionLayerSubmodules, MLPLayerSubmodules)
     """
     # Extract submodules from the ModuleSpec
     if hasattr(module_spec, 'submodules') and module_spec.submodules is not None:
