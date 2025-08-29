@@ -1,0 +1,10 @@
+gpu_configs:
+  - gpus: "0"
+    u: 1
+    r: 1
+  - gpus: "2,3"
+    u: 2
+    r: 1
+  - gpus: "4,5,6,7"
+    u: 4
+    r: 1
