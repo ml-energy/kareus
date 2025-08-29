@@ -154,10 +154,10 @@ class Bias(BasicOperation):
     ) -> tuple[torch.Tensor, tuple[()]]:
         if self.apply_bias:
             dy = grad_output
-            if dy.dim() > 1:
-                db = dy.sum(tuple(range(dy.dim() - 1)))
-            else:
-                db = dy
+            # if dy.dim() > 1:
+            #     db = dy.sum(tuple(range(dy.dim() - 1)))
+            # else:
+            db = dy
         else:
             dy = grad_output
             db = grad_bias

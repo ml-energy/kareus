@@ -74,7 +74,7 @@ class TEFusibleLinear(Linear):
 
         # TE FusedOperation returns bias as separate output when bias=True
         # We prefer None when skip_bias_add=False, so we handle this differently
-        self.te_return_bias = skip_bias_add and bias
+        self.te_return_bias = skip_bias_add
 
         # FusibleLinear does not support skipping gradient accumulation for first microbatch
         # self.is_first_microbatch = True

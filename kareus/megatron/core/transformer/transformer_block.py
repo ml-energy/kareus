@@ -153,7 +153,6 @@ class TransformerBlock(MegatronModule):
         self._build_layers()
         self._init_layer_bda()
         # self._init_layer_tensor_parallel_comm()
-        self.num_layers_per_pipeline_rank = len(self.attention_layers)
     
     def set_tensor_parallel_group(self, tp_group: Optional[torch.distributed.ProcessGroup]=None) -> None:
         self._init_layer_tensor_parallel_comm()
@@ -538,8 +537,8 @@ class TransformerBlock(MegatronModule):
                         ):
                             raise NotImplementedError("CPU offloading not implemented")
                 
-                hidden_states_1 = current_hidden_1
-                hidden_states_2 = current_hidden_2
+                hidden_states_1 = current_hidden_1[0]
+                hidden_states_2 = current_hidden_2[0]
                 # Concatenate results
                 hidden_states = torch.cat([hidden_states_1, hidden_states_2], dim=1)
                 

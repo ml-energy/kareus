@@ -71,7 +71,9 @@ class AllReduce(BasicOperation):
 
         if self.backend == "msccl":
             if use_persistent_output:
-                msccl_comm.msccl_AllReduce_init(rank, world_size, input_buffer, self.output_buffer)
+                msccl_comm.msccl_AllReduce_init(
+                    rank, world_size, 
+                    self.input_buffer, self.output_buffer)
             else:
                 msccl_comm.msccl_AllReduce_init_cached(rank, world_size)
             self.comm_stream = msccl_comm.COMM_STREAM

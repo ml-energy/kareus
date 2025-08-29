@@ -156,6 +156,10 @@ class Attention(MegatronModule, ABC):
             is_expert=False,
             tp_comm_buffer_name='proj',
         )
+
+    def get_compute_ops(self):
+        qkv_ops = self.get_query_key_value_tensors_ops()
+        return qkv_ops + [self.core_attention, self.linear_proj]
     
     def get_persistent_outputs(self):
         return self.linear_proj.persistent_outputs

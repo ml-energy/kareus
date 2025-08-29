@@ -22,9 +22,9 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 
-from kareus.megatron.core.extensions.transformer_engine import create_operation_fuser
 from kareus.utils.debug import save_tensors
 from kareus.transformer_engine.pytorch.ops import AllReduce
+from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 
 @dataclass
 class AttentionLayerSubmodules:
@@ -39,6 +39,25 @@ class AttentionLayerSubmodules:
     
     # Mapping for sharded tensor keys to be applied in `sharded_state_dict` method
     sharded_state_dict_keys_map: Dict[str, str] = field(default_factory=dict)
+
+
+def get_fuser_comm_kwargs(config: TransformerConfig):
+    comm_scheduler = config.kareus_scheduler
+    if comm_scheduler is None:
+        return {
+            "allreduce_overlap_window": (-1, -1),
+            "allreduce_sm_configs": (20, 1024),
+            "allreduce_overlap_window_backward": (-1, -1),
+            "allreduce_sm_configs_backward": (20, 1024),
+        }
+    else:
+        assert comm_scheduler.current_schedule is not None, "current_schedule is not set"
+        return {
+            "allreduce_overlap_window": comm_scheduler.current_schedule[0].attn.overlap_window,
+            "allreduce_sm_configs": comm_scheduler.current_schedule[0].attn.resource_shape,
+            "allreduce_overlap_window_backward": comm_scheduler.current_schedule[1].attn.overlap_window,
+            "allreduce_sm_configs_backward": comm_scheduler.current_schedule[1].attn.resource_shape,
+        }
 
 
 class AttentionLayer(MegatronModule, BaseTransformerLayer):
@@ -56,6 +75,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         if config.enable_cuda_graph or config.external_cuda_graph:
             raise NotImplementedError("Cuda graph not implemented")
 
+        self.config = config
         self.submodules_config = submodules
         self.is_first_layer = layer_number == 1
         self.layer_number = layer_number + get_transformer_layer_offset(self.config)
@@ -100,6 +120,19 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         # Set bias+dropout+add fusion grad_enable execution handler.
         # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
         # self.bias_dropout_add_exec_handler = torch.enable_grad
+
+    def build_attention_fuser(self, batch_idx):  # TODO: handle different layers
+        if self.is_first_layer:
+            comp_ops = [self.input_layernorm]
+        else:
+            comp_ops = [self.post_self_attn_bda, self.input_layernorm]
+        comp_ops.extend(self.self_attention.get_compute_ops())
+        attention_fuser = PartitionFuser(
+            ops=comp_ops,
+            allreduce_comm_op=self.tp_comms[batch_idx - 1][0],
+            fuse_ops=False,
+        )
+        return attention_fuser
     
     def init_tensor_parallel_comm_fwd(self, batch_idx, comm_tensor):
         if self.is_first_layer and batch_idx == 1:
@@ -163,40 +196,64 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
                 residual (Tensor): Residual connection.
                 context (Tensor): Updated context tensor if cross-attention is used.
         """
-        inference_context = deprecate_inference_params(inference_context, inference_params)
+        assert context is None, "context is not supported"
+        attention_fuser = self.build_attention_fuser(batch_idx)
 
-        # if comm_hidden_states is not None:
-        #     comm_tensor, bias = comm_hidden_states
-        #     comm_tensor = self.tp_comm(comm_tensor)
-        #     self.tp_comm.sync()
-        #     comm_hidden_states = (comm_tensor, bias)
+        if self.is_first_layer:
+            hidden_states = hidden_states
+            bias = None
+        else:
+            hidden_states, bias = hidden_states
 
-        if not self.is_first_layer:
-            assert self.prev_mlp_bda is not None, "prev_mlp_bda is not initialized"
-            hidden_states = self.prev_mlp_bda(hidden_states[0], hidden_states[1], residual,
-                                            training=self.training, dropout_prob=self.hidden_dropout)
-
-        # Residual connection.
-        residual = hidden_states
-
-        # Optional Input Layer norm
-        input_layernorm_output = self.input_layernorm(hidden_states)
-
-        # Self attention.
-        attention_output_with_bias = self.self_attention(
-            batch_idx - 1,
-            input_layernorm_output,
-            attention_mask=attention_mask,
-            inference_context=inference_context,
+        output, output_bias, output_residual, allreduce_output = attention_fuser(  # TODO: add dropout_prob and training
+            hidden_states=hidden_states,
+            bias=bias,
+            residual=residual,
             rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
+            attention_mask=attention_mask,
+            allreduce_input=comm_hidden_states[0] if comm_hidden_states is not None else None,
+            # allreduce_input=comm_hidden_states[0],
+            **get_fuser_comm_kwargs(self.config),
         )
+        output_hidden_states = (output, output_bias)
+        allreduce_output = (allreduce_output, comm_hidden_states[1]) if comm_hidden_states is not None else None
+        # allreduce_output = (allreduce_output, comm_hidden_states[1])
+        return output_hidden_states, output_residual, allreduce_output, context
 
-        return attention_output_with_bias, residual, comm_hidden_states, context
+        # inference_context = deprecate_inference_params(inference_context, inference_params)
+
+        # # if comm_hidden_states is not None:
+        # #     comm_tensor, bias = comm_hidden_states
+        # #     comm_tensor = self.tp_comm(comm_tensor)
+        # #     self.tp_comm.sync()
+        # #     comm_hidden_states = (comm_tensor, bias)
+
+        # if not self.is_first_layer:
+        #     assert self.prev_mlp_bda is not None, "prev_mlp_bda is not initialized"
+        #     hidden_states = self.prev_mlp_bda(hidden_states[0], hidden_states[1], residual,
+        #                                     training=self.training, dropout_prob=self.hidden_dropout)
+
+        # # Residual connection.
+        # residual = hidden_states
+
+        # # Optional Input Layer norm
+        # input_layernorm_output = self.input_layernorm(hidden_states)
+
+        # # Self attention.
+        # attention_output_with_bias = self.self_attention(
+        #     batch_idx - 1,
+        #     input_layernorm_output,
+        #     attention_mask=attention_mask,
+        #     inference_context=inference_context,
+        #     rotary_pos_emb=rotary_pos_emb,
+        #     rotary_pos_cos=rotary_pos_cos,
+        #     rotary_pos_sin=rotary_pos_sin,
+        #     attention_bias=attention_bias,
+        #     packed_seq_params=packed_seq_params,
+        #     sequence_len_offset=sequence_len_offset,
+        # )
+
+        # return attention_output_with_bias, residual, comm_hidden_states, context
     
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: Optional[dict] = None

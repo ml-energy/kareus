@@ -168,7 +168,7 @@ def get_gpt_layer_with_transformer_engine_spec(
                     ),
                 ),
                 self_attn_bda=TEFusibleBiasDropoutAdd,
-                pre_mlp_layernorm=TEFusibleNorm if num_experts else IdentityOp,
+                pre_mlp_layernorm=TEFusibleNorm,
                 mlp=mlp,
                 mlp_bda=TEFusibleBiasDropoutAdd,
             ),

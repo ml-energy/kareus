@@ -104,6 +104,9 @@ class MLP(MegatronModule):
             tp_comm_buffer_name='fc2',
         )
     
+    def get_compute_ops(self):
+        return [self.linear_fc1, self.bias_swiglu_op, self.linear_fc2]
+    
     def get_persistent_outputs(self):
         return self.linear_fc2.persistent_outputs
 

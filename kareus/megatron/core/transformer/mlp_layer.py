@@ -27,6 +27,25 @@ from kareus.transformer_engine.pytorch.ops import AllReduce
 from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 
 
+def get_fuser_comm_kwargs(config: TransformerConfig):
+    comm_scheduler = config.kareus_scheduler
+    if comm_scheduler is None:
+        return {
+            "allreduce_overlap_window": (-1, -1),
+            "allreduce_sm_configs": (20, 1024),
+            "allreduce_overlap_window_backward": (-1, -1),
+            "allreduce_sm_configs_backward": (20, 1024),
+        }
+    else:
+        assert comm_scheduler.current_schedule is not None, "current_schedule is not set"
+        return {
+            "allreduce_overlap_window": comm_scheduler.current_schedule[0].mlp.overlap_window,
+            "allreduce_sm_configs": comm_scheduler.current_schedule[0].mlp.resource_shape,
+            "allreduce_overlap_window_backward": comm_scheduler.current_schedule[1].mlp.overlap_window,
+            "allreduce_sm_configs_backward": comm_scheduler.current_schedule[1].mlp.resource_shape,
+        }
+
+
 @dataclass
 class MLPLayerSubmodules:
     """Configuration class for specifying the submodules of an MLP layer."""
@@ -54,6 +73,7 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         if config.enable_cuda_graph or config.external_cuda_graph:
             raise NotImplementedError("Cuda graph not implemented")
 
+        self.config = config
         self.submodules_config = submodules
         self.layer_number = layer_number + get_transformer_layer_offset(self.config)
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
@@ -89,6 +109,16 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         # Set bias+dropout+add fusion grad_enable execution handler.
         # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
         # self.bias_dropout_add_exec_handler = torch.enable_grad
+    
+    def build_mlp_fuser(self, batch_idx):  # TODO: handle different layers
+        comp_ops = [self.post_mlp_bda, self.pre_mlp_layernorm]
+        comp_ops.extend(self.mlp.get_compute_ops())
+        mlp_fuser = PartitionFuser(
+            ops=comp_ops,
+            allreduce_comm_op=self.tp_comms[batch_idx - 1][0],
+            fuse_ops=False,
+        )
+        return mlp_fuser
     
     def init_tensor_parallel_comm_fwd(self, batch_idx, comm_tensor):
         fwd_comm = AllReduce(
@@ -140,37 +170,53 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         Returns:
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
-        # if comm_hidden_states is not None:
-        #     comm_tensor, bias = comm_hidden_states
-        #     comm_tensor = self.tp_comm(comm_tensor)
-        #     self.tp_comm.sync()
-        #     comm_hidden_states = (comm_tensor, bias)
-        
-        assert self.prev_self_attn_bda is not None, "prev_self_attn_bda is not initialized"
-        hidden_states = self.prev_self_attn_bda(hidden_states[0], hidden_states[1], residual,
-                                            training=self.training, dropout_prob=self.hidden_dropout)
-        
-        # Residual connection.
-        residual = hidden_states
-        
-        # Optional Pre MLP Layer norm
-        input_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        mlp_fuser = self.build_mlp_fuser(batch_idx)
 
-        # MLP.
-        mlp_output_with_bias = self.mlp(batch_idx - 1, input_layernorm_output)
+        hidden_states, bias = hidden_states
+
+        output, output_bias, output_residual, allreduce_output = mlp_fuser(
+            hidden_states=hidden_states,
+            bias=bias,
+            residual=residual,
+            allreduce_input=comm_hidden_states[0],
+            **get_fuser_comm_kwargs(self.config),
+        )
+        # if self.is_last_layer:
+        #     return output, output_residual, allreduce_output
+        # else:
+        return (output, output_bias), output_residual, (allreduce_output, comm_hidden_states[1])
+
+        # # if comm_hidden_states is not None:
+        # #     comm_tensor, bias = comm_hidden_states
+        # #     comm_tensor = self.tp_comm(comm_tensor)
+        # #     self.tp_comm.sync()
+        # #     comm_hidden_states = (comm_tensor, bias)
         
-        if self.is_last_layer:
-            hidden_states = self.post_mlp_bda(mlp_output_with_bias[0], mlp_output_with_bias[1], residual,
-                                            training=self.training, dropout_prob=self.hidden_dropout)
-            # Jit compiled function creates 'view' tensor. This tensor
-            # potentially gets saved in the MPU checkpoint function context,
-            # which rejects view tensors. While making a viewless tensor here
-            # won't result in memory savings (like the data loader, or
-            # p2p_communication), it serves to document the origin of this
-            # 'view' tensor.
-            output = make_viewless_tensor(
-                inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
-            )
-            return output, residual, comm_hidden_states
-        else:
-            return mlp_output_with_bias, residual, comm_hidden_states
+        # assert self.prev_self_attn_bda is not None, "prev_self_attn_bda is not initialized"
+        # hidden_states = self.prev_self_attn_bda(hidden_states[0], hidden_states[1], residual,
+        #                                     training=self.training, dropout_prob=self.hidden_dropout)
+        
+        # # Residual connection.
+        # residual = hidden_states
+        
+        # # Optional Pre MLP Layer norm
+        # input_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+
+        # # MLP.
+        # mlp_output_with_bias = self.mlp(batch_idx - 1, input_layernorm_output)
+        
+        # if self.is_last_layer:
+        #     hidden_states = self.post_mlp_bda(mlp_output_with_bias[0], mlp_output_with_bias[1], residual,
+        #                                     training=self.training, dropout_prob=self.hidden_dropout)
+        #     # Jit compiled function creates 'view' tensor. This tensor
+        #     # potentially gets saved in the MPU checkpoint function context,
+        #     # which rejects view tensors. While making a viewless tensor here
+        #     # won't result in memory savings (like the data loader, or
+        #     # p2p_communication), it serves to document the origin of this
+        #     # 'view' tensor.
+        #     output = make_viewless_tensor(
+        #         inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        #     )
+        #     return output, residual, comm_hidden_states
+        # else:
+        #     return mlp_output_with_bias, residual, comm_hidden_states

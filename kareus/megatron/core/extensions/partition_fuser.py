@@ -229,7 +229,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_num_params = [sum(1 for _ in op.parameters()) for op in basic_ops]
 
         current_stream.synchronize()
-        assert get_bias and get_residual
+        assert get_bias and get_residual, f"get_bias: {get_bias}, get_residual: {get_residual}"
         return x, bias, residual, allreduce_input
 
     @staticmethod
@@ -331,12 +331,15 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             elif isinstance(op, LayerNorm) or isinstance(op, RMSNorm):
                 assert get_grad_residual == False
                 dx = dx + grad_residual
+                grad_residual = None
             elif isinstance(op, RotaryEmbeddingOp):
                 grad_key, grad_rotary_pos_emb = fused_op_grad_extra_inputs[0]
             elif isinstance(op, DotProductAttentionOp):
                 grad_key, grad_value = fused_op_grad_extra_inputs[0]
             elif isinstance(op, BiasSwigluOp):
                 grad_bias = fused_op_grad_extra_inputs[0][0]
+            elif isinstance(op, Bias) and op.return_bias:
+                grad_bias = None
 
         # Flatten list of parameter gradients
         grad_params_flat = []
@@ -354,7 +357,6 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             grad_params_flat.extend(dparams)
 
         current_stream.synchronize()
-        assert get_grad_bias and get_grad_residual
         return (
             dx,  # hidden_states
             grad_bias,  # bias
