@@ -10,6 +10,7 @@ nemo_experiments/
 # apex/
 *.png
 dump/
+*.sqlite
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

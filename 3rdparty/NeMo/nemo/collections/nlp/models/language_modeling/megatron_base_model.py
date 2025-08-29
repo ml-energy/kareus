@@ -96,6 +96,12 @@ try:
 except (ImportError, ModuleNotFoundError):
     HAVE_PERSEUS_OPTIMIZER = False
 
+try:
+    from kareus.scheduler import PipelineCommScheduler
+    HAVE_KAREUS_SCHEDULER = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_KAREUS_SCHEDULER = False
+
 from pathlib import Path
 from nemo.utils.env_var_parsing import get_envint
 
@@ -181,25 +187,26 @@ class MegatronBaseModel(NLPModel):
         
         self.zeus_monitor = None
         if self.cfg.get('enable_zeus_monitor', False) and HAVE_ZEUS_MONITOR:
-            self.zeus_monitor_cfg = dict(self.cfg.get('zeus_monitor_kwargs', dict()))
-            if 'gpu_indices' not in self.zeus_monitor_cfg:
-                self.zeus_monitor_cfg['gpu_indices'] = [trainer.local_rank]
-            if 'approx_instant_energy' not in self.zeus_monitor_cfg:
-                self.zeus_monitor_cfg['approx_instant_energy'] = True
-            if 'log_file' not in self.zeus_monitor_cfg:
+            zeus_monitor_cfg = dict(self.cfg.get('zeus_monitor_kwargs', dict()))
+            if 'gpu_indices' not in zeus_monitor_cfg:
+                zeus_monitor_cfg['gpu_indices'] = [trainer.local_rank]
+            if 'approx_instant_energy' not in zeus_monitor_cfg:
+                zeus_monitor_cfg['approx_instant_energy'] = True
+            if 'log_file' not in zeus_monitor_cfg:
                 app_state = AppState()
                 if app_state.log_dir is not None:
                     log_dir = Path(app_state.log_dir)
                     zeus_log_file = log_dir / f'zeus_monitor_global_rank-{trainer.global_rank}_local_rank-{trainer.local_rank}.txt'
-                    self.zeus_monitor_cfg['log_file'] = str(zeus_log_file)
+                    zeus_monitor_cfg['log_file'] = str(zeus_log_file)
                 else:
-                    self.zeus_monitor_cfg['log_file'] = None
-            self.zeus_monitor = ZeusMonitor(**self.zeus_monitor_cfg)
+                    zeus_monitor_cfg['log_file'] = None
+            self.zeus_monitor = ZeusMonitor(**zeus_monitor_cfg)
         
         self.power_monitor = None
         
         # Perseus optimizer will be initialized in on_train_start() after distributed setup
         self.perseus_optimizer = None
+        self.kareus_scheduler = None
 
         # set the megatron core model parallel config
         self.model_parallel_config: ModelParallelConfig = self.build_model_parallel_config()
@@ -546,6 +553,19 @@ class MegatronBaseModel(NLPModel):
             )
             self.model.config.perseus_optimizer = self.perseus_optimizer
             print(f"Perseus optimizer successfully initialized for rank {self.trainer.global_rank}")
+        
+        if self.cfg.get('enable_kareus_scheduler', False) and HAVE_KAREUS_SCHEDULER and self.kareus_scheduler is None:
+            kareus_scheduler_cfg = dict(self.cfg.get('kareus_scheduler_kwargs', dict()))
+            if 'solution_path' not in kareus_scheduler_cfg:
+                raise ValueError("solution_path is not set")
+            solution_path = kareus_scheduler_cfg['solution_path']
+            self.kareus_scheduler = PipelineCommScheduler(
+                configs_pipeline=solution_path,
+                pp_rank=parallel_state.get_pipeline_model_parallel_rank(),
+                num_microbatches=get_num_microbatches(),
+            )
+            self.model.config.kareus_scheduler = self.kareus_scheduler
+            print(f"Kareus scheduler successfully initialized for rank {self.trainer.global_rank}")
         
         if self.cfg.get('enable_power_monitor', False) and HAVE_POWER_MONITOR:
             self.power_monitor_cfg = dict(self.cfg.get('power_monitor_kwargs', dict()))

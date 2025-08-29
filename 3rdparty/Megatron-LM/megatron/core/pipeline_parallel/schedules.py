@@ -258,6 +258,9 @@ def forward_step(
     
     if config.perseus_optimizer is not None and not forward_only:
         config.perseus_optimizer.on_instruction_begin("forward")
+    
+    if config.kareus_scheduler is not None and not forward_only:
+        config.kareus_scheduler.on_instruction_begin("forward")
 
     if is_first_microbatch and hasattr(model, 'set_is_first_microbatch'):
         model.set_is_first_microbatch()
@@ -353,6 +356,9 @@ def forward_step(
     
     if config.perseus_optimizer is not None and not forward_only:
         config.perseus_optimizer.on_instruction_end("forward")
+    
+    if config.kareus_scheduler is not None and not forward_only:
+        config.kareus_scheduler.on_instruction_end("forward")
 
     return [output_tensor], num_tokens
 
@@ -375,6 +381,9 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
     
     if config.perseus_optimizer is not None:
         config.perseus_optimizer.on_instruction_begin("backward")
+    
+    if config.kareus_scheduler is not None:
+        config.kareus_scheduler.on_instruction_begin("backward")
 
     # Retain the grad on the input_tensor.
     unwrap_input_tensor_grad = False
@@ -433,6 +442,9 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
 
     if config.perseus_optimizer is not None:
         config.perseus_optimizer.on_instruction_end("backward")
+    
+    if config.kareus_scheduler is not None:
+        config.kareus_scheduler.on_instruction_end("backward")
 
     return input_tensor_grad
 

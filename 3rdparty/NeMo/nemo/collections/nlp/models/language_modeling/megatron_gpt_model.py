@@ -839,6 +839,9 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         """
         if self.perseus_optimizer is not None:
             self.perseus_optimizer.on_step_begin()
+        
+        if self.kareus_scheduler is not None:
+            self.kareus_scheduler.on_step_begin()
 
         if self.zeus_monitor is not None:
             self.zeus_monitor.begin_window("training_step")
@@ -1064,6 +1067,9 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         
         if self.perseus_optimizer is not None:
             self.perseus_optimizer.on_step_end()
+        
+        if self.kareus_scheduler is not None:
+            self.kareus_scheduler.on_step_end()
         
         if self.zeus_monitor is not None:
             self.zeus_monitor.end_window("training_step")

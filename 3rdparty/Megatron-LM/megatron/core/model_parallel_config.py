@@ -98,6 +98,8 @@ class ModelParallelConfig:
     perseus_optimizer: Optional[Callable] = None
     """PipelineFrequencyOptimizer object for pipeline frequency optimization. See zeus.optimizer.pipeline_frequency"""
 
+    kareus_scheduler: Optional[Callable] = None
+    """PipelineCommScheduler object for pipeline communication scheduling. See kareus.scheduler.PipelineCommScheduler"""
 
     finalize_model_grads_func: Optional[Callable] = None
     """Function that finalizes gradients on all workers. Could include ensuring that grads are
