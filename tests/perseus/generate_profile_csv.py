@@ -39,15 +39,16 @@ def main(
     prof_iters: int,
     warmup_iters: int,
     gpu_type: Literal["A100", "A40"],
+    tensor_parallel_size: int,
 ) -> None:
     """Run the main routine."""
     print(f"Processing decoupled profiling results in {profile_dir}.")
 
     # Enumerate supported GPU frequencies.
     if gpu_type == "A100":
-        freqs = np.arange(1410, 210 - 15, -15).tolist()
+        freqs = np.arange(1410, 885, -30).tolist()
     elif gpu_type == "A40":
-        freqs = np.arange(1740, 330, -15).tolist()
+        freqs = np.arange(1740, 1300, -15).tolist()
     else:
         raise ValueError(f"Unsupported GPU type {gpu_type}.")
     print(f"Frequencies: {freqs}")
@@ -65,6 +66,15 @@ def main(
     if num_ranks == 0:
         raise RuntimeError("No energy polling results found in first frequency directory.")
     print(f"Found {num_ranks} ranks.")
+
+    if tensor_parallel_size <= 0:
+        raise ValueError("tensor_parallel_size must be a positive integer.")
+    if num_ranks % tensor_parallel_size != 0:
+        raise RuntimeError(
+            f"num_ranks ({num_ranks}) must be divisible by tensor_parallel_size ({tensor_parallel_size})."
+        )
+    num_stages = num_ranks // tensor_parallel_size
+    print(f"Using tensor_parallel_size={tensor_parallel_size}; num_stages={num_stages}.")
 
     # Process each frequency directory
     profile_csv = open(f"{profile_dir}/profile.csv", "w")
@@ -84,7 +94,7 @@ def main(
         
         models: list[PiecewiseLinearModel] = []
         for rank in range(num_ranks):
-            df = pd.read_csv(f"{freq_dir}/timers/time-energy-{rank}.csv")
+            df = pd.read_csv(f"{freq_dir}/timers/time-energy-{rank}-{rank}.csv") # TODO: global rank and local rank
             model = PiecewiseLinearModel(df.time.to_numpy(), df.energy.to_numpy())
             models.append(model)
             del df
@@ -127,12 +137,19 @@ def main(
         # For each rank, the timing dataframe contains instruction start and end
         # timing measurements.
         inst_name_map = {"forward-compute": "forward", "backward-compute": "backward"}
+
+        # Accumulate per-stage sums over tensor_parallel_size ranks
+        stage_time_sums: dict[tuple[int, str], float] = {}
+        stage_energy_sums: dict[tuple[int, str], float] = {}
+
         for rank in range(num_ranks):
             print(f"  Processing rank {rank}.")
+            stage_idx = rank // tensor_parallel_size
             for inst, name in inst_name_map.items():
                 timing_df = timing_dfs[rank].query(f"instruction == '{inst}'")
                 if timing_df.empty:
                     print(f"    No {inst} found.")
+                    # Treat as zero contribution
                     continue
                 print(f"    Processing {inst}.")
                 inst_times, inst_energies = [], []
@@ -146,14 +163,25 @@ def main(
                     inst_times.append(end - start)
                     model = models[rank]
                     inst_energies.append(model(end) - model(start))
-                
+
                 # Calculate average time and energy for this instruction at this frequency
-                if inst_times:  # Only write if we have data after warmup
-                    assert len(inst_times) == prof_iters * num_microbatches, f"Expected {prof_iters * num_microbatches} times, but got {len(inst_times)}."
-                    assert len(inst_energies) == prof_iters * num_microbatches, f"Expected {prof_iters * num_microbatches} energies, but got {len(inst_energies)}."
-                    avg_time = np.mean(inst_times)
-                    avg_energy = np.mean(inst_energies)
-                    profile_csv.write(f"{rank},{name},{frequency},{avg_time},{avg_energy}\n")
+                if inst_times:  # Only contribute if we have data after warmup
+                    expected = prof_iters * num_microbatches
+                    assert len(inst_times) == expected, f"Expected {expected} times, but got {len(inst_times)}."
+                    assert len(inst_energies) == expected, f"Expected {expected} energies, but got {len(inst_energies)}."
+                    avg_time = float(np.mean(inst_times))
+                    avg_energy = float(np.mean(inst_energies))
+                    stage_key = (stage_idx, name)
+                    stage_time_sums[stage_key] = stage_time_sums.get(stage_key, 0.0) + avg_time
+                    stage_energy_sums[stage_key] = stage_energy_sums.get(stage_key, 0.0) + avg_energy
+
+        # After processing all ranks, write per-stage aggregated rows
+        for stage_idx in range(num_stages):
+            for name in inst_name_map.values():
+                stage_key = (stage_idx, name)
+                avg_time = stage_time_sums.get(stage_key, 0.0) / tensor_parallel_size
+                avg_energy = stage_energy_sums.get(stage_key, 0.0) / tensor_parallel_size
+                profile_csv.write(f"{stage_idx},{name},{frequency},{avg_time},{avg_energy}\n")
     
     profile_csv.close()
     print(f"Profile CSV saved to {profile_dir}/profile.csv")
@@ -161,11 +189,12 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile_dir", default="nemo_experiments/megatron_llama_3_2_1b", help="Directory containing profiling results.")
-    parser.add_argument("--num_microbatches", default=8, type=int, help="Number of microbatches.")
+    parser.add_argument("--profile_dir", default="nemo_experiments/megatron_llama_3_2_3b/profiling", help="Directory containing profiling results.")
+    parser.add_argument("--num_microbatches", default=2, type=int, help="Number of microbatches.")
     parser.add_argument("--num_prof_iters", default=100, type=int, help="Number of profiling iterations.")
     parser.add_argument("--warmup_iters", default=10, type=int, help="Number of warmup iterations.")
     parser.add_argument("--gpu_type", default="A40", choices=["A40", "A100"], help="Name of the GPU type.")
+    parser.add_argument("--tensor_parallel_size", default=2, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
     args = parser.parse_args()
 
-    main(args.profile_dir, args.num_microbatches, args.num_prof_iters, args.warmup_iters, args.gpu_type)
+    main(args.profile_dir, args.num_microbatches, args.num_prof_iters, args.warmup_iters, args.gpu_type, args.tensor_parallel_size)
