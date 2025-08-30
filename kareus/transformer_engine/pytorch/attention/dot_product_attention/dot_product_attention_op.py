@@ -520,7 +520,8 @@ class DotProductAttentionOp(BasicOperation):
             fp8_meta=self.fp8_meta if hasattr(self, 'fp8_meta') else None,
             quantizers=self.quantizers if hasattr(self, 'quantizers') else None,
             inference_params=inference_params,
-            flash_attention_backend=PkgVersion("0"),
+            # Let backend decide if FA3 is available by import/version
+            flash_attention_backend=None,
             softmax_scale=self.softmax_scale,
             attention_dropout=self.attention_dropout,
             attention_dropout_ctx=self.attention_dropout_ctx,

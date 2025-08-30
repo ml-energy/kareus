@@ -41,13 +41,15 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from kareus.flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
 from kareus.flash_attn.flash_attn_interface import flash_attn_func_backward, flash_attn_varlen_func_backward
 try:
-    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flash_attn_3.flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_v3
-    from flash_attn_3.flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_v3
+    from kareus.flash_attn.hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from kareus.flash_attn.hopper.flash_attn_interface import flash_attn_func_backward as flash_attn_func_backward_v3
+    # from kareus.flash_attn.hopper.flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_v3
+    # from kareus.flash_attn.hopper.flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_v3
 except ImportError:
     flash_attn_func_v3 = None
-    flash_attn_varlen_func_v3 = None
-    flash_attn_with_kvcache_v3 = None
+    flash_attn_func_backward_v3 = None
+    # flash_attn_varlen_func_v3 = None
+    # flash_attn_with_kvcache_v3 = None
 
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
@@ -279,6 +281,9 @@ def flash_attention_forward(
     use_flash_attn_3 = False
     if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
         use_flash_attn_3 = True
+    elif flash_attention_backend is None and flash_attn_func_v3 is not None:
+        # Auto-detect Flash Attention 3 when backend is None
+        use_flash_attn_3 = True
     
     if context_parallel and all(
         not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
@@ -386,11 +391,10 @@ def flash_attention_forward(
                     **fa_optional_forward_kwargs,
                 )
             else:
-                raise NotImplementedError("FlashAttention does not support use_flash_attn_3.")
-                # fa_3_optional_forward_kwargs = {}
-                # fa_3_optional_forward_kwargs["window_size"] = window_size
-                # if inference_params is None:
-                #     fa_3_optional_forward_kwargs["deterministic"] = deterministic
+                fa_3_optional_forward_kwargs = {}
+                fa_3_optional_forward_kwargs["window_size"] = window_size
+                if inference_params is None:
+                    fa_3_optional_forward_kwargs["deterministic"] = deterministic
                 # else:
                 #     fa_3_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
                 #     fa_3_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
@@ -445,28 +449,28 @@ def flash_attention_forward(
                 #         for x in [query_layer, key_layer, value_layer]
                 #     )
                 
-                # try:
-                #     output = func(
-                #         ctx,
-                #         query_layer,
-                #         key_layer,
-                #         value_layer,
-                #         *fa_optional_forward_args_thd,
-                #         softmax_scale=softmax_scale,
-                #         causal="causal" in attn_mask_type,
-                #         **fa_3_optional_forward_kwargs,
-                #     )
-                #     if isinstance(output, (List, Tuple)):
-                #         output = output[0]
-                # except TypeError as e:
-                #     if fa_utils.v3_0_0_beta:
-                #         e.args = (
-                #             e.args[0]
-                #             + ". Please update your flash-attn v3 (beta) installation as it "
-                #             + "may have added more supported arguments to its API. \n"
-                #             + fa_utils.v3_installation_steps,
-                #         ) + e.args[1:]
-                #     raise
+                try:
+                    output = func(
+                        ctx,
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        *fa_optional_forward_args_thd,
+                        softmax_scale=softmax_scale,
+                        causal="causal" in attn_mask_type,
+                        **fa_3_optional_forward_kwargs,
+                    )
+                    if isinstance(output, (List, Tuple)):
+                        output = output[0]
+                except TypeError as e:
+                    if fa_utils.v3_0_0_beta:
+                        e.args = (
+                            e.args[0]
+                            + ". Please update your flash-attn v3 (beta) installation as it "
+                            + "may have added more supported arguments to its API. \n"
+                            + fa_utils.v3_installation_steps,
+                        ) + e.args[1:]
+                    raise
 
                 # if fp8:
                 #     output = output.to(dtype=torch_orig_dtype)
@@ -544,11 +548,19 @@ def flash_attention_backward(
     else:
         raise NotImplementedError("FlashAttention only supports q_format == 'sbhd'.")
 
-    # Step 2: Call the FlashAttention backward function
+    # Step 2: Call the appropriate FlashAttention backward function
     if context_parallel:
         raise NotImplementedError("Context parallelism backward is not supported.")
     else:
-        dq, dk, dv, _, _, _, _, _, _, _, _  = flash_attn_func_backward(ctx, grad_output_transformed)
+        # Determine if FlashAttention 3 is available and should be used
+        use_flash_attn_3 = False
+        if flash_attn_func_v3 is not None:
+            use_flash_attn_3 = True
+        
+        if use_flash_attn_3 and flash_attn_func_backward_v3 is not None:
+            dq, dk, dv, _, _, _, _, _, _, _, _ = flash_attn_func_backward_v3(ctx, grad_output_transformed)
+        else:
+            dq, dk, dv, _, _, _, _, _, _, _, _ = flash_attn_func_backward(ctx, grad_output_transformed)
 
     # Step 3: Reverse the input tensor format transformations
     if qkv_format == "sbhd":
