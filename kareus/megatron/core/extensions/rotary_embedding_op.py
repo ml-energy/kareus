@@ -4,6 +4,7 @@ import torch
 from typing import Optional, Tuple, Union, Callable
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+from transformer_engine.pytorch.utils import clear_tensor_data
 # from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -123,6 +124,7 @@ class RotaryEmbeddingOp(BasicOperation):
             ctx.save_for_backward(*to_save)
             ctx.query_ctx = query_ctx
             ctx.key_ctx = key_ctx
+            # ctx.has_prev_op = prev_op is not None
         
         return query, key
 
@@ -180,6 +182,10 @@ class RotaryEmbeddingOp(BasicOperation):
         # elif key_rope_applied:
         #     grad_rotary_pos_emb = (None, grad_k_freqs)
         grad_rotary_pos_emb = None
+
+        # # Clear saved tensors if possible
+        # if ctx.has_prev_op:
+        #     clear_tensor_data(*ctx.saved_tensors)
 
         return grad_query_input, grad_key_input, grad_rotary_pos_emb
 

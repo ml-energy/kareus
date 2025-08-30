@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import math
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+from transformer_engine.pytorch.utils import clear_tensor_data
 
 
 @torch.compile
@@ -116,6 +117,8 @@ class BiasDropoutAddOp(BasicOperation):
         )
         if not has_bias:
             grad_bias = None
+        
+        # clear_tensor_data(mask)
         
         return grad_input, (grad_bias, grad_residual)
 

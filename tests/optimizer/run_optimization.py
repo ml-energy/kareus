@@ -215,7 +215,7 @@ def main(args: Args) -> None:
 
         # Write frequency assignments and separate configs per iteration.
         f_freqs = open(output_dir / f"freqs_pipeline_{iteration:05d}.py", "w")
-        f_cfgs = open(output_dir / f"configs_pipeline_{iteration:05d}.py", "w")
+        f_cfgs = open(output_dir / f"scheds_pipeline_{iteration:05d}.py", "w")
 
         # Write top-level lists
         f_freqs.write("[\n")

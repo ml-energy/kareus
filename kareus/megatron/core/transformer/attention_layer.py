@@ -51,7 +51,9 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
             "allreduce_sm_configs_backward": (20, 1024),
         }
     else:
+        print("using comm scheduler")
         assert comm_scheduler.current_schedule is not None, "current_schedule is not set"
+        # TODO: first layer
         return {
             "allreduce_overlap_window": comm_scheduler.current_schedule[0].attn.overlap_window,
             "allreduce_sm_configs": comm_scheduler.current_schedule[0].attn.resource_shape,
@@ -122,10 +124,11 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         # self.bias_dropout_add_exec_handler = torch.enable_grad
 
     def build_attention_fuser(self, batch_idx):  # TODO: handle different layers
-        if self.is_first_layer:
-            comp_ops = [self.input_layernorm]
-        else:
-            comp_ops = [self.post_self_attn_bda, self.input_layernorm]
+        # if self.is_first_layer:
+        #     comp_ops = [self.input_layernorm]
+        # else:
+        #     comp_ops = [self.post_self_attn_bda, self.input_layernorm]
+        comp_ops = [self.post_self_attn_bda, self.input_layernorm] # TODO: first layer
         comp_ops.extend(self.self_attention.get_compute_ops())
         attention_fuser = PartitionFuser(
             ops=comp_ops,
@@ -202,6 +205,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         if self.is_first_layer:
             hidden_states = hidden_states
             bias = None
+            residual = hidden_states
         else:
             hidden_states, bias = hidden_states
 

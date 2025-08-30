@@ -277,7 +277,7 @@ class LayerNorm(BasicOperation):
             self.zero_centered_gamma,
         )
 
-        # Clear saved tensors if possible
+        # # Clear saved tensors if possible
         # if ctx.has_prev_op:
         #     clear_tensor_data(x)
         # clear_tensor_data(means)

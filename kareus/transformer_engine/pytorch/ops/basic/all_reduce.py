@@ -73,7 +73,9 @@ class AllReduce(BasicOperation):
             if use_persistent_output:
                 msccl_comm.msccl_AllReduce_init(
                     rank, world_size, 
-                    self.input_buffer, self.output_buffer)
+                    self.input_buffer, self.output_buffer,
+                    self.process_group
+                )
             else:
                 msccl_comm.msccl_AllReduce_init_cached(rank, world_size)
             self.comm_stream = msccl_comm.COMM_STREAM

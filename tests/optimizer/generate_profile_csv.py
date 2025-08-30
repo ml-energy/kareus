@@ -117,7 +117,7 @@ def process_partition_profiling_results(
     return partition_profiling_results
 
 
-def pareto_optimal(config_results: list[tuple[Any, tuple[float, float]]]) -> list[tuple[Any, tuple[float, float]]]:
+def pareto_optimal(config_results: list[tuple[Any, tuple[float, float]]], p2p_power: float) -> list[tuple[Any, tuple[float, float]]]:
     """Filter a list of (config, (time, energy)) to Pareto-optimal ones.
 
     A point a dominates b if a.time <= b.time and a.energy <= b.energy and at least one strict.
@@ -132,9 +132,11 @@ def pareto_optimal(config_results: list[tuple[Any, tuple[float, float]]]) -> lis
     pareto: list[tuple[tuple[int, int, int, int], tuple[float, float]]] = []
     best_energy = float("inf")
     for cfg, (t, e) in sorted_items:
-        if e < best_energy:  # strictly better in energy at this time
+        # Map the cost to be effective computation energy.
+        ef_e = e - p2p_power * t
+        if ef_e < best_energy:  # strictly better in energy at this time
             pareto.append((cfg, (t, e)))
-            best_energy = e
+            best_energy = ef_e
     return pareto
 
 
@@ -147,6 +149,7 @@ def main(
     batch_size: int,
     seq_len: int,
     num_layers: int,
+    p2p_power: float,
 ) -> None:
     """Run the main routine."""
     print(f"Processing decoupled profiling results in {partition_profile_dir} and {prepost_profile_dir}.")
@@ -203,8 +206,8 @@ def main(
     for freq_idx, frequency in enumerate(freqs):
         if freq_idx >= len(attention_fwd_results) or freq_idx >= len(mlp_fwd_results):
             continue
-        attention_fwd_result = pareto_optimal(attention_fwd_results[freq_idx])
-        mlp_fwd_result = pareto_optimal(mlp_fwd_results[freq_idx])
+        attention_fwd_result = pareto_optimal(attention_fwd_results[freq_idx], p2p_power)
+        mlp_fwd_result = pareto_optimal(mlp_fwd_results[freq_idx], p2p_power)
 
         for attn_config, attn_result in attention_fwd_result:
             for mlp_config, mlp_result in mlp_fwd_result:
@@ -228,8 +231,8 @@ def main(
     for freq_idx, frequency in enumerate(freqs):
         if freq_idx >= len(attention_bwd_results) or freq_idx >= len(mlp_bwd_results):
             continue
-        attention_bwd_result = pareto_optimal(attention_bwd_results[freq_idx])
-        mlp_bwd_result = pareto_optimal(mlp_bwd_results[freq_idx])
+        attention_bwd_result = pareto_optimal(attention_bwd_results[freq_idx], p2p_power)
+        mlp_bwd_result = pareto_optimal(mlp_bwd_results[freq_idx], p2p_power)
 
         for attn_config, attn_result in attention_bwd_result:
             for mlp_config, mlp_result in mlp_bwd_result:
@@ -250,12 +253,14 @@ def main(
     # Write only globally Pareto-optimal points across frequency+configs per stage/instruction.
     for stage in range(pipeline_parallel_size):
         # Forward
-        fwd_pareto = pareto_optimal(forward_points_by_stage[stage])
+        fwd_pareto = pareto_optimal(forward_points_by_stage[stage], p2p_power)
+        print(f"generated {len(fwd_pareto)} Pareto-optimal forward candidates for stage {stage}")
         for (frequency, attn_config, mlp_config), (fwd_time, fwd_energy) in fwd_pareto:
             profile_csv.write(f"{stage},forward,{frequency},{'-'.join(map(str, attn_config))},{'-'.join(map(str, mlp_config))},{fwd_time},{fwd_energy}\n")
 
         # Backward
-        bwd_pareto = pareto_optimal(backward_points_by_stage[stage])
+        bwd_pareto = pareto_optimal(backward_points_by_stage[stage], p2p_power)
+        print(f"generated {len(bwd_pareto)} Pareto-optimal backward candidates for stage {stage}")
         for (frequency, attn_config, mlp_config), (bwd_time, bwd_energy) in bwd_pareto:
             profile_csv.write(f"{stage},backward,{frequency},{'-'.join(map(str, attn_config))},{'-'.join(map(str, mlp_config))},{bwd_time},{bwd_energy}\n")
 
@@ -273,6 +278,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", default=4, type=int, help="Batch size.")
     parser.add_argument("--seq_len", default=4096, type=int, help="Sequence length.")
     parser.add_argument("--num_layers", default=28, type=int, help="Number of layers.")
+    parser.add_argument("--p2p_power", default=90.0, type=float, help="GPU power consumption while blocking on P2P communication, in Watts.")
     args = parser.parse_args()
 
     main(
@@ -284,4 +290,5 @@ if __name__ == "__main__":
         args.batch_size,
         args.seq_len,
         args.num_layers,
+        args.p2p_power,
     )

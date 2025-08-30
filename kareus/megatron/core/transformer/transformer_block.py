@@ -293,7 +293,7 @@ class TransformerBlock(MegatronModule):
     def _split_tensors_for_nanobatch(
         self,
         hidden_states: Tensor,
-        attention_mask: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None, # TODO: mid_point split is wrong
         context: Optional[Tensor] = None,
         context_mask: Optional[Tensor] = None,
         attention_bias: Optional[Tensor] = None,
@@ -541,6 +541,7 @@ class TransformerBlock(MegatronModule):
                 hidden_states_2 = current_hidden_2[0]
                 # Concatenate results
                 hidden_states = torch.cat([hidden_states_1, hidden_states_2], dim=1)
+                # TODO: final allreduce and BDA
                 
                 # # Set context from the last processed context
                 # if current_context_1 is not None and current_context_2 is not None:

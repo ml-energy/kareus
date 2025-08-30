@@ -4,6 +4,7 @@ import torch
 from typing import Optional
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+from transformer_engine.pytorch.utils import clear_tensor_data
 
 
 @torch.compile
@@ -129,6 +130,7 @@ class BiasSwigluOp(BasicOperation):
         ctx.ori_shape = ori_shape
         ctx.ori_input_dtype = input_.dtype
         ctx.fp8_input_store = fp8_input_store
+        # ctx.has_prev_op = prev_op is not None
         if bias is not None:
             ctx.save_for_backward(input_for_backward, bias)
         else:
@@ -169,6 +171,10 @@ class BiasSwigluOp(BasicOperation):
         
         # Reshape grad_input back to original input shape
         grad_input = grad_input if len(ori_shape) == 2 else grad_input.view(ori_shape)
+        
+        # # Clear saved tensors if possible
+        # if ctx.has_prev_op:
+        #     clear_tensor_data(*ctx.saved_tensors)
         
         return grad_input, (grad_bias,)
 
