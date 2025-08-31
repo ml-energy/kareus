@@ -38,8 +38,15 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 
 # Import FlashAttention functions directly
-from kareus.flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-from kareus.flash_attn.flash_attn_interface import flash_attn_func_backward, flash_attn_varlen_func_backward
+try:
+    from kareus.flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+    from kareus.flash_attn.flash_attn_interface import flash_attn_func_backward, flash_attn_varlen_func_backward
+except ImportError:
+    flash_attn_func = None
+    # flash_attn_varlen_func = None
+    flash_attn_func_backward = None
+    # flash_attn_varlen_func_backward = None
+
 try:
     from kareus.flash_attn.hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from kareus.flash_attn.hopper.flash_attn_interface import flash_attn_func_backward as flash_attn_func_backward_v3
@@ -279,9 +286,9 @@ def flash_attention_forward(
         #         )
 
     use_flash_attn_3 = False
-    if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
-        use_flash_attn_3 = True
-    elif flash_attention_backend is None and flash_attn_func_v3 is not None:
+    # if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
+    #     use_flash_attn_3 = True
+    if flash_attention_backend is None and flash_attn_func_v3 is not None:
         # Auto-detect Flash Attention 3 when backend is None
         use_flash_attn_3 = True
     
