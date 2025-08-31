@@ -141,8 +141,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     frequency = args.frequency
 
-    os.makedirs(f"profile_result/{frequency}", exist_ok=True)
-    os.makedirs(f"results/{frequency}", exist_ok=True)
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if visible is not None and len(visible.strip()) > 0:
+        vis_list = [x for x in visible.split(",") if x.strip() != ""]
+        target_indices = vis_list
+    else:
+        raise ValueError("CUDA_VISIBLE_DEVICES is not set")
+
+    os.makedirs(f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}", exist_ok=True)
+    os.makedirs(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}", exist_ok=True)
 
     results = []
 
@@ -156,14 +163,15 @@ if __name__ == "__main__":
                 # if skip:
                 #     continue
                 output_name = f"profile_{overlap_start}_{overlap_end}_{sm_num}_{block_size}"
-                nsys_report = f"profile_result/{frequency}/{output_name}.nsys-rep"
+                nsys_report = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.nsys-rep"
 
+                # try:
                 profile_cmd = [
                     "nsys profile",
-                    "--gpu-metrics-devices", "0,1",
+                    "--gpu-metrics-devices", ",".join(target_indices),
                     "--capture-range", "cudaProfilerApi",
                     "--force-overwrite", "true",
-                    "-o", f"profile_result/{frequency}/{output_name}",
+                    "-o", f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}",
                     "python", f"overlap_test_mlp_individual.py",
                     "--frequency", frequency,
                     "--world_size", str(args.world_size),
@@ -178,8 +186,8 @@ if __name__ == "__main__":
                     run_cmd(" ".join(profile_cmd))
                 print(f"[✓] nsys profiling done. Output: {nsys_report}")
 
-                csv_file = f"profile_result/{frequency}/{output_name}.csv"
-                metrics_file = f"profile_result/{frequency}/{output_name}.sqlite"
+                csv_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv"
+                metrics_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.sqlite"
                 export_cmd = [
                     "nsys stats", nsys_report,
                     "--report", "cuda_gpu_kern_sum",
@@ -193,10 +201,10 @@ if __name__ == "__main__":
                 print(f"[✓] nsys export done. Output: {metrics_file}")
 
                 metrics_df = process_sqlite(metrics_file)
-                metrics_df.to_csv(f"results/{frequency}/{output_name}.csv", index=False)
+                metrics_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv", index=False)
 
                 stats_df = calculate_metrics_stats(metrics_df)
-                stats_df.to_csv(f"results/{frequency}/{output_name}.metrics_stats.csv", index=False)
+                stats_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.metrics_stats.csv", index=False)
 
                 result = {
                     "overlap_start": overlap_start,
@@ -209,6 +217,9 @@ if __name__ == "__main__":
                 results.append(result)
                 print(f"[✓] Result collected for {output_name}")
                 # exit()
+                # except:
+                #     print(f"[❌] Error processing {output_name}")
+                #     continue
 
     # if results:
     #     results_df = pd.DataFrame(results)

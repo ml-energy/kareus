@@ -12,10 +12,15 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
 from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
+from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
 from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
+from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
+from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
+from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
 from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range
 import pynvml
@@ -43,8 +48,62 @@ def init_distributed(rank, world_size, backend: str = 'nccl'):
     return tp_group
 
 
+def gpu_temperature_monitor(shared_list, rank):
+    """
+    Child process function that continuously collects GPU temperature data.
+    The data is stored in the 'shared_list' as [timestamp, temperature].
+    """
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(rank)
+
+    try:
+        while True:
+            ts = time.time()
+            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            sm_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
+            power = int(pynvml.nvmlDeviceGetPowerUsage(handle) / 1000)
+            shared_list.append([ts, temp, sm_clock, power])
+            # time.sleep(interval)
+    except:
+        pass
+    finally:
+        pynvml.nvmlShutdown()
+
+
+def temperature_start(temperature_data, rank):
+    p = multiprocessing.Process(
+        target=gpu_temperature_monitor, 
+        args=(temperature_data, rank)
+    )
+    p.start()
+    return p
+
+
+def temperature_end(p, temperature_data):
+    print("Terminating temperature monitoring process")
+    p.terminate()
+    try:
+        p.join(timeout=5)
+        print("Temperature monitoring process joined")
+    except Exception as e:
+        print(f"Error joining temperature monitoring process: {e}")
+    collected_data = list(temperature_data)
+
+    filtered_data = []
+    previous_temp = None
+    previous_clock = None
+    previous_power = None
+    for ts, temp, sm_clock, power in collected_data:
+        if temp != previous_temp or sm_clock != previous_clock or power != previous_power:
+            filtered_data.append([ts, temp, sm_clock, power])
+        previous_temp = temp
+        previous_clock = sm_clock
+        previous_power = power
+    return filtered_data
+
+
 class MLPFuserTest:
-    """Test suite for MLP fuser operations."""
+    """Test suite for attention fuser operations."""
 
     def __init__(self, args, rank: int = 0, world_size: int = 1):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -91,8 +150,8 @@ class MLPFuserTest:
         self.repeat_num = 1
     
     def create_test_tensors(self):
-        """Create test tensors for the MLP operations."""
-        nano_batch_size = self.batch_size // 2
+        """Create test tensors for the attention operations."""
+        nano_batch_size = self.batch_size
         hidden_states = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
@@ -114,8 +173,8 @@ class MLPFuserTest:
         
         return hidden_states, bias, residual, allreduce_inputs
     
-    def create_operations(self, allreduce_inputs):
-        """Create all the required operations for the MLP fuser."""
+    def create_operations(self):
+        """Create all the required operations for the attention fuser."""
         
         # 1. BDA Operation (Bias Dropout Add)
         bda_op = BiasDropoutAddOp(
@@ -145,7 +204,7 @@ class MLPFuserTest:
             tensor_parallel_group=None,
             tensor_parallel_size=None,
         )
-
+        
         # 4. BiasSwigluOp (activation function with bias)
         bias_swiglu_op = BiasSwigluOp(
             fp8_input_store=self.config.activation_func_fp8_input_store
@@ -164,22 +223,17 @@ class MLPFuserTest:
             tensor_parallel_group=None,
             tensor_parallel_size=None,
         )
-
-        # 6. AllReduce Communication Operation
+        
+        # 8. AllReduce Communication Operation
         if self.tensor_parallel_size > 1:
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
-                async_op=True,
-                backend="msccl",
-                rank=self.rank,
-                world_size=self.world_size,
-                use_persistent_output=True,
-                input_buffer=allreduce_inputs,
-                tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
-                device=self.device,
-                dtype=self.dtype,
+                async_op=True,  # Use async mode as set in the modified AllReduce
+                backend="nccl",
+                # rank=self.rank,
+                # world_size=self.world_size,
             )
-
+        
             return [
                 bda_op,
                 layernorm_op,
@@ -188,19 +242,20 @@ class MLPFuserTest:
                 linear_fc2_op,
                 allreduce_comm_op,
             ]
+
         else:
             raise ValueError("Tensor parallel size must be greater than 1")
-
     
-    def get_overlap_windows(self):
-        overlap_windows = [
-            (-1, -1),
-            (0, 1), (2, 3), (4, 4), (5, 6),
-            (0, 3), (2, 4), (4, 5),
-            (0, 4), (2, 6),
-            (0, 6),
-        ]
-        return overlap_windows
+    # def get_overlap_windows(self):
+    #     overlap_windows = [
+    #         (-1, -1),
+    #         (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
+    #         (0, 3), (2, 5), (4, 6), (6, 8),
+    #         (0, 5), (2, 6), (4, 8),
+    #         (0, 6), (2, 8),
+    #         (0, 8),
+    #     ]
+    #     return overlap_windows
     
     def test_config(self, monitor, test_tensors, mlp_fuser, overlap_window, sm_configs):
         hidden_states, bias, residual, allreduce_inputs = test_tensors
@@ -230,7 +285,7 @@ class MLPFuserTest:
         time_end = time.time()
         duration = (time_end - time_start) / 8
         if self.rank == 0:
-            iterations = int(8 / duration)
+            iterations = int(10 / duration)
             dist_list = [iterations]
         else:
             dist_list = [None]
@@ -280,7 +335,7 @@ class MLPFuserTest:
             #     f.write(file_str)
         
         if self.rank == 0:
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "a") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results_baseline.csv", "a") as f:
                 line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
                 for i in range(self.repeat_num):
                     line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
@@ -289,7 +344,7 @@ class MLPFuserTest:
     
     def run_overlap_test(self):
         test_tensors = self.create_test_tensors()
-        operations = self.create_operations(test_tensors[-1])
+        operations = self.create_operations()
         comp_ops = operations[:-1]
         allreduce_comm_op = operations[-1]
 
@@ -306,7 +361,7 @@ class MLPFuserTest:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
             os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results_baseline.csv", "w") as f:
                 title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
                 for i in range(self.repeat_num):
                     title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
@@ -314,33 +369,20 @@ class MLPFuserTest:
                 title += "\n"
                 f.write(title)
         
-        # skip = True
-        overlap_windows = self.get_overlap_windows()
-        for overlap_window in overlap_windows:
-            # if overlap_window[0] == 2 and overlap_window[1] == 2:
-            #     skip = False
-            # if skip:
-            #     continue
-            for sm_num in range(2, 31, 2):
-                for block_size in [512, 1024]:
-                    # if sm_num == 17 and block_size == 512 and overlap_window[0] == 4 and overlap_window[1] == 5:
-                    #     skip = False
-                    # if skip:
-                    #     continue
-                    sm_configs = (sm_num, block_size)
-                    print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
-                    with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
-                        self.test_config(
-                            monitor, 
-                            test_tensors, mlp_fuser, 
-                            overlap_window, sm_configs
-                        )
-                    # return
-                    time.sleep(30)
+        overlap_window = (-1, -1)
+        sm_num, block_size = None, None
+        sm_configs = (sm_num, block_size)
+        print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
+        with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
+            self.test_config(
+                monitor, 
+                test_tensors, mlp_fuser, 
+                overlap_window, sm_configs
+            )
 
 
 def overlap_test(rank, world_size, args, master_port):
-    """Run the MLP fuser tests in a distributed environment."""
+    """Run the attention fuser tests in a distributed environment."""
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = str(rank)
@@ -374,7 +416,7 @@ if __name__ == "__main__":
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()
 
-    print("Running overlap test for MLP fuser")
+    print("Running overlap test for mlp fuser")
     print(f"World size: {args.world_size}")
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
@@ -392,3 +434,4 @@ if __name__ == "__main__":
         nprocs=args.world_size,
         join=True,
     )
+    

@@ -87,7 +87,7 @@ def main():
     from torch.multiprocessing import spawn
     spawn(
         _spawn_entry,
-        args=(args.world_size, args, 9001),
+        args=(args.world_size, args, random.randint(8000, 65535)),
         nprocs=args.world_size,
         join=True,
     )
