@@ -84,10 +84,17 @@ def main():
     parser.add_argument("--block_size", "-t", type=int, default=1024)
     args = parser.parse_args()
 
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if visible is not None and len(visible.strip()) > 0:
+        vis_list = [int(x) for x in visible.split(",") if x.strip() != ""]
+        target_indices = vis_list
+    else:
+        raise ValueError("CUDA_VISIBLE_DEVICES is not set")
+
     from torch.multiprocessing import spawn
     spawn(
         _spawn_entry,
-        args=(args.world_size, args, random.randint(8000, 65535)),
+        args=(args.world_size, args, 9000 + target_indices[0]),
         nprocs=args.world_size,
         join=True,
     )

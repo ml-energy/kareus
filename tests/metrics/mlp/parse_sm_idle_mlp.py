@@ -124,7 +124,7 @@ def collect_profile_data(results_dir: str) -> Tuple[Dict[ConfigKey, Dict[str, fl
     return metrics_means_map, sm_idle_ratio_map, sm_compute_idle_ratio_map, all_metric_names
 
 
-def parse_energy_logs(log_dir: str, frequency: str) -> Dict[ConfigKey, Dict[str, float]]:
+def parse_energy_logs(log_dir: str) -> Dict[ConfigKey, Dict[str, float]]:
     """Parse energy logs under log_dir and extract 0:time and 0:total energy per config.
 
     Expects a single CSV at <log_dir>/<frequency>/energy_results.csv.
@@ -133,7 +133,7 @@ def parse_energy_logs(log_dir: str, frequency: str) -> Dict[ConfigKey, Dict[str,
         config -> {"time_s": time_0, "total_energy_J": energy_0}
     """
 
-    path = os.path.join(log_dir, frequency, "energy_results.csv")
+    path = os.path.join(log_dir, "energy_results.csv")
     # matches = glob.glob(pattern, recursive=True)
     # if not matches:
     #     return {}
@@ -254,19 +254,10 @@ def merge_and_write(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parse MLP profiling and energy results")
-    parser.add_argument("--frequency", "-f", type=str, required=True, help="Frequency tag used in results/logs")
-    parser.add_argument(
-        "--results_dir",
-        type=str,
-        default="results",
-        help="Base results directory containing <frequency>/profile_*.csv",
-    )
-    parser.add_argument(
-        "--log_dir",
-        type=str,
-        default="logs/tp2-bs16-seq4096",
-        help="Directory root to search recursively for <frequency>/energy_results.csv",
-    )
+    parser.add_argument("--frequency", "-f", type=str, default="default", help="Frequency tag used in results/logs")
+    parser.add_argument("--world_size", "-w", type=int, default=2)
+    parser.add_argument("--batch_size", "-b", type=int, default=8)
+    parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument(
         "--output",
         type=str,
@@ -275,15 +266,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    results_dir = os.path.join(args.results_dir, args.frequency)
+    tp_bs_seq = f"tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+    profile_dir = os.path.join("results", tp_bs_seq, str(args.frequency))
+    logs_dir = os.path.join("logs", tp_bs_seq, str(args.frequency))
+
     output_csv = (
         args.output
         if args.output
-        else os.path.join(args.log_dir, args.frequency, f"summary_mlp_{args.frequency}.csv")
+        else os.path.join(logs_dir, "sm_idle_ratio.csv")
     )
 
-    metrics_means_map, sm_idle_ratio_map, sm_compute_idle_ratio_map, all_metric_names = collect_profile_data(results_dir)
-    energy_map = parse_energy_logs(args.log_dir, args.frequency)
+    metrics_means_map, sm_idle_ratio_map, sm_compute_idle_ratio_map, all_metric_names = collect_profile_data(profile_dir)
+    energy_map = parse_energy_logs(logs_dir)
     merge_and_write(output_csv, metrics_means_map, sm_idle_ratio_map, energy_map, sm_compute_idle_ratio_map, all_metric_names)
 
 
