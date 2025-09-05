@@ -196,7 +196,7 @@ class MLPFuserTest:
         overlap_windows = [
             (-1, -1),
             (0, 1), (2, 3), (4, 4), (5, 6),
-            (0, 3), (2, 4), (4, 5),
+            (0, 3), (2, 4), (4, 6),
             (0, 4), (2, 6),
             (0, 6),
         ]
@@ -321,7 +321,7 @@ class MLPFuserTest:
             #     skip = False
             # if skip:
             #     continue
-            for sm_num in range(2, 31, 2):
+            for sm_num in range(1, 21):
                 for block_size in [512, 1024]:
                     # if sm_num == 17 and block_size == 512 and overlap_window[0] == 4 and overlap_window[1] == 5:
                     #     skip = False
@@ -369,7 +369,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=16)
+    parser.add_argument("--batch_size", "-b", type=int, default=8)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()

@@ -9,7 +9,7 @@ def get_overlap_windows():
     return [
         (-1, -1),
         (0, 1), (2, 3), (4, 4), (5, 6),
-        (0, 3), (2, 4), (4, 5),
+        (0, 3), (2, 4), (4, 6),
         (0, 4), (2, 6),
         (0, 6),
     ]
@@ -48,6 +48,11 @@ def process_sqlite(metrics_file):
 
     # Fetch metrics for the chosen GPU by decoding GPU_METRICS.typeId
     # GPU ordinal = (typeId - vmId) & 0xFFFFFFFF
+    # Map visible CUPTI deviceId (0..N-1) to system ordinal using CUDA_VISIBLE_DEVICES
+    visible_env = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    visible_ordinals = [int(x) for x in visible_env.split(",") if x.strip() != ""]
+    chosen_gpu_system_ordinal = visible_ordinals[chosen_gpu]
+
     query = """
     WITH vm(vmid) AS (
         SELECT DISTINCT vmId FROM TARGET_INFO_GPU
@@ -62,7 +67,7 @@ def process_sqlite(metrics_file):
     CROSS JOIN vm
     WHERE ((g.typeId - vm.vmid) & 0xFFFFFFFF) = ?
     """
-    df = pd.read_sql_query(query, conn, params=(chosen_gpu,))
+    df = pd.read_sql_query(query, conn, params=(chosen_gpu_system_ordinal,))
     df = transform_metrics_to_columns(df)
 
     kernel_query = """
@@ -135,7 +140,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=16)
+    parser.add_argument("--batch_size", "-b", type=int, default=8)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()
@@ -156,70 +161,70 @@ if __name__ == "__main__":
     skip = False
     overlap_windows = get_overlap_windows()
     for overlap_start, overlap_end in overlap_windows:
-        for sm_num in range(2, 31, 2):
+        for sm_num in range(1, 21):
             for block_size in [512, 1024]:
-                if sm_num == 10 and block_size == 1024 and overlap_start == 4 and overlap_end == 4:
+                if sm_num == 11 and block_size == 1024 and overlap_start == 0 and overlap_end == 1:
                     skip = False
-                # if skip:
-                #     continue
+                if skip:
+                    continue
                 output_name = f"profile_{overlap_start}_{overlap_end}_{sm_num}_{block_size}"
                 nsys_report = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.nsys-rep"
 
-                # try:
-                profile_cmd = [
-                    "nsys profile",
-                    "--gpu-metrics-devices", ",".join(target_indices),
-                    "--capture-range", "cudaProfilerApi",
-                    "--force-overwrite", "true",
-                    "-o", f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}",
-                    "python", f"overlap_test_mlp_individual.py",
-                    "--frequency", frequency,
-                    "--world_size", str(args.world_size),
-                    "--batch_size", str(args.batch_size),
-                    "--seq_len", str(args.seq_len),
-                    "--overlap_start", str(overlap_start),
-                    "--overlap_end", str(overlap_end),
-                    "--sm_num", str(sm_num),
-                    "--block_size", str(block_size),
-                ]
-                if not skip:
-                    run_cmd(" ".join(profile_cmd))
-                print(f"[✓] nsys profiling done. Output: {nsys_report}")
+                try:
+                    profile_cmd = [
+                        "nsys profile",
+                        "--gpu-metrics-devices", ",".join(target_indices),
+                        "--capture-range", "cudaProfilerApi",
+                        "--force-overwrite", "true",
+                        "-o", f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}",
+                        "python", f"overlap_test_mlp_individual.py",
+                        "--frequency", frequency,
+                        "--world_size", str(args.world_size),
+                        "--batch_size", str(args.batch_size),
+                        "--seq_len", str(args.seq_len),
+                        "--overlap_start", str(overlap_start),
+                        "--overlap_end", str(overlap_end),
+                        "--sm_num", str(sm_num),
+                        "--block_size", str(block_size),
+                    ]
+                    if not skip and not os.path.exists(nsys_report):
+                        run_cmd(" ".join(profile_cmd))
+                    print(f"[✓] nsys profiling done. Output: {nsys_report}")
 
-                csv_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv"
-                metrics_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.sqlite"
-                export_cmd = [
-                    "nsys stats", nsys_report,
-                    "--report", "cuda_gpu_kern_sum",
-                    "--format", "csv",
-                    "--force-export", "true",
-                    "--sqlite", metrics_file,
-                    "--output", csv_file,
-                ]
-                if not skip:
-                    run_cmd(" ".join(export_cmd))
-                print(f"[✓] nsys export done. Output: {metrics_file}")
+                    csv_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv"
+                    metrics_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.sqlite"
+                    export_cmd = [
+                        "nsys stats", nsys_report,
+                        "--report", "cuda_gpu_kern_sum",
+                        "--format", "csv",
+                        "--force-export", "true",
+                        "--sqlite", metrics_file,
+                        "--output", csv_file,
+                    ]
+                    if not skip and not os.path.exists(metrics_file):
+                        run_cmd(" ".join(export_cmd))
+                    print(f"[✓] nsys export done. Output: {metrics_file}")
 
-                metrics_df = process_sqlite(metrics_file)
-                metrics_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv", index=False)
+                    metrics_df = process_sqlite(metrics_file)
+                    metrics_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv", index=False)
 
-                stats_df = calculate_metrics_stats(metrics_df)
-                stats_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.metrics_stats.csv", index=False)
+                    stats_df = calculate_metrics_stats(metrics_df)
+                    stats_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.metrics_stats.csv", index=False)
 
-                result = {
-                    "overlap_start": overlap_start,
-                    "overlap_end": overlap_end,
-                    "sm_num": sm_num,
-                    "block_size": block_size,
-                }
-                for _, row in stats_df.iterrows():
-                    result[row["Metric"] + " Mean"] = row["Mean"]
-                results.append(result)
-                print(f"[✓] Result collected for {output_name}")
+                    result = {
+                        "overlap_start": overlap_start,
+                        "overlap_end": overlap_end,
+                        "sm_num": sm_num,
+                        "block_size": block_size,
+                    }
+                    for _, row in stats_df.iterrows():
+                        result[row["Metric"] + " Mean"] = row["Mean"]
+                    results.append(result)
+                    print(f"[✓] Result collected for {output_name}")
                 # exit()
-                # except:
-                #     print(f"[❌] Error processing {output_name}")
-                #     continue
+                except:
+                    print(f"[❌] Error processing {output_name}")
+                    continue
 
     # if results:
     #     results_df = pd.DataFrame(results)

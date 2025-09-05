@@ -11,7 +11,9 @@ nemo_experiments/
 *.png
 dump/
 *.sqlite
-.jsonl
+*.jsonl
+*.pdf
+*.svg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

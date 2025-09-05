@@ -94,8 +94,9 @@ def draw_timeline_from_csv(csv_path, out_png, overlap_window, title_suffix=None,
     groups = [
         ("pre", (0, 1), ['triton_poi_fused_add_0', 'triton_poi_fused_native_dropout_1', 'rmsnorm_fwd_general_kernel']),
         ("fc1", (2, 3), fc1_names),
-        ("act", (4, 4), ['triton_poi_fused_mul_silu_0']),
-        ("fc2", (5, 6), fc2_names),
+        ("post", (4, 5), ['at::native::direct_copy_kernel_cuda', 'fused_rope_forward']),
+        ("attn", (6, 6), ['flash_fwd_kernel']),
+        ("fc2", (7, 8), fc2_names),
     ]
 
     def aggregate_duration(names, mode):

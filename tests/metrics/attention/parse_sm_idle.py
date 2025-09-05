@@ -232,9 +232,9 @@ def merge_and_write(
             plt.scatter(xy["sm_idle_ratio"], xy["total_energy_J"], s=20, alpha=0.7)
             plt.xlabel("SM idle ratio (<30% active)")
             plt.ylabel("Total energy (J)")
-            plt.title("Energy vs SM idle ratio - MLP")
+            plt.title("Energy vs SM idle ratio - Attention")
             plt.grid(True, alpha=0.3)
-            out_path = os.path.join(plots_dir, "sm_idle_vs_energy_mlp.png")
+            out_path = os.path.join(plots_dir, "sm_idle_vs_energy_attn.png")
             plt.savefig(out_path, bbox_inches="tight")
             plt.close()
             print(f"[✓] Figure written to {out_path}")
@@ -246,9 +246,9 @@ def merge_and_write(
             plt.scatter(xy["sm_compute_idle_ratio"], xy["total_energy_J"], s=20, alpha=0.7)
             plt.xlabel("SM compute idle ratio (instructions <10%)")
             plt.ylabel("Total energy (J)")
-            plt.title("Energy vs SM compute idle ratio - MLP")
+            plt.title("Energy vs SM compute idle ratio - Attention")
             plt.grid(True, alpha=0.3)
-            out_path = os.path.join(plots_dir, "sm_compute_idle_vs_energy_mlp.png")
+            out_path = os.path.join(plots_dir, "sm_compute_idle_vs_energy_attn.png")
             plt.savefig(out_path, bbox_inches="tight")
             plt.close()
             print(f"[✓] Figure written to {out_path}")
@@ -257,7 +257,7 @@ def merge_and_write(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Parse MLP profiling and energy results")
+    parser = argparse.ArgumentParser(description="Parse Attention profiling and energy results")
     parser.add_argument("--frequency", "-f", type=str, default="default", help="Frequency tag used in results/logs")
     parser.add_argument("--world_size", "-w", type=int, default=2)
     parser.add_argument("--batch_size", "-b", type=int, default=8)

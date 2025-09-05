@@ -94,8 +94,9 @@ def draw_timeline_from_csv(csv_path, out_png, overlap_window, title_suffix=None,
     groups = [
         ("pre", (0, 1), ['triton_poi_fused_add_0', 'triton_poi_fused_native_dropout_1', 'rmsnorm_fwd_general_kernel']),
         ("fc1", (2, 3), fc1_names),
-        ("act", (4, 4), ['triton_poi_fused_mul_silu_0']),
-        ("fc2", (5, 6), fc2_names),
+        ("post", (4, 5), ['at::native::direct_copy_kernel_cuda', 'fused_rope_forward']),
+        ("attn", (6, 6), ['flash_fwd_kernel']),
+        ("fc2", (7, 8), fc2_names),
     ]
 
     def aggregate_duration(names, mode):
@@ -158,6 +159,8 @@ def draw_timeline_from_csv(csv_path, out_png, overlap_window, title_suffix=None,
     total_time = pre_time + max(overlap_time, ar_latency) + post_time
     # Overlap fraction
     overlap_fraction = 0.0 if (ov_start == -1 and ov_end == -1) or total_time <= 0 else min(ar_latency, overlap_time) / total_time
+    # SM idle ratio: (AR time - overlap time) floored at 0, normalized by total time
+    sm_idle_ratio = 0.0 if total_time <= 0 else max(ar_latency - overlap_time, 0.0) / total_time
 
     if draw:
         # Convert all times from ns to ms for plotting
@@ -270,6 +273,7 @@ def draw_timeline_from_csv(csv_path, out_png, overlap_window, title_suffix=None,
         'ar_latency_ns': ar_latency,
         'total_time_ns': total_time,
         'overlap_fraction': overlap_fraction,
+        'sm_idle_ratio': sm_idle_ratio,
     }
     return True, stats
 
@@ -367,21 +371,7 @@ def main():
             print(f"energy_results.csv missing columns: {missing}")
         else:
             pts = pd.DataFrame(scatter_points)
-            # Try to bring in sm_idle_ratio from summary_mlp_<frequency>.csv for coloring
-            sm_idle_ratio_csv = os.path.join(logs_dir, f"sm_idle_ratio.csv")
-            if os.path.exists(sm_idle_ratio_csv):
-                sm_idle_ratio_df = pd.read_csv(sm_idle_ratio_csv)
-                need_cols = ["overlap_start", "overlap_end", "sm_num", "block_size", "sm_idle_ratio"]
-                if all(c in sm_idle_ratio_df.columns for c in need_cols):
-                    pts = pts.merge(
-                        sm_idle_ratio_df[need_cols],
-                        how="left",
-                        on=["overlap_start", "overlap_end", "sm_num", "block_size"],
-                    )
-                else:
-                    print("sm_idle_ratio missing required columns; skipping sm_idle_ratio merge")
-            else:
-                print(f"sm_idle_ratio csv not found: {sm_idle_ratio_csv}; coloring by sm_idle_ratio will be disabled")
+            # sm_idle_ratio is computed from durations; no external merge required
 
             # Rename energy_df columns to canonical names
             energy_df = energy_df.rename(columns={
@@ -414,16 +404,17 @@ def main():
                     mask = y < float(args.time_threshold)
                 x_plot = x[mask]
                 y_plot = y[mask]
+                # print(f"x_plot: {x_plot}, y_plot: {y_plot}")
                 if "sm_idle_ratio" in merged.columns:
                     c_vals = merged["sm_idle_ratio"].astype(float)[mask]
                     sc = plt.scatter(x_plot, y_plot, s=20, alpha=0.8, c=c_vals, cmap='viridis')
                     cbar = plt.colorbar(sc)
-                    cbar.set_label('Exposed Communication Fraction')
+                    cbar.set_label('SM idle ratio')
                 else:
                     plt.scatter(x_plot, y_plot, s=20, alpha=0.8)
-                plt.xlabel("Overlap Fraction")
-                plt.ylabel("Time (s)")
-                # plt.title("Overlap fraction vs measured time")
+                plt.xlabel("Overlap fraction")
+                plt.ylabel("Measured time (s)")
+                plt.title("Overlap fraction vs measured time")
                 os.makedirs(logs_dir, exist_ok=True)
                 scatter_png = os.path.join(logs_dir, "overlap_fraction_vs_time.pdf")
                 plt.tight_layout()
@@ -436,14 +427,15 @@ def main():
                 e = merged["total_energy_J"].astype(float)
                 if "sm_idle_ratio" in merged.columns:
                     c_vals_e = merged["sm_idle_ratio"].astype(float)[mask]
+                    # print(f"x_plot: {x_plot}, e: {e[mask]}")
                     sc2 = plt.scatter(x_plot, e[mask], s=20, alpha=0.8, c=c_vals_e, cmap='viridis')
                     cbar2 = plt.colorbar(sc2)
-                    cbar2.set_label('Exposed Communication Fraction')
+                    cbar2.set_label('SM idle ratio')
                 else:
                     plt.scatter(x_plot, e[mask], s=20, alpha=0.8)
-                plt.xlabel("Overlap Fraction")
-                plt.ylabel("Energy (J)")
-                # plt.title("Overlap fraction vs total energy")
+                plt.xlabel("Overlap fraction")
+                plt.ylabel("Total energy (J)")
+                plt.title("Overlap fraction vs total energy")
                 energy_scatter_png = os.path.join(logs_dir, "overlap_fraction_vs_energy.pdf")
                 plt.tight_layout()
                 plt.savefig(energy_scatter_png)
