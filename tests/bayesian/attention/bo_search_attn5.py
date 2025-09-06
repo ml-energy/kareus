@@ -113,7 +113,10 @@ def one_hot_encode(x: np.ndarray) -> np.ndarray:
 
     x: [sm_idx, block_idx, overlap_idx]
     """
-    numeric = np.array([x[FREQ_IDX], x[SM_IDX]], dtype=np.float32)
+    # Use actual MHz value for frequency instead of the categorical index
+    freq_mhz = float(FREQ_VALUES[int(x[FREQ_IDX])])
+    numeric = np.array([freq_mhz, x[SM_IDX]], dtype=np.float32)
+    # numeric = np.array([x[FREQ_IDX], x[SM_IDX]], dtype=np.float32)
     block_one_hot = np.zeros(len(BLOCK_VALUES), dtype=np.float32)
     block_one_hot[int(x[BLOCK_IDX])] = 1.0
     overlap_one_hot = np.zeros(len(OVERLAP_WINDOWS), dtype=np.float32)
@@ -305,7 +308,7 @@ def measure_on_hardware(
     os.makedirs(logs_dir, exist_ok=True)
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
-    master_port = random.randint(8000, 65535)
+    master_port = 9002
     manager = mp.Manager()
     shared_results = manager.dict()
 
@@ -449,6 +452,20 @@ def try_load_initial_from_cache(
 # Surrogate models and EHVI
 # -----------------------------
 
+AUTOTVM_PARAMS = {
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "max_depth": 10,
+    "eta": 0.1,                # learning rate
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 1,
+    "gamma": 0,
+    "reg_alpha": 0,
+    "reg_lambda": 1,
+    "tree_method": "hist",     # fast on CPU; switch to 'gpu_hist' if you really want GPU
+}
+
 def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.ndarray):
     dtrain_energy = xgb.DMatrix(X_encoded, label=y_energy)
     dtrain_time = xgb.DMatrix(X_encoded, label=y_time)
@@ -461,9 +478,89 @@ def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.nda
         "colsample_bytree": 0.8,
         "min_child_weight": 1,
     }
+    # params = AUTOTVM_PARAMS
     energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
     time_model = xgb.train(params, dtrain_time, num_boost_round=100)
     return energy_model, time_model
+
+
+def train_xgb_ensemble(
+    X_encoded: np.ndarray,
+    y_energy: np.ndarray,
+    y_time: np.ndarray,
+    ensemble_size: int = 5,
+    bootstrap_frac: float = 0.8,
+    base_seed: int = 42,
+):
+    """
+    Train an ensemble of XGBoost regressors via bootstrap resampling and different seeds
+    to estimate predictive uncertainty.
+
+    Returns a list of (energy_model, time_model) tuples.
+    """
+    n = X_encoded.shape[0]
+    ensemble = []
+    for i in range(int(max(1, ensemble_size))):
+        rng = np.random.RandomState(base_seed + i)
+        if bootstrap_frac >= 1.0:
+            idx = np.arange(n)
+        else:
+            m = max(1, int(round(bootstrap_frac * n)))
+            idx = rng.choice(n, size=m, replace=True)
+        Xb = X_encoded[idx]
+        yeb = y_energy[idx]
+        ytb = y_time[idx]
+
+        dtrain_energy = xgb.DMatrix(Xb, label=yeb)
+        dtrain_time = xgb.DMatrix(Xb, label=ytb)
+        params = {
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
+            "max_depth": 6,
+            "eta": 0.3,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_weight": 1,
+            "seed": int(base_seed + i),
+        }
+        # params = {**AUTOTVM_PARAMS, "seed": int(base_seed + i)}
+        energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
+        time_model = xgb.train(params, dtrain_time, num_boost_round=100)
+        ensemble.append((energy_model, time_model))
+    return ensemble
+
+
+def predict_ensemble_stats(
+    ensemble_models: List[Tuple[xgb.Booster, xgb.Booster]],
+    X_encoded: np.ndarray,
+):
+    """
+    For each row in X_encoded, return mean and std for (energy, time) across ensemble.
+    Returns:
+      energy_mean, energy_std, time_mean, time_std  (each shape [N])
+    """
+    if len(ensemble_models) == 0:
+        dtest = xgb.DMatrix(X_encoded)
+        return (
+            np.zeros(X_encoded.shape[0], dtype=np.float64),
+            np.ones(X_encoded.shape[0], dtype=np.float64),
+            np.zeros(X_encoded.shape[0], dtype=np.float64),
+            np.ones(X_encoded.shape[0], dtype=np.float64),
+        )
+
+    energy_preds = []
+    time_preds = []
+    for em, tm in ensemble_models:
+        dtest = xgb.DMatrix(X_encoded)
+        energy_preds.append(em.predict(dtest))
+        time_preds.append(tm.predict(dtest))
+    energy_preds = np.vstack(energy_preds)  # [E, N]
+    time_preds = np.vstack(time_preds)      # [E, N]
+    energy_mean = np.mean(energy_preds, axis=0)
+    energy_std = np.std(energy_preds, axis=0)
+    time_mean = np.mean(time_preds, axis=0)
+    time_std = np.std(time_preds, axis=0)
+    return energy_mean, energy_std, time_mean, time_std
 
 
 def predict_performance(models, X_encoded: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -563,13 +660,23 @@ def main() -> None:
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default="A40")
 
-    parser.add_argument("--n_init", type=int, default=16)
-    parser.add_argument("--batches", type=int, default=8)
-    parser.add_argument("--acq_batch", type=int, default=4, help="New evaluations per batch")
+    parser.add_argument("--n_init", type=int, default=128)
+    parser.add_argument("--batches", type=int, default=16)
+    parser.add_argument("--acq_batch", type=int, default=32, help="New evaluations per batch")
     parser.add_argument("--use_effective_energy", action="store_true",
                         help="Use effective energy instead of real energy for GBT training (Pareto frontier still uses effective energy)")
     parser.add_argument("--normalize_objectives", action="store_true",
                         help="Normalize energy and time objectives to [0,1] range for balanced hypervolume calculation (default: True)")
+
+    # Exploration / uncertainty options
+    parser.add_argument("--explore_fraction", type=float, default=0.5,
+                        help="Fraction of each acquisition batch reserved for uncertainty-driven exploration (0..1)")
+    parser.add_argument("--ensemble_size", type=int, default=5,
+                        help="Size of the XGBoost ensemble used to estimate predictive uncertainty")
+    parser.add_argument("--bootstrap_frac", type=float, default=0.8,
+                        help="Bootstrap fraction for training each ensemble member")
+    parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum",
+                        help="How to combine energy/time predictive std into a single uncertainty score")
 
     args = parser.parse_args()
 
@@ -587,7 +694,7 @@ def main() -> None:
     # Configure frequency values based on GPU type
     global FREQ_VALUES
     if args.gpu_type == "A40":
-        FREQ_VALUES = list(map(int, np.arange(1740, 900 - 30, -30)))
+        FREQ_VALUES = list(map(int, np.arange(1740, 1000 - 30, -30)))
         # FREQ_VALUES = [1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000]
     else:  # A100
         FREQ_VALUES = list(map(int, np.arange(1410, 900 - 15, -15)))
@@ -670,6 +777,14 @@ def main() -> None:
     for ib in range(int(args.batches)):
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
         models = train_xgb_models(X_train_encoded, y_energy_for_training, y_time)
+        # Train ensemble for uncertainty estimates
+        ensemble_models = train_xgb_ensemble(
+            X_train_encoded,
+            y_energy_for_training,
+            y_time,
+            ensemble_size=args.ensemble_size,
+            bootstrap_frac=args.bootstrap_frac,
+        )
 
         current_front = np.column_stack((y_energy_eff, y_time))
 
@@ -693,18 +808,62 @@ def main() -> None:
         else:
             print("  Using raw objectives without normalization")
         
-        # Score via EHVI and select top-K
+        # Score via EHVI
         ehvi_values: List[float] = []
         for vec in candidates:
             ehvi = expected_hypervolume_improvement(vec, current_front, models, ref_point, normalization_bounds)
             ehvi_values.append(ehvi)
-        top_idx = np.argsort(ehvi_values)[-args.acq_batch:]
-        selected = candidates[top_idx]
+        ehvi_values = np.array(ehvi_values)
 
-        print("Selected candidates:")
-        for i, vec in enumerate(selected):
+        # Compute uncertainty from ensemble predictions
+        cand_encoded = np.array([one_hot_encode(x) for x in candidates])
+        e_mean, e_std, t_mean, t_std = predict_ensemble_stats(ensemble_models, cand_encoded)
+        if args.uncertainty_metric == "sum":
+            unc_score = e_std + t_std
+        elif args.uncertainty_metric == "max":
+            unc_score = np.maximum(e_std, t_std)
+        elif args.uncertainty_metric == "energy_std":
+            unc_score = e_std
+        else:  # time_std
+            unc_score = t_std
+
+        # Split acquisition into exploit and explore
+        k_total = int(args.acq_batch)
+        k_explore = int(round(args.explore_fraction * k_total))
+        k_exploit = max(0, k_total - k_explore)
+
+        # Indices for exploit (highest EHVI)
+        exploit_idx = []
+        if k_exploit > 0:
+            exploit_idx = np.argsort(ehvi_values)[-k_exploit:].tolist()
+
+        # Indices for explore (highest uncertainty, excluding already picked)
+        explore_idx = []
+        if k_explore > 0:
+            sorted_unc = np.argsort(unc_score)[::-1].tolist()
+            picked = set(exploit_idx)
+            for idx in sorted_unc:
+                if idx not in picked:
+                    explore_idx.append(idx)
+                if len(explore_idx) >= k_explore:
+                    break
+
+        final_idx = exploit_idx + explore_idx
+        if len(final_idx) < k_total:
+            # Backfill from remaining EHVI in case of shortages
+            remaining = [i for i in np.argsort(ehvi_values)[::-1].tolist() if i not in set(final_idx)]
+            final_idx.extend(remaining[: k_total - len(final_idx)])
+
+        selected = candidates[final_idx]
+
+        print("Selected candidates (exploit + explore):")
+        for i, idx in enumerate(final_idx):
+            vec = candidates[idx]
             cfg = decode_vec(vec)
-            print(f"  {i+1}: freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}")
+            tag = "exploit" if idx in exploit_idx else "explore"
+            print(
+                f"  {i+1}: [{tag}] EHVI={ehvi_values[idx]:.6g} | UNC={unc_score[idx]:.6g} | freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}"
+            )
 
         # Evaluate selected candidates on hardware
         print("Evaluating selected candidates on hardware...")
@@ -781,7 +940,7 @@ def main() -> None:
         )
 
     # Save Pareto frontier to logs directory
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/notvm"
     os.makedirs(logs_dir, exist_ok=True)
     csv_path = os.path.join(logs_dir, "results_pareto_frontier.csv")
     with open(csv_path, "w") as f:

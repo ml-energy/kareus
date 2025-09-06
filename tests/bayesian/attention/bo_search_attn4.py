@@ -113,7 +113,10 @@ def one_hot_encode(x: np.ndarray) -> np.ndarray:
 
     x: [sm_idx, block_idx, overlap_idx]
     """
-    numeric = np.array([x[FREQ_IDX], x[SM_IDX]], dtype=np.float32)
+    # numeric = np.array([x[FREQ_IDX], x[SM_IDX]], dtype=np.float32)
+    # Use actual MHz value for frequency instead of the categorical index
+    freq_mhz = float(FREQ_VALUES[int(x[FREQ_IDX])])
+    numeric = np.array([freq_mhz, x[SM_IDX]], dtype=np.float32)
     block_one_hot = np.zeros(len(BLOCK_VALUES), dtype=np.float32)
     block_one_hot[int(x[BLOCK_IDX])] = 1.0
     overlap_one_hot = np.zeros(len(OVERLAP_WINDOWS), dtype=np.float32)
@@ -305,7 +308,7 @@ def measure_on_hardware(
     os.makedirs(logs_dir, exist_ok=True)
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
-    master_port = random.randint(8000, 65535)
+    master_port = 9000
     manager = mp.Manager()
     shared_results = manager.dict()
 
@@ -449,20 +452,35 @@ def try_load_initial_from_cache(
 # Surrogate models and EHVI
 # -----------------------------
 
+AUTOTVM_PARAMS = {
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "max_depth": 10,
+    "eta": 0.1,                # learning rate
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 1,
+    "gamma": 0,
+    "reg_alpha": 0,
+    "reg_lambda": 1,
+    "tree_method": "hist",     # fast on CPU; switch to 'gpu_hist' if you really want GPU
+}
+
 def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.ndarray):
     dtrain_energy = xgb.DMatrix(X_encoded, label=y_energy)
     dtrain_time = xgb.DMatrix(X_encoded, label=y_time)
-    params = {
-        "objective": "reg:squarederror",
-        "eval_metric": "rmse",
-        "max_depth": 6,
-        "eta": 0.3,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "min_child_weight": 1,
-    }
-    energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
-    time_model = xgb.train(params, dtrain_time, num_boost_round=100)
+    # params = {
+    #     "objective": "reg:squarederror",
+    #     "eval_metric": "rmse",
+    #     "max_depth": 6,
+    #     "eta": 0.3,
+    #     "subsample": 0.8,
+    #     "colsample_bytree": 0.8,
+    #     "min_child_weight": 1,
+    # }
+    params = AUTOTVM_PARAMS
+    energy_model = xgb.train(params, dtrain_energy, num_boost_round=200)
+    time_model = xgb.train(params, dtrain_time, num_boost_round=200)
     return energy_model, time_model
 
 
@@ -563,9 +581,9 @@ def main() -> None:
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default="A40")
 
-    parser.add_argument("--n_init", type=int, default=16)
-    parser.add_argument("--batches", type=int, default=8)
-    parser.add_argument("--acq_batch", type=int, default=4, help="New evaluations per batch")
+    parser.add_argument("--n_init", type=int, default=128)
+    parser.add_argument("--batches", type=int, default=16)
+    parser.add_argument("--acq_batch", type=int, default=32, help="New evaluations per batch")
     parser.add_argument("--use_effective_energy", action="store_true",
                         help="Use effective energy instead of real energy for GBT training (Pareto frontier still uses effective energy)")
     parser.add_argument("--normalize_objectives", action="store_true",
@@ -587,7 +605,7 @@ def main() -> None:
     # Configure frequency values based on GPU type
     global FREQ_VALUES
     if args.gpu_type == "A40":
-        FREQ_VALUES = list(map(int, np.arange(1740, 900 - 30, -30)))
+        FREQ_VALUES = list(map(int, np.arange(1740, 1000 - 30, -30)))
         # FREQ_VALUES = [1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000]
     else:  # A100
         FREQ_VALUES = list(map(int, np.arange(1410, 900 - 15, -15)))
@@ -693,15 +711,37 @@ def main() -> None:
         else:
             print("  Using raw objectives without normalization")
         
-        # Score via EHVI and select top-K
+        # Score via EHVI and select mixed batch: half exploit (top EHVI), half explore (random)
         ehvi_values: List[float] = []
         for vec in candidates:
             ehvi = expected_hypervolume_improvement(vec, current_front, models, ref_point, normalization_bounds)
             ehvi_values.append(ehvi)
-        top_idx = np.argsort(ehvi_values)[-args.acq_batch:]
-        selected = candidates[top_idx]
 
-        print("Selected candidates:")
+        total_need = int(args.acq_batch)
+        if total_need <= 0:
+            print("  acq_batch <= 0; skipping selection.")
+            break
+        exploit_k = int(math.ceil(total_need / 2.0))
+        exploit_k = min(exploit_k, candidates.shape[0])
+        top_idx = np.argsort(ehvi_values)[-exploit_k:]
+        exploit_selected = candidates[top_idx]
+
+        # Remove exploited indices from pool for exploration
+        mask = np.ones(candidates.shape[0], dtype=bool)
+        mask[top_idx] = False
+        explore_pool = candidates[mask]
+
+        explore_k = total_need - exploit_k
+        if explore_k > 0 and explore_pool.shape[0] > 0:
+            rng = np.random.RandomState(1000 + ib)
+            take = min(explore_k, explore_pool.shape[0])
+            rand_idx = rng.choice(explore_pool.shape[0], size=take, replace=False)
+            explore_selected = explore_pool[rand_idx]
+            selected = np.vstack([exploit_selected, explore_selected])
+        else:
+            selected = exploit_selected
+
+        print("Selected candidates (exploit then explore):")
         for i, vec in enumerate(selected):
             cfg = decode_vec(vec)
             print(f"  {i+1}: freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}")
@@ -781,7 +821,7 @@ def main() -> None:
         )
 
     # Save Pareto frontier to logs directory
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/notvm"
     os.makedirs(logs_dir, exist_ok=True)
     csv_path = os.path.join(logs_dir, "results_pareto_frontier.csv")
     with open(csv_path, "w") as f:

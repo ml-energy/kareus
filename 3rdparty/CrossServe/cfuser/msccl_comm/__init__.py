@@ -84,7 +84,10 @@ def msccl_AllReduce_init(
         else:
             dist_list = [None]
 
-        dist.broadcast_object_list(dist_list, src=0, group=sub_group)
+        # Get the first rank in the subgroup to use as source
+        group_ranks = dist.get_process_group_ranks(sub_group)
+        src_rank = group_ranks[0]
+        dist.broadcast_object_list(dist_list, src=src_rank, group=sub_group)
 
         unique_id = dist_list[0]
 
