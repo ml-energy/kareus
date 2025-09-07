@@ -166,9 +166,11 @@ class TEFusibleLinear(Linear):
                 rng_tracker_fn = _get_cuda_rng_tracker_fn()
         
         if parallel_mode == "row":
-            use_persistent_output = True
+            use_persistent_output_fwd = True
+            use_persistent_output_bwd = False
         else:
-            use_persistent_output = False
+            use_persistent_output_fwd = False
+            use_persistent_output_bwd = True
 
         # Initialize the FusedOperation-based Linear layer
         super().__init__(
@@ -184,7 +186,7 @@ class TEFusibleLinear(Linear):
             sequence_parallel=config.sequence_parallel,
             rng_state_tracker_function=rng_tracker_fn,
             accumulate_into_main_grad=False,  # Let Megatron handle gradient accumulation
-            use_persistent_output=use_persistent_output,
+            use_persistent_output=(use_persistent_output_fwd, use_persistent_output_bwd),
             num_batches=2,  # 2 nanobatches per microbatch
             batch_size=get_micro_batch_size() // 2, # nanobatch size
             seq_length=config.max_sequence_length,

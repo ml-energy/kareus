@@ -228,7 +228,7 @@ class TransformerBlock(MegatronModule):
             mlp_bda = mlp_layer.post_mlp_bda
     
     def _init_layer_tensor_parallel_comm(self):
-        comm_tensor1 = None
+        comm_tensor1 = self.attention_layers[0].get_persistent_outputs_bwd(1) # TODO: first layer
         num_layers = len(self.attention_layers)
         for l_no in range(num_layers):
             attention_layer = self.attention_layers[l_no]
@@ -251,7 +251,7 @@ class TransformerBlock(MegatronModule):
             current_hidden_2 = mlp_layer.get_persistent_outputs_fwd(2)
             comm_tensor1 = current_hidden_2
         
-        comm_tensor2 = None
+        comm_tensor2 = self.mlp_layers[-1].get_persistent_outputs_fwd(2) # TODO: last layer
         for l_no in range(num_layers - 1, -1, -1):
             mlp_layer = self.mlp_layers[l_no]
             attention_layer = self.attention_layers[l_no]
@@ -272,7 +272,14 @@ class TransformerBlock(MegatronModule):
 
             current_grad_1 = attention_layer.get_persistent_outputs_bwd(1)
             comm_tensor2 = current_grad_1
-            
+        
+        for l_no in range(num_layers):
+            attention_layer = self.attention_layers[l_no]
+            mlp_layer = self.mlp_layers[l_no]
+
+            attention_layer.build_attention_fuser()
+            mlp_layer.build_mlp_fuser()
+     
 
     def _get_attention_layer(self, layer_number: int):
         return self.attention_layers[layer_number]
@@ -451,9 +458,9 @@ class TransformerBlock(MegatronModule):
                 # through attention, then both nano-batches through MLP
                 current_hidden_1 = hidden_states_1
                 current_hidden_2 = hidden_states_2
-                residual_1 = None
-                residual_2 = None
-                comm_hidden_1 = None
+                residual_1 = hidden_states_2  # TODO: for first layer
+                residual_2 = hidden_states_1
+                comm_hidden_1 = (hidden_states_2, None) # TODO: first layer
                 current_context_1 = context_1
                 current_context_2 = context_2
                 
@@ -487,7 +494,8 @@ class TransformerBlock(MegatronModule):
                             sequence_len_offset=sequence_len_offset_1,
                         )
                         comm_hidden_2 = current_hidden_1
-                        current_hidden_2 = comm_hidden_1 if comm_hidden_1 is not None else current_hidden_2
+                        # current_hidden_2 = comm_hidden_1 if comm_hidden_1 is not None else current_hidden_2
+                        current_hidden_2 = comm_hidden_1 if not l_no == 0 else current_hidden_2
                         
                         # Micro-batch 2 attention
                         current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(

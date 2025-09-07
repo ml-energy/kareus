@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 import math
-from typing import Any, Optional, List, Tuple
+from typing import Any, Optional, List, Tuple, Union
 
 import torch
 
@@ -97,7 +97,7 @@ class BasicLinear(BasicOperation):
         accumulate_into_main_grad: bool = False,
         userbuffers_options: Optional[dict[str, Any]] = None,
         bias_fusable: bool = False,
-        use_persistent_output: bool = False,
+        use_persistent_output: Union[bool, Tuple[bool, bool]] = False,
         num_batches: int = 1,
         batch_size: Optional[int] = None,
         seq_length: Optional[int] = None,
@@ -164,10 +164,20 @@ class BasicLinear(BasicOperation):
         # Whether bias is fusable
         self.bias_fusable: bool = bias_fusable
 
-        self.use_persistent_output: bool = use_persistent_output
         self.num_batches: int = num_batches
-        self.persistent_outputs: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        if use_persistent_output:
+        self.persistent_outputs_fwd: List[torch.Tensor] = []
+        self.persistent_outputs_bwd: List[torch.Tensor] = []
+
+        if isinstance(use_persistent_output, bool):
+            use_persistent_output_fwd = use_persistent_output
+            use_persistent_output_bwd = use_persistent_output
+        else:
+            use_persistent_output_fwd = use_persistent_output[0]
+            use_persistent_output_bwd = use_persistent_output[1]
+        self.use_persistent_output_fwd: bool = use_persistent_output_fwd
+        self.use_persistent_output_bwd: bool = use_persistent_output_bwd
+
+        if use_persistent_output_fwd:
             assert batch_size is not None and seq_length is not None, "batch_size and seq_length must be provided when use_persistent_output is True"
             for _ in range(num_batches):
                 persistent_output = torch.empty(
@@ -178,7 +188,12 @@ class BasicLinear(BasicOperation):
                     dtype=dtype,
                     memory_format=torch.contiguous_format
                 )
-                persistent_grad_input = torch.empty(
+                self.persistent_outputs_fwd.append(persistent_output)
+
+        if use_persistent_output_bwd:
+            assert batch_size is not None and seq_length is not None, "batch_size and seq_length must be provided when use_persistent_output is True"
+            for i in range(num_batches):
+                persistent_output = torch.empty(
                     seq_length,
                     batch_size,
                     self.local_in_features,
@@ -186,7 +201,7 @@ class BasicLinear(BasicOperation):
                     dtype=dtype,
                     memory_format=torch.contiguous_format
                 )
-                self.persistent_outputs.append((persistent_output, persistent_grad_input))
+                self.persistent_outputs_bwd.append(persistent_output)
 
     @classmethod
     def _canonicalize_tensor_parallelism(
@@ -931,8 +946,8 @@ class BasicLinear(BasicOperation):
             dtype = torch.get_autocast_dtype("cuda")
 
         # Linear forward
-        if self.use_persistent_output and input_requires_grad:
-            persist_out = self.persistent_outputs[batch_idx][0]
+        if self.use_persistent_output_fwd and input_requires_grad:
+            persist_out = self.persistent_outputs_fwd[batch_idx]
         else:
             persist_out = None
         output, x_local, _ = BasicLinear._functional_forward(
@@ -990,8 +1005,8 @@ class BasicLinear(BasicOperation):
             accumulate_into_main_grad = False
 
         # Linear backward pass
-        if self.use_persistent_output and ctx.input_requires_grad:
-            persist_out = self.persistent_outputs[ctx.batch_idx][1]
+        if self.use_persistent_output_bwd and ctx.input_requires_grad:
+            persist_out = self.persistent_outputs_bwd[ctx.batch_idx]
         else:
             persist_out = None
         grad_input, grad_weight = BasicLinear._functional_backward(

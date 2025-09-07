@@ -48,12 +48,13 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
         residual: torch.Tensor,
         rotary_pos_emb: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor],
-        allreduce_input: Optional[torch.Tensor],
-        allreduce_overlap_window: Optional[Tuple[int, int]],
-        allreduce_sm_configs: Optional[Tuple[int, int]],
-        allreduce_overlap_window_backward: Optional[Tuple[int, int]],
-        allreduce_sm_configs_backward: Optional[Tuple[int, int]],
-        allreduce_comm_op: Optional[FusibleOperation],
+        comm_input: Optional[torch.Tensor],
+        comm_overlap_window: Optional[Tuple[int, int]],
+        comm_sm_configs: Optional[Tuple[int, int]],
+        comm_overlap_window_backward: Optional[Tuple[int, int]],
+        comm_sm_configs_backward: Optional[Tuple[int, int]],
+        comm_op_fwd: Optional[FusibleOperation],
+        comm_op_bwd: Optional[FusibleOperation],
         forward_ops: list[tuple[FusibleOperation, list[int]]],
         backward_ops: list[tuple[FusibleOperation, list[int]]],
         basic_ops: list[BasicOperation],
@@ -100,25 +101,25 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = [OperationContext() for _ in range(len(basic_ops))]
 
         current_stream = torch.cuda.current_stream()
-        if allreduce_comm_op:
-            ar_start, ar_end = allreduce_overlap_window
-            if allreduce_sm_configs:
-                sm_num, block_size = allreduce_sm_configs
+        if comm_op_fwd:
+            ar_start, ar_end = comm_overlap_window
+            if comm_sm_configs:
+                sm_num, block_size = comm_sm_configs
             else:
                 sm_num, block_size = None, None
         else:
             ar_start, ar_end = -1, -1
 
-        if ar_start == -1 and allreduce_comm_op is not None:
+        if ar_start == -1 and comm_op_fwd is not None:
             current_stream.synchronize()
-            allreduce_comm_op.fuser_forward(
-                [None], allreduce_input,
+            comm_op_fwd.fuser_forward(
+                [None], comm_input,
                 basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
             )
-            allreduce_comm_op.sync()
+            comm_op_fwd.sync()
         
         # if ar_start == 0:
-        #     allreduce_comm_op.event_record(current_stream)
+        #     comm_op.event_record(current_stream)
 
         # Apply forward ops
         x = hidden_states
@@ -166,11 +167,11 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
 
             if ar_start == fused_idx:
                 # Wait for the event from the previous operation before starting allreduce
-                # allreduce_comm_op.event_wait()
+                # comm_op.event_wait()
                 current_stream.synchronize()
-                allreduce_comm_op.fuser_forward(
+                comm_op_fwd.fuser_forward(
                     [OperationContext()],
-                    allreduce_input,
+                    comm_input,
                     basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
                 )
 
@@ -185,10 +186,10 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
 
             # Record event after the operation at fused_idx-1 completes
             # if fused_idx == ar_start - 1:
-            #     allreduce_comm_op.event_record(current_stream)
+            #     comm_op.event_record(current_stream)
 
             if ar_end == fused_idx:
-                allreduce_comm_op.sync()
+                comm_op_fwd.sync()
 
             # Get extra outputs
             if isinstance(op, QKVPostProcessOp):
@@ -220,9 +221,9 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             func_ctx.save_for_backward(*to_save)
 
             # Other context
-            func_ctx.allreduce_window_backward = allreduce_overlap_window_backward
-            func_ctx.allreduce_sm_configs_backward = allreduce_sm_configs_backward
-            func_ctx.allreduce_comm_op = allreduce_comm_op
+            func_ctx.comm_window_backward = comm_overlap_window_backward
+            func_ctx.comm_sm_configs_backward = comm_sm_configs_backward
+            func_ctx.comm_op_bwd = comm_op_bwd
             func_ctx.backward_ops = backward_ops
             func_ctx.basic_ops = basic_ops
             func_ctx.basic_op_ctxs = basic_op_ctxs
@@ -230,7 +231,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
 
         current_stream.synchronize()
         assert get_bias and get_residual, f"get_bias: {get_bias}, get_residual: {get_residual}"
-        return x, bias, residual, allreduce_input
+        return x, bias, residual, comm_input
 
     @staticmethod
     @torch.autograd.function.once_differentiable
@@ -239,14 +240,14 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
         grad_output: torch.Tensor,
         grad_bias: torch.Tensor,
         grad_residual: torch.Tensor,
-        grad_allreduce_input: torch.Tensor,
+        grad_comm_input: torch.Tensor,
     ) -> tuple[Optional[torch.Tensor], ...]:
         """Backward pass"""
 
         # Operations and autograd state
-        allreduce_comm_op = func_ctx.allreduce_comm_op
-        allreduce_overlap_window = func_ctx.allreduce_window_backward
-        allreduce_sm_configs = func_ctx.allreduce_sm_configs_backward
+        comm_op_bwd = func_ctx.comm_op_bwd
+        comm_overlap_window = func_ctx.comm_window_backward
+        comm_sm_configs = func_ctx.comm_sm_configs_backward
         backward_ops = func_ctx.backward_ops
         basic_ops = func_ctx.basic_ops
         basic_op_ctxs = func_ctx.basic_op_ctxs
@@ -257,25 +258,25 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 ctx.saved_tensors = func_ctx.saved_tensors[slice(*ctx._saved_tensors_range)]
 
         current_stream = torch.cuda.current_stream()
-        if allreduce_comm_op:
-            ar_start, ar_end = allreduce_overlap_window
-            if allreduce_sm_configs:
-                sm_num, block_size = allreduce_sm_configs
+        if comm_op_bwd:
+            ar_start, ar_end = comm_overlap_window
+            if comm_sm_configs:
+                sm_num, block_size = comm_sm_configs
             else:
                 sm_num, block_size = None, None
         else:
             ar_start, ar_end = -1, -1
 
-        if ar_start == -1 and allreduce_comm_op is not None:
+        if ar_start == -1 and comm_op_bwd is not None:
             current_stream.synchronize()
-            allreduce_comm_op.fuser_forward(
-                [None], grad_allreduce_input,
+            comm_op_bwd.fuser_forward(
+                [None], grad_comm_input,
                 basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
             )
-            allreduce_comm_op.sync()
+            comm_op_bwd.sync()
     
         # if ar_start == 0:
-        #     allreduce_comm_op.event_record(current_stream)
+        #     comm_op.event_record(current_stream)
 
         # Apply backward ops
         dx = grad_output
@@ -301,10 +302,10 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 grad_extra_outputs = [(grad_bias,)]
 
             if ar_start == fused_idx:
-                # allreduce_comm_op.event_wait()
+                # comm_op.event_wait()
                 current_stream.synchronize()
-                allreduce_comm_op.fuser_forward(
-                    [None], grad_allreduce_input,
+                comm_op_bwd.fuser_forward(
+                    [None], grad_comm_input,
                     basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
                 )
 
@@ -319,10 +320,10 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 basic_op_ctxs[idx].saved_tensors = None
 
             # if fused_idx == ar_start - 1:
-            #     allreduce_comm_op.event_record(current_stream)
+            #     comm_op.event_record(current_stream)
 
             if ar_end == fused_idx:
-                allreduce_comm_op.sync()
+                comm_op_bwd.sync()
 
             if isinstance(op, BiasDropoutAddOp):
                 grad_bias, grad_residual = fused_op_grad_extra_inputs[0]
@@ -363,12 +364,13 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             grad_residual,  # residual  
             grad_rotary_pos_emb,  # rotary_pos_emb
             None,  # attention_mask
-            grad_allreduce_input,  # allreduce_input
-            None,  # allreduce_overlap_window
-            None,  # allreduce_sm_configs
-            None,  # allreduce_overlap_window_backward
-            None,  # allreduce_sm_configs_backward
-            None,  # allreduce_comm_op
+            grad_comm_input,  # comm_input
+            None,  # comm_overlap_window
+            None,  # comm_sm_configs
+            None,  # comm_overlap_window_backward
+            None,  # comm_sm_configs_backward
+            None,  # comm_op_fwd
+            None,  # comm_op_bwd
             None,  # forward_ops
             None,  # backward_ops
             None,  # basic_ops
@@ -393,7 +395,8 @@ class PartitionFuser:
     def __init__(
         self,
         ops: list[FusibleOperation],
-        allreduce_comm_op: Optional[FusibleOperation] = None,
+        comm_op_fwd: Optional[FusibleOperation] = None,
+        comm_op_bwd: Optional[FusibleOperation] = None,
         fuse_ops: bool = True,    
     ) -> None:
 
@@ -416,7 +419,8 @@ class PartitionFuser:
         self._forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
         self._backward_ops = list(reversed(self._forward_ops))
 
-        self._allreduce_comm_op = allreduce_comm_op
+        self._comm_op_fwd = comm_op_fwd
+        self._comm_op_bwd = comm_op_bwd if comm_op_bwd is not None else comm_op_fwd
 
         # Fuse ops if needed
         if fuse_ops:
@@ -458,11 +462,11 @@ class PartitionFuser:
         residual: torch.Tensor = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        allreduce_input: Optional[torch.Tensor] = None,
-        allreduce_overlap_window: Optional[Tuple[int, int]] = None,
-        allreduce_sm_configs: Optional[Tuple[int, int]] = None,
-        allreduce_overlap_window_backward: Optional[Tuple[int, int]] = None,
-        allreduce_sm_configs_backward: Optional[Tuple[int, int]] = None,
+        comm_input: Optional[torch.Tensor] = None,
+        comm_overlap_window: Optional[Tuple[int, int]] = None,
+        comm_sm_configs: Optional[Tuple[int, int]] = None,
+        comm_overlap_window_backward: Optional[Tuple[int, int]] = None,
+        comm_sm_configs_backward: Optional[Tuple[int, int]] = None,
     ) -> tuple[torch.Tensor, ...]: # hidden_states, bias, residual
 
         # Initialization before forward pass
@@ -486,12 +490,13 @@ class PartitionFuser:
             residual,
             rotary_pos_emb,
             attention_mask,
-            allreduce_input,
-            allreduce_overlap_window,
-            allreduce_sm_configs,
-            allreduce_overlap_window_backward,
-            allreduce_sm_configs_backward,
-            self._allreduce_comm_op,
+            comm_input,
+            comm_overlap_window,
+            comm_sm_configs,
+            comm_overlap_window_backward,
+            comm_sm_configs_backward,
+            self._comm_op_fwd,
+            self._comm_op_bwd,
             self._forward_ops,
             self._backward_ops,
             self._basic_ops,

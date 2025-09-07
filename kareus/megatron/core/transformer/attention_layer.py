@@ -45,20 +45,20 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
     comm_scheduler = config.kareus_scheduler
     if comm_scheduler is None:
         return {
-            "allreduce_overlap_window": (-1, -1),
-            "allreduce_sm_configs": (20, 1024),
-            "allreduce_overlap_window_backward": (-1, -1),
-            "allreduce_sm_configs_backward": (20, 1024),
+            "comm_overlap_window": (0, 8),
+            "comm_sm_configs": (None, None),
+            "comm_overlap_window_backward": (0, 8),
+            "comm_sm_configs_backward": (None, None),
         }
     else:
         print("using comm scheduler")
         assert comm_scheduler.current_schedule is not None, "current_schedule is not set"
         # TODO: first layer
         return {
-            "allreduce_overlap_window": comm_scheduler.current_schedule[0].attn.overlap_window,
-            "allreduce_sm_configs": comm_scheduler.current_schedule[0].attn.resource_shape,
-            "allreduce_overlap_window_backward": comm_scheduler.current_schedule[1].attn.overlap_window,
-            "allreduce_sm_configs_backward": comm_scheduler.current_schedule[1].attn.resource_shape,
+            "comm_overlap_window": comm_scheduler.current_schedule[0].attn.overlap_window,
+            "comm_sm_configs": comm_scheduler.current_schedule[0].attn.resource_shape,
+            "comm_overlap_window_backward": comm_scheduler.current_schedule[1].attn.overlap_window,
+            "comm_sm_configs_backward": comm_scheduler.current_schedule[1].attn.resource_shape,
         }
 
 
@@ -84,6 +84,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
 
         self.tp_comms = []
+        self.attention_fusers = []
 
         # [Module 1: Prev MLP BDA] Optional BDA on the previous MLP output
         self.prev_mlp_bda = None
@@ -123,33 +124,48 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
         # self.bias_dropout_add_exec_handler = torch.enable_grad
 
-    def build_attention_fuser(self, batch_idx):  # TODO: handle different layers
-        # if self.is_first_layer:
-        #     comp_ops = [self.input_layernorm]
-        # else:
-        #     comp_ops = [self.post_self_attn_bda, self.input_layernorm]
+    # def build_attention_fuser(self, batch_idx):  # TODO: handle different layers
+    #     # if self.is_first_layer:
+    #     #     comp_ops = [self.input_layernorm]
+    #     # else:
+    #     #     comp_ops = [self.post_self_attn_bda, self.input_layernorm]
+    #     comp_ops = [self.post_self_attn_bda, self.input_layernorm] # TODO: first layer
+    #     comp_ops.extend(self.self_attention.get_compute_ops())
+    #     attention_fuser = PartitionFuser(
+    #         ops=comp_ops,
+    #         comm_op_fwd=self.tp_comms[batch_idx - 1][0],
+    #         comm_op_bwd=self.tp_comms[batch_idx - 1][1],
+    #         fuse_ops=False,
+    #     )
+    #     return attention_fuser
+
+    def build_attention_fuser(self):
+        assert len(self.tp_comms) == 2, "tp_comms is not initialized"
         comp_ops = [self.post_self_attn_bda, self.input_layernorm] # TODO: first layer
         comp_ops.extend(self.self_attention.get_compute_ops())
-        attention_fuser = PartitionFuser(
-            ops=comp_ops,
-            allreduce_comm_op=self.tp_comms[batch_idx - 1][0],
-            fuse_ops=False,
-        )
-        return attention_fuser
+        for i in range(len(self.tp_comms)):
+            self.attention_fusers.append(
+                PartitionFuser(
+                    ops=comp_ops,
+                    comm_op_fwd=self.tp_comms[i][0],
+                    comm_op_bwd=self.tp_comms[i][1],
+                    fuse_ops=False,
+                )
+            )
     
     def init_tensor_parallel_comm_fwd(self, batch_idx, comm_tensor):
-        if self.is_first_layer and batch_idx == 1:
-            fwd_comm = None
-        else:
-            fwd_comm = AllReduce(
-                process_group=get_tensor_model_parallel_group(check_initialized=False),
-                async_op=True,
-                backend="msccl",
-                rank=get_tensor_model_parallel_rank(),
-                world_size=get_tensor_model_parallel_world_size(),
-                use_persistent_output=True,
-                input_buffer=comm_tensor,
-            )
+        # if self.is_first_layer and batch_idx == 1: # TODO: first layer
+        #     fwd_comm = None
+        # else:
+        fwd_comm = AllReduce(
+            process_group=get_tensor_model_parallel_group(check_initialized=False),
+            async_op=True,
+            backend="msccl",
+            rank=get_tensor_model_parallel_rank(),
+            world_size=get_tensor_model_parallel_world_size(),
+            use_persistent_output=True,
+            input_buffer=comm_tensor,
+        )
         assert len(self.tp_comms) == batch_idx - 1, "batch_idx is not correct"
         self.tp_comms.append([fwd_comm, None])
     
@@ -166,10 +182,10 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         self.tp_comms[batch_idx - 1][1] = bwd_comm
 
     def get_persistent_outputs_fwd(self, batch_idx: int):
-        return self.self_attention.get_persistent_outputs()[batch_idx - 1][0]
+        return self.self_attention.get_persistent_outputs_fwd()[batch_idx - 1]
     
     def get_persistent_outputs_bwd(self, batch_idx: int):
-        return self.self_attention.get_persistent_outputs()[batch_idx - 1][1]
+        return self.self_attention.get_persistent_outputs_bwd()[batch_idx - 1]
         
     def forward(
         self,
@@ -200,23 +216,22 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
                 context (Tensor): Updated context tensor if cross-attention is used.
         """
         assert context is None, "context is not supported"
-        attention_fuser = self.build_attention_fuser(batch_idx)
+        # attention_fuser = self.build_attention_fuser(batch_idx)
 
         if self.is_first_layer:
             hidden_states = hidden_states
             bias = None
-            residual = hidden_states
+            # residual = hidden_states
         else:
             hidden_states, bias = hidden_states
 
-        output, output_bias, output_residual, allreduce_output = attention_fuser(  # TODO: add dropout_prob and training
+        output, output_bias, output_residual, allreduce_output = self.attention_fusers[batch_idx - 1](  # TODO: add dropout_prob and training
             hidden_states=hidden_states,
             bias=bias,
             residual=residual,
             rotary_pos_emb=rotary_pos_emb,
             attention_mask=attention_mask,
-            allreduce_input=comm_hidden_states[0] if comm_hidden_states is not None else None,
-            # allreduce_input=comm_hidden_states[0],
+            comm_input=comm_hidden_states[0] if comm_hidden_states is not None else None,
             **get_fuser_comm_kwargs(self.config),
         )
         output_hidden_states = (output, output_bias)

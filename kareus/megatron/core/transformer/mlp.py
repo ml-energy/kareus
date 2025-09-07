@@ -107,8 +107,11 @@ class MLP(MegatronModule):
     def get_compute_ops(self):
         return [self.linear_fc1, self.bias_swiglu_op, self.linear_fc2]
     
-    def get_persistent_outputs(self):
-        return self.linear_fc2.persistent_outputs
+    def get_persistent_outputs_fwd(self):
+        return self.linear_fc2.persistent_outputs_fwd
+    
+    def get_persistent_outputs_bwd(self):
+        return self.linear_fc1.persistent_outputs_bwd
 
     def forward(self, 
         batch_idx: int,

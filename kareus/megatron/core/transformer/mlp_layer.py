@@ -31,18 +31,18 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
     comm_scheduler = config.kareus_scheduler
     if comm_scheduler is None:
         return {
-            "allreduce_overlap_window": (-1, -1),
-            "allreduce_sm_configs": (20, 1024),
-            "allreduce_overlap_window_backward": (-1, -1),
-            "allreduce_sm_configs_backward": (20, 1024),
+            "comm_overlap_window": (0, 6),
+            "comm_sm_configs": (None, None),
+            "comm_overlap_window_backward": (0, 6),
+            "comm_sm_configs_backward": (None, None),
         }
     else:
         assert comm_scheduler.current_schedule is not None, "current_schedule is not set"
         return {
-            "allreduce_overlap_window": comm_scheduler.current_schedule[0].mlp.overlap_window,
-            "allreduce_sm_configs": comm_scheduler.current_schedule[0].mlp.resource_shape,
-            "allreduce_overlap_window_backward": comm_scheduler.current_schedule[1].mlp.overlap_window,
-            "allreduce_sm_configs_backward": comm_scheduler.current_schedule[1].mlp.resource_shape,
+            "comm_overlap_window": comm_scheduler.current_schedule[0].mlp.overlap_window,
+            "comm_sm_configs": comm_scheduler.current_schedule[0].mlp.resource_shape,
+            "comm_overlap_window_backward": comm_scheduler.current_schedule[1].mlp.overlap_window,
+            "comm_sm_configs_backward": comm_scheduler.current_schedule[1].mlp.resource_shape,
         }
 
 
@@ -81,6 +81,7 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         self.is_last_layer = layer_number == num_layers
 
         self.tp_comms = []
+        self.mlp_fusers = []
 
         # [Module 1: Prev attention BDA] Optional BDA on the previous attention output
         self.prev_self_attn_bda = None
@@ -110,15 +111,29 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         # Note: BiasDropoutAddOp now handles torch.enable_grad() internally
         # self.bias_dropout_add_exec_handler = torch.enable_grad
     
-    def build_mlp_fuser(self, batch_idx):  # TODO: handle different layers
+    # def build_mlp_fuser(self, batch_idx):  # TODO: handle different layers
+    #     comp_ops = [self.post_mlp_bda, self.pre_mlp_layernorm]
+    #     comp_ops.extend(self.mlp.get_compute_ops())
+    #     mlp_fuser = PartitionFuser(
+    #         ops=comp_ops,
+    #         allreduce_comm_op=self.tp_comms[batch_idx - 1][0],
+    #         fuse_ops=False,
+    #     )
+    #     return mlp_fuser
+
+    def build_mlp_fuser(self):  # TODO: handle different layers
+        assert len(self.tp_comms) == 2, "tp_comms is not initialized"
         comp_ops = [self.post_mlp_bda, self.pre_mlp_layernorm]
         comp_ops.extend(self.mlp.get_compute_ops())
-        mlp_fuser = PartitionFuser(
-            ops=comp_ops,
-            allreduce_comm_op=self.tp_comms[batch_idx - 1][0],
-            fuse_ops=False,
-        )
-        return mlp_fuser
+        for i in range(len(self.tp_comms)):
+            self.mlp_fusers.append(
+                PartitionFuser(
+                    ops=comp_ops,
+                    comm_op_fwd=self.tp_comms[i][0],
+                    comm_op_bwd=self.tp_comms[i][1],
+                    fuse_ops=False,
+                )
+            )
     
     def init_tensor_parallel_comm_fwd(self, batch_idx, comm_tensor):
         fwd_comm = AllReduce(
@@ -134,32 +149,32 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         self.tp_comms.append([fwd_comm, None])
     
     def init_tensor_parallel_comm_bwd(self, batch_idx, comm_tensor):
-        if self.is_last_layer and batch_idx == 2:
-            bwd_comm = None
-        else:
-            bwd_comm = AllReduce(
-                process_group=get_tensor_model_parallel_group(check_initialized=False),
-                async_op=True,
-                backend="msccl",
-                rank=get_tensor_model_parallel_rank(),
-                world_size=get_tensor_model_parallel_world_size(),
-                use_persistent_output=True,
-                input_buffer=comm_tensor,
-            )
+        # if self.is_last_layer and batch_idx == 2: # TODO: last layer
+        #     bwd_comm = None
+        # else:
+        bwd_comm = AllReduce(
+            process_group=get_tensor_model_parallel_group(check_initialized=False),
+            async_op=True,
+            backend="msccl",
+            rank=get_tensor_model_parallel_rank(),
+            world_size=get_tensor_model_parallel_world_size(),
+            use_persistent_output=True,
+            input_buffer=comm_tensor,
+        )
         self.tp_comms[batch_idx - 1][1] = bwd_comm
 
     def get_persistent_outputs_fwd(self, batch_idx: int):
-        return self.mlp.get_persistent_outputs()[batch_idx - 1][0]
+        return self.mlp.get_persistent_outputs_fwd()[batch_idx - 1]
     
     def get_persistent_outputs_bwd(self, batch_idx: int):
-        return self.mlp.get_persistent_outputs()[batch_idx - 1][1]
+        return self.mlp.get_persistent_outputs_bwd()[batch_idx - 1]
         
     def forward(self, 
         batch_idx: int,
         hidden_states: Tensor, 
         residual: Tensor, 
         comm_hidden_states: Optional[Tensor] = None
-    ): # TODO: comm_hidden_states to be all-reduced
+    ):
         """
         Perform a forward pass through the feed-forward layer.
 
@@ -170,15 +185,15 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         Returns:
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
-        mlp_fuser = self.build_mlp_fuser(batch_idx)
+        # mlp_fuser = self.build_mlp_fuser(batch_idx)
 
         hidden_states, bias = hidden_states
 
-        output, output_bias, output_residual, allreduce_output = mlp_fuser(
+        output, output_bias, output_residual, allreduce_output = self.mlp_fusers[batch_idx - 1](
             hidden_states=hidden_states,
             bias=bias,
             residual=residual,
-            allreduce_input=comm_hidden_states[0],
+            comm_input=comm_hidden_states[0],
             **get_fuser_comm_kwargs(self.config),
         )
         # if self.is_last_layer:

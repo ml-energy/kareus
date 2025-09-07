@@ -161,8 +161,13 @@ class Attention(MegatronModule, ABC):
         qkv_ops = self.get_query_key_value_tensors_ops()
         return qkv_ops + [self.core_attention, self.linear_proj]
     
-    def get_persistent_outputs(self):
-        return self.linear_proj.persistent_outputs
+    def get_persistent_outputs_fwd(self):
+        return self.linear_proj.persistent_outputs_fwd
+    
+    def get_persistent_outputs_bwd(self):
+        qkv_ops = self.get_query_key_value_tensors_ops()
+        linear_qkv = qkv_ops[0]
+        return linear_qkv.persistent_outputs_bwd
 
     def _checkpointed_attention_forward(
         self,

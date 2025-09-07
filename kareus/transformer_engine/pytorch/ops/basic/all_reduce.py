@@ -112,7 +112,14 @@ class AllReduce(BasicOperation):
         x = x.contiguous()
         
         if self.backend == "msccl":
-            assert sm_num is not None and block_size is not None, "sm_num and block_size must be provided for msccl backend"
+            # assert sm_num is not None and block_size is not None, "sm_num and block_size must be provided for msccl backend"
+            if sm_num is None or block_size is None:
+                # fall back to nccl backend
+                self._work_handle = torch.distributed.all_reduce(x, group=self.process_group,
+                    async_op=self.async_op,
+                )
+                self.backend = "nccl"
+                return x
             if self.use_persistent_output:
                 msccl_comm.msccl_AllReduce(sm_num, block_size)
                 return self.output_buffer
