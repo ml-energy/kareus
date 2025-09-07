@@ -39,9 +39,9 @@ logger = logging.getLogger()
 @dataclass
 class Args:
     # Path to instruction profile results
-    inst_profile: str = "nemo_experiments/megatron_llama_3_2_3b/profiling/profile.csv"
+    inst_profile: str = "profile.csv"
     # Directory to output results
-    output_dir: str = "nemo_experiments/megatron_llama_3_2_3b/perseus_results"
+    output_dir: str = "nemo_experiments/megatron_llama_3_2_3b/kareus_results"
     # Number of microbatchs
     num_mbs: int = 2
     # Number of stages
@@ -88,13 +88,16 @@ def main(args: Args) -> None:
             )
             for _, row in _df.iterrows():
                 row = row.to_dict()
-                # if row["frequency"] in [1710, 1605, 1500, 1410, 1305, 1200, 1110, 1005]:
                 options.append(
-                    ExecutionOption[int](
+                    ExecutionOption[tuple[int, str, str]](
                         real_time=row["time"],
                         unit_time=args.unit_time,
                         cost=row["energy"],
-                        knob=int(row["frequency"]),
+                        knob=(
+                            int(row["frequency"]),
+                            str(row.get("attention_configs", "")),
+                            str(row.get("mlp_configs", "")),
+                        ),
                     )
                 )
 
@@ -104,9 +107,9 @@ def main(args: Args) -> None:
                 option.cost -= args.p2p_power * option.quant_time * option.unit_time
 
             # Get the Preto frontier, quantize time, and deduplicate time.
-            cand_options = CandidateExecutionOptions[int](options=options)
+            cand_options = CandidateExecutionOptions[tuple[int, str, str]](options=options)
             if len(cand_options.options) <= 3:
-                cand_options = CandidateExecutionOptions[int](
+                cand_options = CandidateExecutionOptions[tuple[int, str, str]](
                     options=options, noise_factor=args.noise_factor
                 )
 
@@ -119,7 +122,7 @@ def main(args: Args) -> None:
             fig.savefig(f"{output_dir}/{inst_name.lower()}_{stage_id}.png")
 
             # Initialize the operation spec.
-            op_spec = OperationSpec[int](options=cand_options, cost_model=model)
+            op_spec = OperationSpec[tuple[int, str, str]](options=cand_options, cost_model=model)
             op_spec_map[stage_id][instruction] = op_spec
 
     ####################
@@ -210,21 +213,60 @@ def main(args: Args) -> None:
                 draw_xlim = int(result.real_time) + 1
             draw(dag, iteration, draw_xlim)
 
-        # Write the frequency assignment Python file.
-        f = open(output_dir / f"freqs_pipeline_{iteration:05d}.py", "w")
-        f.write("[\n")
-        for stage_id, stage_insts in enumerate(instructions):
-            stage_freq: list[tuple[str, int]] = []
-            for inst in stage_insts:
-                stage_freq.append((type(inst).__name__.lower(), inst.assigned_knob))
-            f.write(f"{stage_freq},\n")
-        f.write("]\n")
+        # Write frequency assignments and separate configs per iteration.
+        f_freqs = open(output_dir / f"freqs_pipeline_{iteration:05d}.py", "w")
+        f_cfgs = open(output_dir / f"scheds_pipeline_{iteration:05d}.py", "w")
 
+        # Write top-level lists
+        f_freqs.write("[\n")
+        f_cfgs.write("[\n")
+
+        for stage_id, stage_insts in enumerate(instructions):
+            stage_freq = []
+            # For configs, group by microbatch id and store (forward_tuple, backward_tuple)
+            stage_cfgs_by_mb: dict[int, dict[str, tuple[str, str, str]]] = defaultdict(dict)
+            for inst in stage_insts:
+                inst_name = type(inst).__name__.lower()
+                knob = inst.assigned_knob
+                # Expect knob to be a tuple: (frequency, attention_configs, mlp_configs)
+                if isinstance(knob, tuple):
+                    freq = knob[0] if len(knob) > 0 else None
+                    attn_cfg = knob[1] if len(knob) > 1 else ""
+                    mlp_cfg = knob[2] if len(knob) > 2 else ""
+                else:
+                    freq = knob
+                    attn_cfg = ""
+                    mlp_cfg = ""
+                stage_freq.append((inst_name, freq))
+                # Save config tuple under its microbatch id and instruction name
+                stage_cfgs_by_mb[inst.micro_batch_id][inst_name] = (inst_name, attn_cfg, mlp_cfg)
+
+            f_freqs.write(f"{stage_freq},\n")
+            # Build a list ordered by microbatch id, each entry is (forward_tuple, backward_tuple)
+            stage_mb_cfgs: list[tuple[tuple[str, str, str], tuple[str, str, str]]] = []
+            for mb_id in range(args.num_mbs):
+                mb_cfgs = stage_cfgs_by_mb.get(mb_id, {})
+                fwd_tuple = mb_cfgs.get("forward", ("forward", "", ""))
+                bwd_tuple = mb_cfgs.get("backward", ("backward", "", ""))
+                stage_mb_cfgs.append((fwd_tuple, bwd_tuple))
+            f_cfgs.write(f"{stage_mb_cfgs},\n")
+
+        f_freqs.write("]\n")
+        f_cfgs.write("]\n")
+
+        # Append iteration cost info to the configs file
         iter_str = f"# Iteration {iteration} "
         real_cost = result.cost + args.num_stages * result.real_time * args.p2p_power
-        f.write(iter_str + f"cost change: {result.cost_change}\n")
-        f.write(iter_str + f"total cost: {result.cost}\n")
-        f.write(iter_str + f"total cost with P2P: {real_cost}\n")
+        f_cfgs.write(iter_str + f"cost change: {result.cost_change}\n")
+        f_cfgs.write(iter_str + f"total cost: {result.cost}\n")
+        f_cfgs.write(iter_str + f"total cost with P2P: {real_cost}\n")
+        f_freqs.write(iter_str + f"cost change: {result.cost_change}\n")
+        f_freqs.write(iter_str + f"total cost: {result.cost}\n")
+        f_freqs.write(iter_str + f"total cost with P2P: {real_cost}\n")
+
+        # Close files
+        f_freqs.close()
+        f_cfgs.close()
 
     assert draw_xlim is not None
     draw(dag, iteration, draw_xlim)

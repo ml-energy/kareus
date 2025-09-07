@@ -46,9 +46,9 @@ def main(
 
     # Enumerate supported GPU frequencies.
     if gpu_type == "A100":
-        freqs = np.arange(1410, 885, -30).tolist()
+        freqs = np.arange(1410, 960 - 15, -15).tolist()
     elif gpu_type == "A40":
-        freqs = np.arange(1740, 1300, -15).tolist()
+        freqs = np.arange(1740, 1000 - 15, -15).tolist()
     else:
         raise ValueError(f"Unsupported GPU type {gpu_type}.")
     print(f"Frequencies: {freqs}")
@@ -193,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_microbatches", default=2, type=int, help="Number of microbatches.")
     parser.add_argument("--num_prof_iters", default=100, type=int, help="Number of profiling iterations.")
     parser.add_argument("--warmup_iters", default=10, type=int, help="Number of warmup iterations.")
-    parser.add_argument("--gpu_type", default="A40", choices=["A40", "A100"], help="Name of the GPU type.")
+    parser.add_argument("--gpu_type", default="A100", choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--tensor_parallel_size", default=2, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
     args = parser.parse_args()
 

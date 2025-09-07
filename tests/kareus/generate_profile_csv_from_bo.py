@@ -38,16 +38,17 @@ def read_prepost_profile(
     Expects files in:
       {prepost_profile_dir}/logs/tp{tp}-bs{bs}-seq{seq}/{freq}/(preprocess|postprocess|loss)_energy.csv
       {prepost_profile_dir}/logs/tp{tp}-bs{bs}-seq{seq}/{freq}/(preprocess|postprocess)_backward_energy.csv
-    Returns a list (per frequency) of dict: {
-      "forward-embedding": (time, energy),
-      "forward-output": (time, energy),
-      "loss-func": (time, energy),
-      "backward-embedding": (time, energy),
-      "backward-output": (time, energy),
+    Returns a dict keyed by frequency: {
+      freq: {
+        "forward-embedding": (time, energy),
+        "forward-output": (time, energy),
+        "loss-func": (time, energy),
+        "backward-embedding": (time, energy),
+        "backward-output": (time, energy),
+      }
     }
-    Missing files contribute (0.0, 0.0) with a warning.
     """
-    results = []
+    results: dict[int, dict[str, tuple[float, float]]] = {}
     for frequency in freqs:
         freq_dir = f"{prepost_profile_dir}/logs/tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{frequency}"
         emb_path = f"{freq_dir}/preprocess_energy.csv"
@@ -61,62 +62,58 @@ def read_prepost_profile(
         loss = _read_time_energy_csv(loss_path, tensor_parallel_size)
         emb_bwd = _read_time_energy_csv(emb_bwd_path, tensor_parallel_size)
         out_bwd = _read_time_energy_csv(out_bwd_path, tensor_parallel_size)
-        results.append({
+        results[int(frequency)] = {
             "forward-embedding": emb,
             "forward-output": out,
             "loss-func": loss,
             "backward-embedding": emb_bwd,
             "backward-output": out_bwd,
-        })
+        }
     return results
 
 
-def process_partition_profiling_results(
-    partition_profile_dir: str,
+def read_bo_partition_results(
+    bayesian_profile_dir: str,
     partition: str,
-    result_name: str,
+    direction: str,
     tensor_parallel_size: int,
     batch_size: int,
     seq_len: int,
-    freqs: list[int],
 ):
-    partition_profiling_results = []
+    """Read BO results from results_all.csv and group by frequency.
 
-    for frequency in freqs:
-        freq_dir = f"{partition_profile_dir}/{partition}/logs/tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{frequency}"
-        print(f"Processing partition frequency {frequency} Hz (directory: {freq_dir}).")
-        
-        # Read energy_results.csv file for this frequency
-        result_file = f"{freq_dir}/{result_name}.csv"
-        if not os.path.exists(result_file):
-            print(f"  Warning: {result_file} not found, skipping.")
-            continue
-            
-        df = pd.read_csv(result_file)
-        print(f"  Found {len(df)} partition configuration results.")
-        
-        partition_result = []
-        for _, row in df.iterrows():
-            # Extract the key components
-            overlap_start = int(row['overlap_start'])
-            overlap_end = int(row['overlap_end'])
-            comm_sm_number = int(row['comm_sm_number'])
-            comm_block_size = int(row['comm_block_size'])
-            
-            # Extract time and energy values
-            time_val = float(row['0:time (s)'])
-            total_energy = float(row['0:total energy (J)'])
-            
-            # Create the key tuple
-            key = (overlap_start, overlap_end, comm_sm_number, comm_block_size)
-            value = (time_val, total_energy / tensor_parallel_size)
-            
-            # Store the time and energy values
-            partition_result.append((key, value))
-        
-        partition_profiling_results.append(partition_result)
-    
-    return partition_profiling_results
+    Path example:
+      {bayesian_profile_dir}/{partition}/logs/tp{tp}-bs{bs}-seq{seq}/{direction}/results_all.csv
+    CSV columns expected: frequency,overlap_start,overlap_end,comm_sm_number,comm_block_size,time_s,avg_energy_J,(...)
+
+    Returns dict: { frequency: [((overlap_start, overlap_end, comm_sm_number, comm_block_size), (time, energy))] }
+    """
+    results_by_freq: dict[int, list[tuple[tuple[int, int, int, int], tuple[float, float]]]] = {}
+    base_dir = f"{bayesian_profile_dir}/{partition}/logs/tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{direction}"
+    csv_path = f"{base_dir}/results_all.csv"
+    if not os.path.exists(csv_path):
+        print(f"Warning: BO results file not found: {csv_path}")
+        return results_by_freq
+
+    df = pd.read_csv(csv_path)
+    if 'frequency' not in df.columns or 'time_s' not in df.columns or 'avg_energy_J' not in df.columns:
+        raise RuntimeError(f"Malformed BO CSV: missing required columns in {csv_path}")
+
+    for _, row in df.iterrows():
+        frequency = int(row['frequency'])
+        overlap_start = int(row['overlap_start'])
+        overlap_end = int(row['overlap_end'])
+        comm_sm_number = int(row['comm_sm_number'])
+        comm_block_size = int(row['comm_block_size'])
+        time_val = float(row['time_s'])
+        energy_val = float(row['avg_energy_J'])
+
+        key = (overlap_start, overlap_end, comm_sm_number, comm_block_size)
+        value = (time_val, energy_val)
+        results_by_freq.setdefault(frequency, []).append((key, value))
+
+    print(f"Loaded {sum(len(v) for v in results_by_freq.values())} BO configs from {csv_path} across {len(results_by_freq)} frequencies.")
+    return results_by_freq
 
 
 def pareto_optimal(config_results: list[tuple[Any, tuple[float, float]]], p2p_power: float) -> list[tuple[Any, tuple[float, float]]]:
@@ -143,9 +140,8 @@ def pareto_optimal(config_results: list[tuple[Any, tuple[float, float]]], p2p_po
 
 
 def main(
-    partition_profile_dir: str,
+    bayesian_profile_dir: str,
     prepost_profile_dir: str,
-    gpu_type: Literal["A100", "A40"],
     tensor_parallel_size: int,
     pipeline_parallel_size: int,
     batch_size: int,
@@ -154,46 +150,40 @@ def main(
     p2p_power: float,
 ) -> None:
     """Run the main routine."""
-    print(f"Processing decoupled profiling results in {partition_profile_dir} and {prepost_profile_dir}.")
+    print(f"Processing BO partition results in {bayesian_profile_dir} and pre/post results in {prepost_profile_dir}.")
 
-    # Enumerate supported GPU frequencies.
-    if gpu_type == "A100":
-        freqs = [1400, 1300, 1200, 1100, 1000]
-    elif gpu_type == "A40":
-        freqs = [1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000]
-    else:
-        raise ValueError(f"Unsupported GPU type {gpu_type}.")
-    print(f"Frequencies: {freqs}")
+    # Load BO partitioning results grouped by frequency
+    attention_fwd_map = read_bo_partition_results(
+        bayesian_profile_dir, "attention", "forward",
+        tensor_parallel_size, batch_size, seq_len,
+    )
+    mlp_fwd_map = read_bo_partition_results(
+        bayesian_profile_dir, "mlp", "forward",
+        tensor_parallel_size, batch_size, seq_len,
+    )
+    attention_bwd_map = read_bo_partition_results(
+        bayesian_profile_dir, "attention", "backward",
+        tensor_parallel_size, batch_size, seq_len,
+    )
+    mlp_bwd_map = read_bo_partition_results(
+        bayesian_profile_dir, "mlp", "backward",
+        tensor_parallel_size, batch_size, seq_len,
+    )
 
-    # Read pre/post process results directly from profiler CSVs
+    # Determine usable frequencies as intersection across all partitions/directions
+    freqs_set = set(attention_fwd_map.keys()) & set(mlp_fwd_map.keys()) & set(attention_bwd_map.keys()) & set(mlp_bwd_map.keys())
+    if not freqs_set:
+        raise RuntimeError("No overlapping frequencies found across BO results for attention/mlp forward/backward.")
+    freqs = sorted(freqs_set)
+    print(f"Frequencies from BO results: {freqs}")
+
+    # Read pre/post process results directly from profiler CSVs for these frequencies
     prepost_profiling_results = read_prepost_profile(
         prepost_profile_dir,
         tensor_parallel_size,
         batch_size,
         seq_len,
         freqs,
-    )
-
-    # Process the results of partitioning of transformer block
-    # partition_profiling_results[0] = [
-    #     ((overlap_start, overlap_end, comm_sm_number, comm_block_size), (time, energy)),
-    #     ......
-    # ]
-    attention_fwd_results = process_partition_profiling_results(
-        partition_profile_dir, "attention", "energy_results",
-        tensor_parallel_size, batch_size, seq_len, freqs,
-    )
-    mlp_fwd_results = process_partition_profiling_results(
-        partition_profile_dir, "mlp", "energy_results",
-        tensor_parallel_size, batch_size, seq_len, freqs,
-    )
-    attention_bwd_results = process_partition_profiling_results(
-        partition_profile_dir, "attention", "backward_energy_results", 
-        tensor_parallel_size, batch_size, seq_len, freqs,
-    )
-    mlp_bwd_results = process_partition_profiling_results(
-        partition_profile_dir, "mlp", "backward_energy_results",
-        tensor_parallel_size, batch_size, seq_len, freqs,
     )
 
     profile_csv = open("profile.csv", "w")
@@ -205,11 +195,9 @@ def main(
     backward_points_by_stage: dict[int, list[tuple[tuple[int, tuple[int, int, int, int], tuple[int, int, int, int]], tuple[float, float]]]] = {s: [] for s in range(pipeline_parallel_size)}
 
     # forward candidates
-    for freq_idx, frequency in enumerate(freqs):
-        if freq_idx >= len(attention_fwd_results) or freq_idx >= len(mlp_fwd_results):
-            continue
-        attention_fwd_result = pareto_optimal(attention_fwd_results[freq_idx], p2p_power)
-        mlp_fwd_result = pareto_optimal(mlp_fwd_results[freq_idx], p2p_power)
+    for frequency in freqs:
+        attention_fwd_result = pareto_optimal(attention_fwd_map.get(frequency, []), p2p_power)
+        mlp_fwd_result = pareto_optimal(mlp_fwd_map.get(frequency, []), p2p_power)
 
         for attn_config, attn_result in attention_fwd_result:
             for mlp_config, mlp_result in mlp_fwd_result:
@@ -220,21 +208,19 @@ def main(
                     fwd_time = base_time
                     fwd_energy = base_energy
                     if stage == 0:
-                        fwd_time += prepost_profiling_results[freq_idx]["forward-embedding"][0]
-                        fwd_energy += prepost_profiling_results[freq_idx]["forward-embedding"][1]
+                        fwd_time += prepost_profiling_results[frequency]["forward-embedding"][0]
+                        fwd_energy += prepost_profiling_results[frequency]["forward-embedding"][1]
                     elif stage == pipeline_parallel_size - 1:
-                        fwd_time += prepost_profiling_results[freq_idx]["forward-output"][0]
-                        fwd_time += prepost_profiling_results[freq_idx]["loss-func"][0]
-                        fwd_energy += prepost_profiling_results[freq_idx]["forward-output"][1]
-                        fwd_energy += prepost_profiling_results[freq_idx]["loss-func"][1]
+                        fwd_time += prepost_profiling_results[frequency]["forward-output"][0]
+                        fwd_time += prepost_profiling_results[frequency]["loss-func"][0]
+                        fwd_energy += prepost_profiling_results[frequency]["forward-output"][1]
+                        fwd_energy += prepost_profiling_results[frequency]["loss-func"][1]
                     forward_points_by_stage[stage].append(((frequency, attn_config, mlp_config), (fwd_time, fwd_energy)))
 
     # backward candidates
-    for freq_idx, frequency in enumerate(freqs):
-        if freq_idx >= len(attention_bwd_results) or freq_idx >= len(mlp_bwd_results):
-            continue
-        attention_bwd_result = pareto_optimal(attention_bwd_results[freq_idx], p2p_power)
-        mlp_bwd_result = pareto_optimal(mlp_bwd_results[freq_idx], p2p_power)
+    for frequency in freqs:
+        attention_bwd_result = pareto_optimal(attention_bwd_map.get(frequency, []), p2p_power)
+        mlp_bwd_result = pareto_optimal(mlp_bwd_map.get(frequency, []), p2p_power)
 
         for attn_config, attn_result in attention_bwd_result:
             for mlp_config, mlp_result in mlp_bwd_result:
@@ -245,11 +231,11 @@ def main(
                     bwd_time = base_time
                     bwd_energy = base_energy
                     if stage == 0:
-                        bwd_time += prepost_profiling_results[freq_idx]["backward-embedding"][0]
-                        bwd_energy += prepost_profiling_results[freq_idx]["backward-embedding"][1]
+                        bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0]
+                        bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1]
                     elif stage == pipeline_parallel_size - 1:
-                        bwd_time += prepost_profiling_results[freq_idx]["backward-output"][0]
-                        bwd_energy += prepost_profiling_results[freq_idx]["backward-output"][1]
+                        bwd_time += prepost_profiling_results[frequency]["backward-output"][0]
+                        bwd_energy += prepost_profiling_results[frequency]["backward-output"][1]
                     backward_points_by_stage[stage].append(((frequency, attn_config, mlp_config), (bwd_time, bwd_energy)))
 
     # Write only globally Pareto-optimal points across frequency+configs per stage/instruction.
@@ -272,9 +258,8 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--partition_profile_dir", default="/workspaces/Kareus/tests/fuser", help="Directory containing profiling results.")
+    parser.add_argument("--bayesian_profile_dir", default="/workspaces/Kareus/tests/bayesian", help="Directory containing BO results.")
     parser.add_argument("--prepost_profile_dir", default="/workspaces/Kareus/tests/fuser/prepost", help="Directory containing profiling results.")
-    parser.add_argument("--gpu_type", default="A40", choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--tensor_parallel_size", default=2, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
     parser.add_argument("--pipeline_parallel_size", default=2, type=int, help="Number of pipeline-parallel stages.")
     parser.add_argument("--batch_size", default=4, type=int, help="Batch size.")
@@ -284,9 +269,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(
-        args.partition_profile_dir,
+        args.bayesian_profile_dir,
         args.prepost_profile_dir,
-        args.gpu_type,
         args.tensor_parallel_size,
         args.pipeline_parallel_size,
         args.batch_size,

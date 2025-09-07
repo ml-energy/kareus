@@ -16,8 +16,7 @@ from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingO
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range
@@ -44,7 +43,6 @@ def init_distributed(rank, world_size, backend: str = 'nccl'):
     tp_group = dist.new_group(ranks)
     print(f"Created tensor parallel group with ranks: {ranks}")
     return tp_group
-
 
 class AttentionFuserTest:
     """Test suite for attention fuser operations."""
@@ -75,8 +73,8 @@ class AttentionFuserTest:
             num_attention_heads=self.num_attention_heads,
             num_query_groups=self.num_query_groups,
             layernorm_epsilon=1e-5,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
             qk_layernorm=False,
             apply_query_key_layer_scaling=False,
             rotary_interleaved=False,
@@ -412,7 +410,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
+    parser.add_argument("--batch_size", "-b", type=int, default=8)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()

@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Bayesian optimization for attention fuser overlap-window and communication configs
+Bayesian optimization for attention fuser backward overlap-window and communication configs
 using real hardware measurements (time and energy) per candidate.
 
-This script reuses the AttentionFuserTest execution path to evaluate a single
-configuration by spawning a distributed run and measuring via ZeusMonitor.
+This script adapts the forward-path optimizer to evaluate the backward pass by spawning
+distributed runs and measuring via ZeusMonitor.
 
 Search algorithm:
 - Surrogate models: two XGBoost regressors (energy, time)
 - Acquisition: Expected Hypervolume Improvement (deterministic proxy)
-- Discrete search space: overlap window (categorical), number of SMs (ordinal),
+- Discrete search space: overlap window (categorical; backward set), number of SMs (ordinal),
   CUDA block size (categorical)
 
 Note on GPU frequency:
@@ -36,7 +36,7 @@ from torch.multiprocessing import spawn
 from typing import Dict, List, Tuple, Optional
 import pandas as pd
 
-# Local imports: make current dir importable, then import the test harness
+# Local imports: make current dir importable
 CUR_DIR = os.path.dirname(__file__)
 if CUR_DIR not in sys.path:
     sys.path.append(CUR_DIR)
@@ -66,12 +66,12 @@ from botorch.utils.multi_objective.hypervolume import Hypervolume
 # Search space and encodings
 # -----------------------------
 
-# Align overlap windows with AttentionFuserTest.get_overlap_windows()
+# Align overlap windows with AttentionFuserBackwardTest.get_backward_overlap_windows()
 OVERLAP_WINDOWS: List[Tuple[int, int]] = [
     (-1, -1),
-    (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
-    (0, 3), (2, 5), (4, 6), (6, 8),
-    (0, 5), (2, 6), (4, 8),
+    (0, 1), (2, 2), (3, 4), (5, 6), (7, 8),
+    (0, 2), (2, 4), (3, 6), (5, 8),
+    (0, 4), (2, 6), (3, 8),
     (0, 6), (2, 8),
     (0, 8),
 ]
@@ -116,7 +116,6 @@ def one_hot_encode(x: np.ndarray) -> np.ndarray:
     # Use actual MHz value for frequency instead of the categorical index
     freq_mhz = float(FREQ_VALUES[int(x[FREQ_IDX])])
     numeric = np.array([freq_mhz, x[SM_IDX]], dtype=np.float32)
-    # numeric = np.array([x[FREQ_IDX], x[SM_IDX]], dtype=np.float32)
     block_one_hot = np.zeros(len(BLOCK_VALUES), dtype=np.float32)
     block_one_hot[int(x[BLOCK_IDX])] = 1.0
     overlap_one_hot = np.zeros(len(OVERLAP_WINDOWS), dtype=np.float32)
@@ -141,7 +140,7 @@ def decode_vec(x: np.ndarray) -> Dict[str, int]:
 
 
 # -----------------------------
-# Real evaluation via distributed run
+# Real evaluation via distributed run (backward)
 # -----------------------------
 
 def _set_gpu_frequency(target_freq_mhz: int, device_indices: List[int] | None = None) -> None:
@@ -175,10 +174,9 @@ def _dist_eval_worker(
     shared_results: dict,
 ) -> None:
     """
-    Distributed worker: run a single configuration and measure time/energy.
+    Distributed worker: run a single backward configuration and measure time/energy.
     Only rank 0 writes results into shared_results dictionary and file.
     """
-    # try:
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = str(rank)
@@ -201,21 +199,45 @@ def _dist_eval_worker(
         fuse_ops=False,
     )
 
-    # Warmup to determine iteration count
+    # Prepare gradient tensors for backward pass
+    nano_batch_size = test.batch_size // 2
+    output_grad = torch.randn(
+        test.seq_length, nano_batch_size, test.hidden_size,
+        dtype=test.dtype, device=test.device
+    )
+    residual_grad = torch.randn(
+        test.seq_length, nano_batch_size, test.hidden_size,
+        dtype=test.dtype, device=test.device
+    )
+    allreduce_input_grad = torch.randn(
+        test.seq_length, nano_batch_size, test.hidden_size,
+        dtype=test.dtype, device=test.device
+    )
+
+    # Warmup to determine iteration count (forward once to build graph, then backward)
     torch.cuda.synchronize()
     dist.barrier()
     for i in range(10):
+        if i == 0:
+            output, output_bias, output_residual, allreduce_output = attention_fuser(
+                hidden_states=hidden_states,
+                bias=bias,
+                residual=residual,
+                rotary_pos_emb=rotary_pos_emb,
+                attention_mask=attention_mask,
+                allreduce_input=allreduce_inputs,
+                # Keep forward with no overlap; optimize backward overlap via candidates
+                allreduce_overlap_window=(-1, -1),
+                allreduce_sm_configs=(20, 1024),
+                allreduce_overlap_window_backward=overlap_window,
+                allreduce_sm_configs_backward=(sm_num, block_size),
+            )
         if i == 2:
             time_start = time.time()
-        _ = attention_fuser(
-            hidden_states=hidden_states,
-            bias=bias,
-            residual=residual,
-            rotary_pos_emb=rotary_pos_emb,
-            attention_mask=attention_mask,
-            allreduce_input=allreduce_inputs,
-            allreduce_overlap_window=overlap_window,
-            allreduce_sm_configs=(sm_num, block_size),
+        torch.autograd.backward(
+            tensors=[output, output_residual, allreduce_output],
+            grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
+            retain_graph=True,
         )
     torch.cuda.synchronize()
     dist.barrier()
@@ -230,7 +252,7 @@ def _dist_eval_worker(
     dist.broadcast_object_list(obj_list, src=0, group=test.tp_group)
     iterations = obj_list[0]
 
-    # Measure in a single window with ZeusMonitor on rank 0
+    # Measure backward in a single window with ZeusMonitor on rank 0
     monitor = ZeusMonitor(gpu_indices=list(range(world_size))) if rank == 0 else None
 
     torch.cuda.synchronize()
@@ -238,15 +260,10 @@ def _dist_eval_worker(
     if rank == 0:
         monitor.begin_window("step")
     for _ in range(iterations):
-        _ = attention_fuser(
-            hidden_states=hidden_states,
-            bias=bias,
-            residual=residual,
-            rotary_pos_emb=rotary_pos_emb,
-            attention_mask=attention_mask,
-            allreduce_input=allreduce_inputs,
-            allreduce_overlap_window=overlap_window,
-            allreduce_sm_configs=(sm_num, block_size),
+        torch.autograd.backward(
+            tensors=[output, output_residual, allreduce_output],
+            grad_tensors=[output_grad, residual_grad, allreduce_input_grad],
+            retain_graph=True,
         )
     torch.cuda.synchronize()
     dist.barrier()
@@ -264,11 +281,11 @@ def _dist_eval_worker(
             "time_s": avg_time_s,
             "energy_j": avg_energy_j,
         }
-        
+
         # Store results in shared dictionary
         shared_results["energy_j"] = avg_energy_j
         shared_results["time_s"] = avg_time_s
-        
+
         # Still write to file for logging
         with open(eval_log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
@@ -305,11 +322,11 @@ def measure_on_hardware(
     _set_gpu_frequency(freq_mhz, device_indices=target_indices)
 
     # Persistent evaluation log file per run
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/backward"
     os.makedirs(logs_dir, exist_ok=True)
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
-    master_port = 9002
+    master_port = 9003
     manager = mp.Manager()
     shared_results = manager.dict()
 
@@ -349,34 +366,34 @@ def measure_from_profile_results(
     sm_num = cfg["sm"]
     block_size = cfg["block"]
     freq_mhz = int(cfg["freq"])
-    
+
     logs_dir = f"tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
-    csv_file_path = os.path.join(logs_base_dir, logs_dir, str(freq_mhz), "energy_results.csv")
-    
+    csv_file_path = os.path.join(logs_base_dir, logs_dir, str(freq_mhz), "backward_energy_results.csv")
+
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"Profile results not found at: {csv_file_path}")
-    
+
     df = pd.read_csv(csv_file_path)
-    
+
     matching_rows = df[
         (df['overlap_start'] == overlap_start) &
         (df['overlap_end'] == overlap_end) &
         (df['comm_sm_number'] == sm_num) &
         (df['comm_block_size'] == block_size)
     ]
-    
+
     if matching_rows.empty:
         print(
             f"Configuration not found in {csv_file_path}: "
             f"overlap=({overlap_start},{overlap_end}), sm={sm_num}, block={block_size}"
         )
         return 300.0, 1.0
-    
+
     row = matching_rows.iloc[0]
-    
+
     time_s = float(row["0:time (s)"])
     energy_j = float(row["0:total energy (J)"]) / args.world_size
-    
+
     return energy_j, time_s
 
 
@@ -395,7 +412,7 @@ def try_load_initial_from_cache(
       (use_cached_initial, X_train, X_train_encoded, init_time, init_eff_energy, init_avg_energy, all_records)
     If not cached, use_cached_initial is False and X_train fields are None.
     """
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/backward"
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
     init_time: List[float] = []
@@ -479,7 +496,6 @@ def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.nda
         "colsample_bytree": 0.8,
         "min_child_weight": 1,
     }
-    # params = AUTOTVM_PARAMS
     energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
     time_model = xgb.train(params, dtrain_time, num_boost_round=100)
     return energy_model, time_model
@@ -524,7 +540,6 @@ def train_xgb_ensemble(
             "min_child_weight": 1,
             "seed": int(base_seed + i),
         }
-        # params = {**AUTOTVM_PARAMS, "seed": int(base_seed + i)}
         energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
         time_model = xgb.train(params, dtrain_time, num_boost_round=100)
         ensemble.append((energy_model, time_model))
@@ -600,21 +615,21 @@ def expected_hypervolume_improvement(
 ) -> float:
     """
     Calculate expected hypervolume improvement with normalized objectives.
-    
+
     Args:
         candidate_vec: Candidate configuration vector
         pareto_front: Current Pareto front points
         models: Trained surrogate models
         ref_point: Reference point for hypervolume calculation
         normalization_bounds: Tuple of (min_vals, max_vals) for normalization
-    
+
     Returns:
         Expected hypervolume improvement
     """
     candidate_encoded = one_hot_encode(candidate_vec).reshape(1, -1)
     e_pred, t_pred = predict_performance(models, candidate_encoded)
     predicted_point = np.array([[e_pred[0], t_pred[0]]], dtype=np.float64)
-    
+
     # Apply normalization if bounds are provided
     if normalization_bounds is not None:
         min_vals, max_vals = normalization_bounds
@@ -636,7 +651,7 @@ def expected_hypervolume_improvement(
         current_hv = current_hv_cached if current_hv_cached is not None else calculate_dominated_hypervolume(pareto_front, ref_point)
         new_front = np.vstack([pareto_front, predicted_point])
         new_hv = calculate_dominated_hypervolume(new_front, ref_point)
-    
+
     return float(max(0.0, new_hv - current_hv))
 
 
@@ -694,7 +709,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print("===============================================")
-    print("Bayesian Optimization for Attention Fuser (real measurements)")
+    print("Bayesian Optimization for Attention Fuser (backward; real measurements)")
     print("===============================================")
     print(f"World size: {args.world_size}")
     print(f"Batch size: {args.batch_size}")
@@ -709,7 +724,6 @@ def main() -> None:
     global FREQ_VALUES
     if args.gpu_type == "A40":
         FREQ_VALUES = list(map(int, np.arange(1740, 1000 - 30, -30)))
-        # FREQ_VALUES = [1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000]
     else:  # A100
         FREQ_VALUES = list(map(int, np.arange(1410, 960 - 15, -15)))
     print(f"Frequency search set has {len(FREQ_VALUES)} values (min={min(FREQ_VALUES)}, max={max(FREQ_VALUES)})")
@@ -724,13 +738,13 @@ def main() -> None:
     all_configs = generate_all_configurations()
     total_configs = len(all_configs)
     n_init = min(args.n_init, total_configs)
-    
+
     use_cached_initial, X_train_cached, X_train_encoded_cached, init_time, init_eff_energy, init_avg_energy, all_records = try_load_initial_from_cache(
         args=args,
         p2p_power_w=p2p_power_w,
         n_init=n_init,
     )
-    
+
     if not use_cached_initial:
         init_indices = random.sample(range(total_configs), n_init)
         X_train = np.array([all_configs[i] for i in init_indices])
@@ -765,11 +779,11 @@ def main() -> None:
     y_energy_eff = np.array(init_eff_energy, dtype=np.float64)  # effective energy
     y_time = np.array(init_time, dtype=np.float64)
     y_energy_real = np.array(init_avg_energy, dtype=np.float64)  # real energy
-    
+
     # Select energy type for training based on parameter
     y_energy_for_training = y_energy_eff if args.use_effective_energy else y_energy_real
     print(f"Using {'effective' if args.use_effective_energy else 'real'} energy for GBT training")
-    
+
     # Pareto frontier always uses effective energy
     Y_torch = torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
 
@@ -834,9 +848,8 @@ def main() -> None:
             print(f"  Norm bounds (real) - Energy: [{min_vals_real[0]:.4f}, {max_vals_real[0]:.4f}], Time: [{min_vals_real[1]:.6f}, {max_vals_real[1]:.6f}]")
         else:
             print("  Using raw objectives without normalization")
-        
+
         # Precompute current HV once per batch (optionally using normalization)
-        # Precompute HV caches for both fronts (eff and real)
         current_hv_eff_cached = None
         pareto_front_eff_norm_cached = None
         ref_point_eff_norm_cached = None
@@ -1004,10 +1017,10 @@ def main() -> None:
         y_energy_eff = np.append(y_energy_eff, np.array(new_eff_energy, dtype=np.float64))
         y_time = np.append(y_time, np.array(new_time, dtype=np.float64))
         y_energy_real = np.append(y_energy_real, np.array(new_avg_energy, dtype=np.float64))
-        
+
         # Update training energy array based on parameter
         y_energy_for_training = y_energy_eff if args.use_effective_energy else y_energy_real
-        
+
         # Pareto frontier always uses effective energy
         Y_torch = torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
 
@@ -1030,7 +1043,7 @@ def main() -> None:
 
     # Final Pareto fronts (effective energy and real energy)
     print("\n===============================================")
-    print("Final Energy-vs-Time Pareto Fronts")
+    print("Final Energy-vs-Time Pareto Fronts (Backward)")
     print("===============================================")
     # Effective-energy Pareto
     neg_Y_eff = -torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
@@ -1067,7 +1080,7 @@ def main() -> None:
         )
 
     # Save Pareto frontier to logs directory
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/backward"
     os.makedirs(logs_dir, exist_ok=True)
     # Save effective-energy Pareto frontier
     csv_eff_path = os.path.join(logs_dir, "results_pareto_frontier_effective.csv")

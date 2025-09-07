@@ -12,15 +12,10 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
 from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
-from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
 from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
-from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
-from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
-from megatron.core.transformer.enums import AttnMaskType
+from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range
 import pynvml
@@ -48,62 +43,8 @@ def init_distributed(rank, world_size, backend: str = 'nccl'):
     return tp_group
 
 
-def gpu_temperature_monitor(shared_list, rank):
-    """
-    Child process function that continuously collects GPU temperature data.
-    The data is stored in the 'shared_list' as [timestamp, temperature].
-    """
-    pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(rank)
-
-    try:
-        while True:
-            ts = time.time()
-            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            sm_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
-            power = int(pynvml.nvmlDeviceGetPowerUsage(handle) / 1000)
-            shared_list.append([ts, temp, sm_clock, power])
-            # time.sleep(interval)
-    except:
-        pass
-    finally:
-        pynvml.nvmlShutdown()
-
-
-def temperature_start(temperature_data, rank):
-    p = multiprocessing.Process(
-        target=gpu_temperature_monitor, 
-        args=(temperature_data, rank)
-    )
-    p.start()
-    return p
-
-
-def temperature_end(p, temperature_data):
-    print("Terminating temperature monitoring process")
-    p.terminate()
-    try:
-        p.join(timeout=5)
-        print("Temperature monitoring process joined")
-    except Exception as e:
-        print(f"Error joining temperature monitoring process: {e}")
-    collected_data = list(temperature_data)
-
-    filtered_data = []
-    previous_temp = None
-    previous_clock = None
-    previous_power = None
-    for ts, temp, sm_clock, power in collected_data:
-        if temp != previous_temp or sm_clock != previous_clock or power != previous_power:
-            filtered_data.append([ts, temp, sm_clock, power])
-        previous_temp = temp
-        previous_clock = sm_clock
-        previous_power = power
-    return filtered_data
-
-
 class MLPFuserTest:
-    """Test suite for attention fuser operations."""
+    """Test suite for MLP fuser operations."""
 
     def __init__(self, args, rank: int = 0, world_size: int = 1):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -131,8 +72,8 @@ class MLPFuserTest:
             num_attention_heads=self.num_attention_heads,
             num_query_groups=self.num_query_groups,
             layernorm_epsilon=1e-5,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
             qk_layernorm=False,
             apply_query_key_layer_scaling=False,
             rotary_interleaved=False,
@@ -150,7 +91,7 @@ class MLPFuserTest:
         self.repeat_num = 1
     
     def create_test_tensors(self):
-        """Create test tensors for the attention operations."""
+        """Create test tensors for the MLP operations."""
         nano_batch_size = self.batch_size // 2
         hidden_states = torch.randn(
             self.seq_length, nano_batch_size, self.hidden_size,
@@ -174,7 +115,7 @@ class MLPFuserTest:
         return hidden_states, bias, residual, allreduce_inputs
     
     def create_operations(self, allreduce_inputs):
-        """Create all the required operations for the attention fuser."""
+        """Create all the required operations for the MLP fuser."""
         
         # 1. BDA Operation (Bias Dropout Add)
         bda_op = BiasDropoutAddOp(
@@ -224,34 +165,38 @@ class MLPFuserTest:
             tensor_parallel_size=None,
         )
 
-        allreduce_comm_op = AllReduce(
-            process_group=self.tp_group,
-            async_op=True,
-            backend="msccl",
-            rank=self.rank,
-            world_size=self.world_size,
-            use_persistent_output=True,
-            input_buffer=allreduce_inputs,
-            tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
-            device=self.device,
-            dtype=self.dtype,
-        )
+        # 6. AllReduce Communication Operation
+        if self.tensor_parallel_size > 1:
+            allreduce_comm_op = AllReduce(
+                process_group=self.tp_group,
+                async_op=True,
+                backend="msccl",
+                rank=self.rank,
+                world_size=self.world_size,
+                use_persistent_output=True,
+                input_buffer=allreduce_inputs,
+                tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
+                device=self.device,
+                dtype=self.dtype,
+            )
 
-        return [
-            bda_op,
-            layernorm_op,
-            linear_fc1_op,
-            bias_swiglu_op,
-            linear_fc2_op,
-            allreduce_comm_op,
-        ]
+            return [
+                bda_op,
+                layernorm_op,
+                linear_fc1_op,
+                bias_swiglu_op,
+                linear_fc2_op,
+                allreduce_comm_op,
+            ]
+        else:
+            raise ValueError("Tensor parallel size must be greater than 1")
 
     
     def get_overlap_windows(self):
         overlap_windows = [
-            # (-1, -1),
+            (-1, -1),
             (0, 1), (2, 3), (4, 4), (5, 6),
-            (0, 3), (2, 4), (4, 5),
+            (0, 3), (2, 4), (4, 6),
             (0, 4), (2, 6),
             (0, 6),
         ]
@@ -395,7 +340,7 @@ class MLPFuserTest:
 
 
 def overlap_test(rank, world_size, args, master_port):
-    """Run the attention fuser tests in a distributed environment."""
+    """Run the MLP fuser tests in a distributed environment."""
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = str(rank)
@@ -424,12 +369,12 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
+    parser.add_argument("--batch_size", "-b", type=int, default=8)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()
 
-    print("Running overlap test for attention fuser")
+    print("Running overlap test for MLP fuser")
     print(f"World size: {args.world_size}")
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
@@ -447,4 +392,3 @@ if __name__ == "__main__":
         nprocs=args.world_size,
         join=True,
     )
-    

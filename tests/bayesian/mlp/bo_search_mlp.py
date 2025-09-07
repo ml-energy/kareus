@@ -1,49 +1,33 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Bayesian optimization for attention fuser overlap-window and communication configs
+Bayesian optimization for MLP fuser (forward) overlap-window and communication configs
 using real hardware measurements (time and energy) per candidate.
 
-This script reuses the AttentionFuserTest execution path to evaluate a single
-configuration by spawning a distributed run and measuring via ZeusMonitor.
-
-Search algorithm:
-- Surrogate models: two XGBoost regressors (energy, time)
-- Acquisition: Expected Hypervolume Improvement (deterministic proxy)
-- Discrete search space: overlap window (categorical), number of SMs (ordinal),
-  CUDA block size (categorical)
-
-Note on GPU frequency:
-- This script accepts a frequency argument used for bookkeeping. If desired and
-  permitted, application clocks can be set via NVML (optional; best-effort).
+This script mirrors the attention forward optimizer but targets the MLP fuser.
 """
 
 import os
 import sys
 import time
-import math
 import random
 import argparse
-import itertools
 import json
-import tempfile
-import uuid
 import numpy as np
 import multiprocessing as mp
 import torch
 import torch.distributed as dist
 from torch.multiprocessing import spawn
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 import pandas as pd
 
-# Local imports: make current dir importable, then import the test harness
+# Local imports: make current dir importable
 CUR_DIR = os.path.dirname(__file__)
 if CUR_DIR not in sys.path:
     sys.path.append(CUR_DIR)
 
-from overlap_test_attn import AttentionFuserTest  # noqa: E402
+from overlap_test_mlp import MLPFuserTest  # noqa: E402
 
-# Third-party utilities used by the evaluation path
 from zeus.monitor import ZeusMonitor  # noqa: E402
 from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser  # noqa: E402
 
@@ -66,24 +50,19 @@ from botorch.utils.multi_objective.hypervolume import Hypervolume
 # Search space and encodings
 # -----------------------------
 
-# Align overlap windows with AttentionFuserTest.get_overlap_windows()
 OVERLAP_WINDOWS: List[Tuple[int, int]] = [
     (-1, -1),
-    (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
-    (0, 3), (2, 5), (4, 6), (6, 8),
-    (0, 5), (2, 6), (4, 8),
-    (0, 6), (2, 8),
-    (0, 8),
+    (0, 1), (2, 3), (4, 4), (5, 6),
+    (0, 3), (2, 4), (4, 6),
+    (0, 4), (2, 6),
+    (0, 6),
 ]
 
-# Communication SM counts and CUDA block sizes to consider
 SM_VALUES: List[int] = list(range(1, 21))
 BLOCK_VALUES: List[int] = [512, 1024]
 
-# Frequency values are determined at runtime from --gpu_type
 FREQ_VALUES: List[int] = []
 
-# Feature indices for encoded vectors [freq_idx, sm_idx, block_idx, overlap_idx]
 FREQ_IDX = 0
 SM_IDX = 1
 BLOCK_IDX = 2
@@ -91,15 +70,6 @@ OVERLAP_IDX = 3
 
 
 def encode_cfg(cfg: Dict[str, int]) -> np.ndarray:
-    """
-    Encode configuration to an index vector [sm_idx, block_idx, overlap_idx].
-
-    cfg keys:
-      - freq: actual GPU core frequency (per FREQ_VALUES)
-      - sm: actual SM count (1..20)
-      - block: CUDA block size (512 or 1024)
-      - overlap: overlap window tuple from OVERLAP_WINDOWS
-    """
     freq_idx = FREQ_VALUES.index(cfg["freq"])  # 0..len-1
     sm_idx = SM_VALUES.index(cfg["sm"])  # 0..19
     block_idx = BLOCK_VALUES.index(cfg["block"])  # 0..1
@@ -108,15 +78,8 @@ def encode_cfg(cfg: Dict[str, int]) -> np.ndarray:
 
 
 def one_hot_encode(x: np.ndarray) -> np.ndarray:
-    """
-    One-hot encode categorical features (block, overlap) and keep SM as numeric.
-
-    x: [sm_idx, block_idx, overlap_idx]
-    """
-    # Use actual MHz value for frequency instead of the categorical index
     freq_mhz = float(FREQ_VALUES[int(x[FREQ_IDX])])
     numeric = np.array([freq_mhz, x[SM_IDX]], dtype=np.float32)
-    # numeric = np.array([x[FREQ_IDX], x[SM_IDX]], dtype=np.float32)
     block_one_hot = np.zeros(len(BLOCK_VALUES), dtype=np.float32)
     block_one_hot[int(x[BLOCK_IDX])] = 1.0
     overlap_one_hot = np.zeros(len(OVERLAP_WINDOWS), dtype=np.float32)
@@ -125,9 +88,6 @@ def one_hot_encode(x: np.ndarray) -> np.ndarray:
 
 
 def decode_vec(x: np.ndarray) -> Dict[str, int]:
-    """
-    Decode an index vector [sm_idx, block_idx, overlap_idx] back to a config dict.
-    """
     freq_idx = int(np.clip(round(float(x[FREQ_IDX])), 0, len(FREQ_VALUES) - 1))
     sm_idx = int(np.clip(round(float(x[SM_IDX])), 0, len(SM_VALUES) - 1))
     block_idx = int(np.clip(round(float(x[BLOCK_IDX])), 0, len(BLOCK_VALUES) - 1))
@@ -145,11 +105,6 @@ def decode_vec(x: np.ndarray) -> Dict[str, int]:
 # -----------------------------
 
 def _set_gpu_frequency(target_freq_mhz: int, device_indices: List[int] | None = None) -> None:
-    """Attempt to set application clocks via NVML (best effort).
-
-    If device_indices is provided, only set those NVML indices; otherwise set all
-    NVML-visible devices.
-    """
     if not _NVML_AVAILABLE or target_freq_mhz <= 0:
         return
     pynvml.nvmlInit()
@@ -174,45 +129,34 @@ def _dist_eval_worker(
     master_port: int,
     shared_results: dict,
 ) -> None:
-    """
-    Distributed worker: run a single configuration and measure time/energy.
-    Only rank 0 writes results into shared_results dictionary and file.
-    """
-    # try:
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = f"{master_port}"
 
-    # Initialize the test runner and build ops
-    test = AttentionFuserTest(args, rank=rank, world_size=world_size)
+    test = MLPFuserTest(args, rank=rank, world_size=world_size)
 
-    hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = (
-        test.create_test_tensors()
-    )
+    hidden_states, bias, residual, allreduce_inputs = test.create_test_tensors()
     operations = test.create_operations(allreduce_inputs)
-    comp_ops = operations[:7]
-    allreduce_comm_op = operations[7]
+    comp_ops = operations[:-1]
+    allreduce_comm_op = operations[-1]
 
-    attention_fuser = PartitionFuser(
+    mlp_fuser = PartitionFuser(
         ops=comp_ops,
         allreduce_comm_op=allreduce_comm_op,
         fuse_ops=False,
     )
 
-    # Warmup to determine iteration count
     torch.cuda.synchronize()
     dist.barrier()
     for i in range(10):
         if i == 2:
             time_start = time.time()
-        _ = attention_fuser(
+        _ = mlp_fuser(
             hidden_states=hidden_states,
             bias=bias,
             residual=residual,
-            rotary_pos_emb=rotary_pos_emb,
-            attention_mask=attention_mask,
             allreduce_input=allreduce_inputs,
             allreduce_overlap_window=overlap_window,
             allreduce_sm_configs=(sm_num, block_size),
@@ -230,7 +174,6 @@ def _dist_eval_worker(
     dist.broadcast_object_list(obj_list, src=0, group=test.tp_group)
     iterations = obj_list[0]
 
-    # Measure in a single window with ZeusMonitor on rank 0
     monitor = ZeusMonitor(gpu_indices=list(range(world_size))) if rank == 0 else None
 
     torch.cuda.synchronize()
@@ -238,12 +181,10 @@ def _dist_eval_worker(
     if rank == 0:
         monitor.begin_window("step")
     for _ in range(iterations):
-        _ = attention_fuser(
+        _ = mlp_fuser(
             hidden_states=hidden_states,
             bias=bias,
             residual=residual,
-            rotary_pos_emb=rotary_pos_emb,
-            attention_mask=attention_mask,
             allreduce_input=allreduce_inputs,
             allreduce_overlap_window=overlap_window,
             allreduce_sm_configs=(sm_num, block_size),
@@ -264,12 +205,10 @@ def _dist_eval_worker(
             "time_s": avg_time_s,
             "energy_j": avg_energy_j,
         }
-        
-        # Store results in shared dictionary
+
         shared_results["energy_j"] = avg_energy_j
         shared_results["time_s"] = avg_time_s
-        
-        # Still write to file for logging
+
         with open(eval_log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
@@ -285,31 +224,25 @@ def measure_on_hardware(
     x_vec: np.ndarray,
     args: argparse.Namespace,
 ) -> Tuple[float, float]:
-    """
-    Evaluate a candidate configuration on real hardware by spawning a
-    distributed run and returning (energy_j, time_s).
-    """
     cfg = decode_vec(x_vec)
     overlap_window = cfg["overlap"]
     sm_num = cfg["sm"]
     block_size = cfg["block"]
     freq_mhz = int(cfg["freq"])  # set frequency per candidate
 
-    # Best-effort: set GPU frequency per candidate (parent process) respecting CUDA_VISIBLE_DEVICES
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
     if visible is not None and len(visible.strip()) > 0:
         vis_list = [int(x) for x in visible.split(",") if x.strip() != ""]
         target_indices = vis_list
     else:
-        target_indices = None  # all NVML-visible
+        target_indices = None
     _set_gpu_frequency(freq_mhz, device_indices=target_indices)
 
-    # Persistent evaluation log file per run
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
     os.makedirs(logs_dir, exist_ok=True)
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
-    master_port = 9002
+    master_port = 9010
     manager = mp.Manager()
     shared_results = manager.dict()
 
@@ -340,44 +273,203 @@ def measure_from_profile_results(
     args: argparse.Namespace,
     logs_base_dir: str = "/workspaces/Kareus/tests/fuser/attention/logs"
 ) -> Tuple[float, float]:
-    """
-    Read energy and time measurements from pre-existing profile results in CSV files
-    instead of running on hardware.
-    """
     cfg = decode_vec(x_vec)
     overlap_start, overlap_end = cfg["overlap"]
     sm_num = cfg["sm"]
     block_size = cfg["block"]
     freq_mhz = int(cfg["freq"])
-    
+
     logs_dir = f"tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
-    csv_file_path = os.path.join(logs_base_dir, logs_dir, str(freq_mhz), "energy_results.csv")
-    
+    csv_file_path = os.path.join(logs_base_dir, logs_dir, str(freq_mhz), "mlp_energy_results.csv")
+
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"Profile results not found at: {csv_file_path}")
-    
+
     df = pd.read_csv(csv_file_path)
-    
+
     matching_rows = df[
         (df['overlap_start'] == overlap_start) &
         (df['overlap_end'] == overlap_end) &
         (df['comm_sm_number'] == sm_num) &
         (df['comm_block_size'] == block_size)
     ]
-    
+
     if matching_rows.empty:
         print(
             f"Configuration not found in {csv_file_path}: "
             f"overlap=({overlap_start},{overlap_end}), sm={sm_num}, block={block_size}"
         )
         return 300.0, 1.0
-    
+
     row = matching_rows.iloc[0]
-    
+
     time_s = float(row["0:time (s)"])
     energy_j = float(row["0:total energy (J)"]) / args.world_size
-    
+
     return energy_j, time_s
+
+
+# -----------------------------
+# Surrogate models and EHVI
+# -----------------------------
+
+def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.ndarray):
+    dtrain_energy = xgb.DMatrix(X_encoded, label=y_energy)
+    dtrain_time = xgb.DMatrix(X_encoded, label=y_time)
+    params = {
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "max_depth": 6,
+        "eta": 0.3,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_weight": 1,
+    }
+    energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
+    time_model = xgb.train(params, dtrain_time, num_boost_round=100)
+    return energy_model, time_model
+
+
+def train_xgb_ensemble(
+    X_encoded: np.ndarray,
+    y_energy: np.ndarray,
+    y_time: np.ndarray,
+    ensemble_size: int = 5,
+    bootstrap_frac: float = 0.8,
+    base_seed: int = 42,
+):
+    n = X_encoded.shape[0]
+    ensemble = []
+    for i in range(int(max(1, ensemble_size))):
+        rng = np.random.RandomState(base_seed + i)
+        if bootstrap_frac >= 1.0:
+            idx = np.arange(n)
+        else:
+            m = max(1, int(round(bootstrap_frac * n)))
+            idx = rng.choice(n, size=m, replace=True)
+        Xb = X_encoded[idx]
+        yeb = y_energy[idx]
+        ytb = y_time[idx]
+
+        dtrain_energy = xgb.DMatrix(Xb, label=yeb)
+        dtrain_time = xgb.DMatrix(Xb, label=ytb)
+        params = {
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
+            "max_depth": 6,
+            "eta": 0.3,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_weight": 1,
+            "seed": int(base_seed + i),
+        }
+        energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
+        time_model = xgb.train(params, dtrain_time, num_boost_round=100)
+        ensemble.append((energy_model, time_model))
+    return ensemble
+
+
+def predict_performance(models, X_encoded: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    energy_model, time_model = models
+    dtest = xgb.DMatrix(X_encoded)
+    energy_pred = energy_model.predict(dtest)
+    time_pred = time_model.predict(dtest)
+    return energy_pred, time_pred
+
+
+def predict_ensemble_stats(
+    ensemble_models: List[Tuple[xgb.Booster, xgb.Booster]],
+    X_encoded: np.ndarray,
+):
+    if len(ensemble_models) == 0:
+        return (
+            np.zeros(X_encoded.shape[0], dtype=np.float64),
+            np.ones(X_encoded.shape[0], dtype=np.float64),
+            np.zeros(X_encoded.shape[0], dtype=np.float64),
+            np.ones(X_encoded.shape[0], dtype=np.float64),
+        )
+
+    energy_preds = []
+    time_preds = []
+    for em, tm in ensemble_models:
+        dtest = xgb.DMatrix(X_encoded)
+        energy_preds.append(em.predict(dtest))
+        time_preds.append(tm.predict(dtest))
+    energy_preds = np.vstack(energy_preds)
+    time_preds = np.vstack(time_preds)
+    return (
+        np.mean(energy_preds, axis=0),
+        np.std(energy_preds, axis=0),
+        np.mean(time_preds, axis=0),
+        np.std(time_preds, axis=0),
+    )
+
+
+def calculate_dominated_hypervolume(points: np.ndarray, ref_point: np.ndarray) -> float:
+    Y = -torch.tensor(points, dtype=torch.double)
+    ref = -torch.tensor(ref_point, dtype=torch.double)
+    hv = Hypervolume(ref_point=ref)
+    hv_value = hv.compute(Y)
+    return float(hv_value)
+
+
+def normalize_objectives(data: np.ndarray, min_vals: np.ndarray, max_vals: np.ndarray) -> np.ndarray:
+    ranges = max_vals - min_vals
+    ranges = np.where(ranges == 0, 1.0, ranges)
+    return (data - min_vals) / ranges
+
+
+def expected_hypervolume_improvement(
+    candidate_vec: np.ndarray,
+    pareto_front: np.ndarray,
+    models,
+    ref_point: np.ndarray,
+    normalization_bounds: tuple = None,
+    current_hv_cached: float | None = None,
+    pareto_front_norm_cached: np.ndarray | None = None,
+    ref_point_norm_cached: np.ndarray | None = None,
+) -> float:
+    candidate_encoded = one_hot_encode(candidate_vec).reshape(1, -1)
+    e_pred, t_pred = predict_performance(models, candidate_encoded)
+    predicted_point = np.array([[e_pred[0], t_pred[0]]], dtype=np.float64)
+
+    if normalization_bounds is not None:
+        min_vals, max_vals = normalization_bounds
+        if pareto_front_norm_cached is None or ref_point_norm_cached is None:
+            pareto_front_norm = normalize_objectives(pareto_front, min_vals, max_vals)
+            ref_point_norm = normalize_objectives(ref_point.reshape(1, -1), min_vals, max_vals).flatten()
+        else:
+            pareto_front_norm = pareto_front_norm_cached
+            ref_point_norm = ref_point_norm_cached
+        predicted_point_norm = normalize_objectives(predicted_point, min_vals, max_vals)
+        current_hv = current_hv_cached if current_hv_cached is not None else calculate_dominated_hypervolume(pareto_front_norm, ref_point_norm)
+        new_front_norm = np.vstack([pareto_front_norm, predicted_point_norm])
+        new_hv = calculate_dominated_hypervolume(new_front_norm, ref_point_norm)
+    else:
+        current_hv = current_hv_cached if current_hv_cached is not None else calculate_dominated_hypervolume(pareto_front, ref_point)
+        new_front = np.vstack([pareto_front, predicted_point])
+        new_hv = calculate_dominated_hypervolume(new_front, ref_point)
+    return float(max(0.0, new_hv - current_hv))
+
+
+# -----------------------------
+# Candidate generation
+# -----------------------------
+
+def generate_all_configurations() -> List[np.ndarray]:
+    configs: List[np.ndarray] = []
+    for freq_idx in range(len(FREQ_VALUES)):
+        for sm_idx in range(len(SM_VALUES)):
+            for block_idx in range(len(BLOCK_VALUES)):
+                for overlap_idx in range(len(OVERLAP_WINDOWS)):
+                    configs.append(
+                        np.array([freq_idx, sm_idx, block_idx, overlap_idx], dtype=np.int64)
+                    )
+    return configs
+
+
+def is_config_in_dataset(config: np.ndarray, dataset: np.ndarray) -> bool:
+    return any(np.array_equal(config, x) for x in dataset)
 
 
 # -----------------------------
@@ -389,13 +481,7 @@ def try_load_initial_from_cache(
     p2p_power_w: float,
     n_init: int,
 ):
-    """
-    Try to load up to n_init initial configurations and measurements from
-    eval_results.jsonl if available. Returns tuple:
-      (use_cached_initial, X_train, X_train_encoded, init_time, init_eff_energy, init_avg_energy, all_records)
-    If not cached, use_cached_initial is False and X_train fields are None.
-    """
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
     init_time: List[float] = []
@@ -410,7 +496,6 @@ def try_load_initial_from_cache(
         with open(eval_log_path, "r") as f:
             lines = [ln.strip() for ln in f.readlines() if ln.strip()]
         parsed = [json.loads(ln) for ln in lines]
-        # Deduplicate while preserving order
         seen = set()
         unique: List[dict] = []
         for r in parsed:
@@ -449,221 +534,6 @@ def try_load_initial_from_cache(
         return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records
 
 
-# -----------------------------
-# Surrogate models and EHVI
-# -----------------------------
-
-AUTOTVM_PARAMS = {
-    "objective": "reg:squarederror",
-    "eval_metric": "rmse",
-    "max_depth": 10,
-    "eta": 0.1,                # learning rate
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 1,
-    "gamma": 0,
-    "reg_alpha": 0,
-    "reg_lambda": 1,
-    "tree_method": "hist",     # fast on CPU; switch to 'gpu_hist' if you really want GPU
-}
-
-def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.ndarray):
-    dtrain_energy = xgb.DMatrix(X_encoded, label=y_energy)
-    dtrain_time = xgb.DMatrix(X_encoded, label=y_time)
-    params = {
-        "objective": "reg:squarederror",
-        "eval_metric": "rmse",
-        "max_depth": 6,
-        "eta": 0.3,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "min_child_weight": 1,
-    }
-    # params = AUTOTVM_PARAMS
-    energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
-    time_model = xgb.train(params, dtrain_time, num_boost_round=100)
-    return energy_model, time_model
-
-
-def train_xgb_ensemble(
-    X_encoded: np.ndarray,
-    y_energy: np.ndarray,
-    y_time: np.ndarray,
-    ensemble_size: int = 5,
-    bootstrap_frac: float = 0.8,
-    base_seed: int = 42,
-):
-    """
-    Train an ensemble of XGBoost regressors via bootstrap resampling and different seeds
-    to estimate predictive uncertainty.
-
-    Returns a list of (energy_model, time_model) tuples.
-    """
-    n = X_encoded.shape[0]
-    ensemble = []
-    for i in range(int(max(1, ensemble_size))):
-        rng = np.random.RandomState(base_seed + i)
-        if bootstrap_frac >= 1.0:
-            idx = np.arange(n)
-        else:
-            m = max(1, int(round(bootstrap_frac * n)))
-            idx = rng.choice(n, size=m, replace=True)
-        Xb = X_encoded[idx]
-        yeb = y_energy[idx]
-        ytb = y_time[idx]
-
-        dtrain_energy = xgb.DMatrix(Xb, label=yeb)
-        dtrain_time = xgb.DMatrix(Xb, label=ytb)
-        params = {
-            "objective": "reg:squarederror",
-            "eval_metric": "rmse",
-            "max_depth": 6,
-            "eta": 0.3,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "min_child_weight": 1,
-            "seed": int(base_seed + i),
-        }
-        # params = {**AUTOTVM_PARAMS, "seed": int(base_seed + i)}
-        energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
-        time_model = xgb.train(params, dtrain_time, num_boost_round=100)
-        ensemble.append((energy_model, time_model))
-    return ensemble
-
-
-def predict_ensemble_stats(
-    ensemble_models: List[Tuple[xgb.Booster, xgb.Booster]],
-    X_encoded: np.ndarray,
-):
-    """
-    For each row in X_encoded, return mean and std for (energy, time) across ensemble.
-    Returns:
-      energy_mean, energy_std, time_mean, time_std  (each shape [N])
-    """
-    if len(ensemble_models) == 0:
-        dtest = xgb.DMatrix(X_encoded)
-        return (
-            np.zeros(X_encoded.shape[0], dtype=np.float64),
-            np.ones(X_encoded.shape[0], dtype=np.float64),
-            np.zeros(X_encoded.shape[0], dtype=np.float64),
-            np.ones(X_encoded.shape[0], dtype=np.float64),
-        )
-
-    energy_preds = []
-    time_preds = []
-    for em, tm in ensemble_models:
-        dtest = xgb.DMatrix(X_encoded)
-        energy_preds.append(em.predict(dtest))
-        time_preds.append(tm.predict(dtest))
-    energy_preds = np.vstack(energy_preds)  # [E, N]
-    time_preds = np.vstack(time_preds)      # [E, N]
-    energy_mean = np.mean(energy_preds, axis=0)
-    energy_std = np.std(energy_preds, axis=0)
-    time_mean = np.mean(time_preds, axis=0)
-    time_std = np.std(time_preds, axis=0)
-    return energy_mean, energy_std, time_mean, time_std
-
-
-def predict_performance(models, X_encoded: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    energy_model, time_model = models
-    dtest = xgb.DMatrix(X_encoded)
-    energy_pred = energy_model.predict(dtest)
-    time_pred = time_model.predict(dtest)
-    return energy_pred, time_pred
-
-
-def calculate_dominated_hypervolume(points: np.ndarray, ref_point: np.ndarray) -> float:
-    # Convert minimization (energy, time) to maximization by negation and compute HV via BoTorch.
-    Y = -torch.tensor(points, dtype=torch.double)
-    ref = -torch.tensor(ref_point, dtype=torch.double)
-    hv = Hypervolume(ref_point=ref)
-    hv_value = hv.compute(Y)
-    return float(hv_value)
-
-
-def normalize_objectives(data: np.ndarray, min_vals: np.ndarray, max_vals: np.ndarray) -> np.ndarray:
-    ranges = max_vals - min_vals
-    # Avoid division by zero
-    ranges = np.where(ranges == 0, 1.0, ranges)
-    return (data - min_vals) / ranges
-
-
-def expected_hypervolume_improvement(
-    candidate_vec: np.ndarray,
-    pareto_front: np.ndarray,
-    models,
-    ref_point: np.ndarray,
-    normalization_bounds: tuple = None,
-    current_hv_cached: float | None = None,
-    pareto_front_norm_cached: np.ndarray | None = None,
-    ref_point_norm_cached: np.ndarray | None = None,
-) -> float:
-    """
-    Calculate expected hypervolume improvement with normalized objectives.
-    
-    Args:
-        candidate_vec: Candidate configuration vector
-        pareto_front: Current Pareto front points
-        models: Trained surrogate models
-        ref_point: Reference point for hypervolume calculation
-        normalization_bounds: Tuple of (min_vals, max_vals) for normalization
-    
-    Returns:
-        Expected hypervolume improvement
-    """
-    candidate_encoded = one_hot_encode(candidate_vec).reshape(1, -1)
-    e_pred, t_pred = predict_performance(models, candidate_encoded)
-    predicted_point = np.array([[e_pred[0], t_pred[0]]], dtype=np.float64)
-    
-    # Apply normalization if bounds are provided
-    if normalization_bounds is not None:
-        min_vals, max_vals = normalization_bounds
-
-        # Use cached normalized front/ref if provided
-        if pareto_front_norm_cached is None or ref_point_norm_cached is None:
-            pareto_front_norm = normalize_objectives(pareto_front, min_vals, max_vals)
-            ref_point_norm = normalize_objectives(ref_point.reshape(1, -1), min_vals, max_vals).flatten()
-        else:
-            pareto_front_norm = pareto_front_norm_cached
-            ref_point_norm = ref_point_norm_cached
-
-        predicted_point_norm = normalize_objectives(predicted_point, min_vals, max_vals)
-
-        current_hv = current_hv_cached if current_hv_cached is not None else calculate_dominated_hypervolume(pareto_front_norm, ref_point_norm)
-        new_front_norm = np.vstack([pareto_front_norm, predicted_point_norm])
-        new_hv = calculate_dominated_hypervolume(new_front_norm, ref_point_norm)
-    else:
-        current_hv = current_hv_cached if current_hv_cached is not None else calculate_dominated_hypervolume(pareto_front, ref_point)
-        new_front = np.vstack([pareto_front, predicted_point])
-        new_hv = calculate_dominated_hypervolume(new_front, ref_point)
-    
-    return float(max(0.0, new_hv - current_hv))
-
-
-# -----------------------------
-# Candidate generation
-# -----------------------------
-
-def generate_all_configurations() -> List[np.ndarray]:
-    configs: List[np.ndarray] = []
-    for freq_idx in range(len(FREQ_VALUES)):
-        for sm_idx in range(len(SM_VALUES)):
-            for block_idx in range(len(BLOCK_VALUES)):
-                for overlap_idx in range(len(OVERLAP_WINDOWS)):
-                    configs.append(
-                        np.array([freq_idx, sm_idx, block_idx, overlap_idx], dtype=np.int64)
-                    )
-    return configs
-
-
-def is_config_in_dataset(config: np.ndarray, dataset: np.ndarray) -> bool:
-    return any(np.array_equal(config, x) for x in dataset)
-
-
-# -----------------------------
-# Main optimization loop
-# -----------------------------
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--world_size", "-w", type=int, default=2)
@@ -679,58 +549,40 @@ def main() -> None:
     parser.add_argument("--normalize_objectives", action="store_true",
                         help="Normalize energy and time objectives to [0,1] range for balanced hypervolume calculation (default: True)")
 
-    # Exploration / uncertainty options
-    parser.add_argument("--explore_fraction", type=float, default=0.25,
-                        help="Fraction of each acquisition batch reserved for uncertainty-driven exploration (0..1)")
-    parser.add_argument("--ensemble_size", type=int, default=5,
-                        help="Size of the XGBoost ensemble used to estimate predictive uncertainty")
-    parser.add_argument("--bootstrap_frac", type=float, default=0.8,
-                        help="Bootstrap fraction for training each ensemble member")
-    parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum",
-                        help="How to combine energy/time predictive std into a single uncertainty score")
-    parser.add_argument("--time_fraction", type=float, default=0.2,
-                        help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
+    parser.add_argument("--explore_fraction", type=float, default=0.25)
+    parser.add_argument("--ensemble_size", type=int, default=5)
+    parser.add_argument("--bootstrap_frac", type=float, default=0.8)
+    parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum")
+    parser.add_argument("--time_fraction", type=float, default=0.2)
 
     args = parser.parse_args()
 
     print("===============================================")
-    print("Bayesian Optimization for Attention Fuser (real measurements)")
+    print("Bayesian Optimization for MLP Fuser (forward; real measurements)")
     print("===============================================")
-    print(f"World size: {args.world_size}")
-    print(f"Batch size: {args.batch_size}")
-    print(f"Sequence length: {args.seq_len}")
-    print(f"GPU Type: {args.gpu_type}")
-    print(f"Initial points: {args.n_init}, Batches: {args.batches}, Per-batch evals: {args.acq_batch}")
-    print(f"Energy type for GBT training: {'Effective' if args.use_effective_energy else 'Real'}")
-    print(f"Objective normalization: {'Enabled' if args.normalize_objectives else 'Disabled'}")
-    print(f"Acquisition fractions: explore={args.explore_fraction}, time={args.time_fraction}")
 
-    # Configure frequency values based on GPU type
     global FREQ_VALUES
     if args.gpu_type == "A40":
         FREQ_VALUES = list(map(int, np.arange(1740, 1000 - 30, -30)))
-        # FREQ_VALUES = [1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000]
-    else:  # A100
+    else:
         FREQ_VALUES = list(map(int, np.arange(1410, 960 - 15, -15)))
     print(f"Frequency search set has {len(FREQ_VALUES)} values (min={min(FREQ_VALUES)}, max={max(FREQ_VALUES)})")
 
-    # p2p power per GPU type (W)
     if args.gpu_type == "A40":
         p2p_power_w = 90.0
     else:
         p2p_power_w = 70.0
 
-    # Build initial design by random sampling from the discrete space
     all_configs = generate_all_configurations()
     total_configs = len(all_configs)
     n_init = min(args.n_init, total_configs)
-    
+
     use_cached_initial, X_train_cached, X_train_encoded_cached, init_time, init_eff_energy, init_avg_energy, all_records = try_load_initial_from_cache(
         args=args,
         p2p_power_w=p2p_power_w,
         n_init=n_init,
     )
-    
+
     if not use_cached_initial:
         init_indices = random.sample(range(total_configs), n_init)
         X_train = np.array([all_configs[i] for i in init_indices])
@@ -759,18 +611,15 @@ def main() -> None:
     else:
         X_train = X_train_cached  # type: ignore[assignment]
         X_train_encoded = X_train_encoded_cached  # type: ignore[assignment]
-        # To keep later timing print meaningful
         start_time_marker = time.time()
 
-    y_energy_eff = np.array(init_eff_energy, dtype=np.float64)  # effective energy
+    y_energy_eff = np.array(init_eff_energy, dtype=np.float64)
     y_time = np.array(init_time, dtype=np.float64)
-    y_energy_real = np.array(init_avg_energy, dtype=np.float64)  # real energy
-    
-    # Select energy type for training based on parameter
+    y_energy_real = np.array(init_avg_energy, dtype=np.float64)
+
     y_energy_for_training = y_energy_eff if args.use_effective_energy else y_energy_real
     print(f"Using {'effective' if args.use_effective_energy else 'real'} energy for GBT training")
-    
-    # Pareto frontier always uses effective energy
+
     Y_torch = torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
 
     init_eval_time = time.time() - start_time_marker
@@ -780,7 +629,6 @@ def main() -> None:
         f"Time [{np.min(y_time):.6f}, {np.max(y_time):.6f}] s"
     )
 
-    # Reference points: a bit worse than worst observed so far (separate for eff and real energy)
     ref_point_eff = np.array([np.max(y_energy_eff) * 1.1, np.max(y_time) * 1.1], dtype=np.float64)
     ref_point_real = np.array([np.max(y_energy_real) * 1.1, np.max(y_time) * 1.1], dtype=np.float64)
 
@@ -791,15 +639,13 @@ def main() -> None:
     total_start = time.time()
     for ib in range(int(args.batches)):
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
-        # Train separate models for effective and real energy; share time model
         energy_model_eff, time_model = train_xgb_models(X_train_encoded, y_energy_eff, y_time)
         energy_model_real, _ = train_xgb_models(X_train_encoded, y_energy_real, y_time)
         models_eff = (energy_model_eff, time_model)
         models_real = (energy_model_real, time_model)
-        # Train ensemble for uncertainty estimates
         ensemble_models = train_xgb_ensemble(
             X_train_encoded,
-            y_energy_for_training,
+            y_energy_eff if args.use_effective_energy else y_energy_real,
             y_time,
             ensemble_size=args.ensemble_size,
             bootstrap_frac=args.bootstrap_frac,
@@ -808,7 +654,6 @@ def main() -> None:
         current_front_eff = np.column_stack((y_energy_eff, y_time))
         current_front_real = np.column_stack((y_energy_real, y_time))
 
-        # Generate candidate pool (all remaining configs)
         candidates = []
         for cfg_vec in all_configs:
             if not is_config_in_dataset(cfg_vec, X_train):
@@ -817,10 +662,8 @@ def main() -> None:
             print("No new candidates available. Stopping early.")
             break
         candidates = np.array(candidates)
-        # Encode candidates once for vectorized predictions
         cand_encoded = np.array([one_hot_encode(x) for x in candidates])
 
-        # Calculate normalization bounds from current data to balance energy and time scales
         normalization_bounds_eff = None
         normalization_bounds_real = None
         if args.normalize_objectives:
@@ -834,9 +677,7 @@ def main() -> None:
             print(f"  Norm bounds (real) - Energy: [{min_vals_real[0]:.4f}, {max_vals_real[0]:.4f}], Time: [{min_vals_real[1]:.6f}, {max_vals_real[1]:.6f}]")
         else:
             print("  Using raw objectives without normalization")
-        
-        # Precompute current HV once per batch (optionally using normalization)
-        # Precompute HV caches for both fronts (eff and real)
+
         current_hv_eff_cached = None
         pareto_front_eff_norm_cached = None
         ref_point_eff_norm_cached = None
@@ -859,7 +700,6 @@ def main() -> None:
         else:
             current_hv_real_cached = calculate_dominated_hypervolume(current_front_real, ref_point_real)
 
-        # Score via EHVI for both effective-energy and real-energy objectives
         ehvi_eff_values: List[float] = []
         ehvi_real_values: List[float] = []
         for vec in candidates:
@@ -888,50 +728,41 @@ def main() -> None:
         ehvi_eff_values = np.array(ehvi_eff_values)
         ehvi_real_values = np.array(ehvi_real_values)
 
-        # Compute uncertainty from ensemble predictions
         e_mean, e_std, t_mean, t_std = predict_ensemble_stats(ensemble_models, cand_encoded)
 
-        # Single-model predictions for exploit-style time picks
         pred_energy_single_eff, pred_time_single = predict_performance(models_eff, cand_encoded)
+
         if args.uncertainty_metric == "sum":
             unc_score = e_std + t_std
         elif args.uncertainty_metric == "max":
             unc_score = np.maximum(e_std, t_std)
         elif args.uncertainty_metric == "energy_std":
             unc_score = e_std
-        else:  # time_std
+        else:
             unc_score = t_std
 
-        # Split acquisition into exploit, time-focused, and explore
         k_total = int(args.acq_batch)
         k_time = int(round(args.time_fraction * k_total))
         k_remaining = max(0, k_total - k_time)
         k_explore = int(round(args.explore_fraction * k_remaining))
         k_exploit = max(0, k_remaining - k_explore)
 
-        # Indices for exploit: split between effective and real energy objectives
         exploit_idx: List[int] = []
         if k_exploit > 0:
             k_exploit_eff = k_exploit // 2
             k_exploit_real = k_exploit - k_exploit_eff
-
-            # Top by EHVI (effective energy)
             top_eff = np.argsort(ehvi_eff_values)[-k_exploit_eff:][::-1].tolist() if k_exploit_eff > 0 else []
             picked = set()
             for idx in top_eff:
                 if idx not in picked:
                     exploit_idx.append(idx)
                     picked.add(idx)
-
-            # Top by EHVI (real energy), excluding already picked
             if k_exploit_real > 0:
                 top_real = np.argsort(ehvi_real_values)[-k_exploit_real:][::-1].tolist()
                 for idx in top_real:
                     if idx not in picked:
                         exploit_idx.append(idx)
                         picked.add(idx)
-
-            # Backfill to reach k_exploit using combined EHVI max, if needed
             if len(exploit_idx) < k_exploit:
                 combined = np.maximum(ehvi_eff_values, ehvi_real_values)
                 for idx in np.argsort(combined)[::-1].tolist():
@@ -941,10 +772,9 @@ def main() -> None:
                     if len(exploit_idx) >= k_exploit:
                         break
 
-        # Indices for time-focused picks (smallest predicted time), excluding exploit
         time_idx = []
         if k_time > 0:
-            sorted_time = np.argsort(pred_time_single).tolist()  # ascending (smallest time first)
+            sorted_time = np.argsort(pred_time_single).tolist()
             picked_time_exclude = set(exploit_idx)
             for idx in sorted_time:
                 if idx not in picked_time_exclude:
@@ -952,7 +782,6 @@ def main() -> None:
                 if len(time_idx) >= k_time:
                     break
 
-        # Indices for explore (highest uncertainty), excluding exploit and time
         explore_idx = []
         if k_explore > 0:
             sorted_unc = np.argsort(unc_score)[::-1].tolist()
@@ -965,14 +794,13 @@ def main() -> None:
 
         final_idx = exploit_idx + time_idx + explore_idx
         if len(final_idx) < k_total:
-            # Backfill from remaining EHVI in case of shortages
             combined = np.maximum(ehvi_eff_values, ehvi_real_values)
             remaining = [i for i in np.argsort(combined)[::-1].tolist() if i not in set(final_idx)]
             final_idx.extend(remaining[: k_total - len(final_idx)])
 
         selected = candidates[final_idx]
 
-        print("Selected candidates (exploit + explore):")
+        print("Selected candidates (exploit + time + explore):")
         for i, idx in enumerate(final_idx):
             vec = candidates[idx]
             cfg = decode_vec(vec)
@@ -981,16 +809,14 @@ def main() -> None:
                 f"  {i+1}: [{tag}] EHVI_eff={ehvi_eff_values[idx]:.6g} | EHVI_real={ehvi_real_values[idx]:.6g} | UNC={unc_score[idx]:.6g} | freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}"
             )
 
-        # Evaluate selected candidates on hardware
         print("Evaluating selected candidates on hardware...")
         new_time: List[float] = []
         new_eff_energy: List[float] = []
-        new_avg_energy: List[float] = []  # real avg energy
+        new_avg_energy: List[float] = []
         for i, vec in enumerate(selected):
             cfg = decode_vec(vec)
             print(f"  [{i+1}/{len(selected)}] freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}")
             e_j, t_s = measure_on_hardware(vec, args)
-            # e_j, t_s = measure_from_profile_results(vec, args)
             eff_e_j = float(e_j) - float(p2p_power_w) * float(t_s)
             new_time.append(float(t_s))
             new_eff_energy.append(float(eff_e_j))
@@ -998,23 +824,14 @@ def main() -> None:
             all_records.append((cfg['freq'], cfg['overlap'][0], cfg['overlap'][1], cfg['sm'], cfg['block'], float(t_s), float(e_j), float(eff_e_j)))
             print(f"    -> Energy={e_j:.4f} J, Time={t_s:.6f} s (effective={eff_e_j:.4f} J)")
 
-        # Update datasets
         X_train = np.vstack([X_train, selected])
         X_train_encoded = np.vstack([X_train_encoded, [one_hot_encode(x) for x in selected]])
         y_energy_eff = np.append(y_energy_eff, np.array(new_eff_energy, dtype=np.float64))
         y_time = np.append(y_time, np.array(new_time, dtype=np.float64))
         y_energy_real = np.append(y_energy_real, np.array(new_avg_energy, dtype=np.float64))
-        
-        # Update training energy array based on parameter
-        y_energy_for_training = y_energy_eff if args.use_effective_energy else y_energy_real
-        
-        # Pareto frontier always uses effective energy
+
         Y_torch = torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
 
-        # Update reference point (always use effective energy for Pareto)
-        ref_point = np.array([np.max(y_energy_eff) * 1.1, np.max(y_time) * 1.1], dtype=np.float64)
-
-        # Pareto count
         neg_Y = -Y_torch
         pareto_mask = is_non_dominated(neg_Y)
         pareto_count = int(torch.sum(pareto_mask).item())
@@ -1028,11 +845,9 @@ def main() -> None:
     total_time = time.time() - total_start
     print(f"\nOptimization completed in {total_time:.2f} s")
 
-    # Final Pareto fronts (effective energy and real energy)
     print("\n===============================================")
-    print("Final Energy-vs-Time Pareto Fronts")
+    print("Final Energy-vs-Time Pareto Fronts (MLP Forward)")
     print("===============================================")
-    # Effective-energy Pareto
     neg_Y_eff = -torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
     pareto_mask_eff = is_non_dominated(neg_Y_eff)
     pareto_indices_eff = torch.where(pareto_mask_eff)[0].cpu().numpy().tolist()
@@ -1043,7 +858,6 @@ def main() -> None:
         t = float(y_time[idx])
         pareto_results_eff.append((cfg, e, t))
 
-    # Real-energy Pareto
     neg_Y_real = -torch.tensor(np.column_stack((y_energy_real, y_time)), dtype=torch.double)
     pareto_mask_real = is_non_dominated(neg_Y_real)
     pareto_indices_real = torch.where(pareto_mask_real)[0].cpu().numpy().tolist()
@@ -1055,21 +869,9 @@ def main() -> None:
         pareto_results_real.append((cfg, e, t))
 
     print(f"Found {len(pareto_results_eff)} effective-energy Pareto points and {len(pareto_results_real)} real-energy Pareto points")
-    print("\nEffective-energy Pareto sorted by Energy (ascending):")
-    for i, (cfg, e, t) in enumerate(sorted(pareto_results_eff, key=lambda z: z[1])):
-        print(
-            f"{i+1}. EffEnergy={e:.4f} J | Time={t:.6f} s | freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}"
-        )
-    print("\nReal-energy Pareto sorted by Energy (ascending):")
-    for i, (cfg, e, t) in enumerate(sorted(pareto_results_real, key=lambda z: z[1])):
-        print(
-            f"{i+1}. RealEnergy={e:.4f} J | Time={t:.6f} s | freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}"
-        )
 
-    # Save Pareto frontier to logs directory
     logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
     os.makedirs(logs_dir, exist_ok=True)
-    # Save effective-energy Pareto frontier
     csv_eff_path = os.path.join(logs_dir, "results_pareto_frontier_effective.csv")
     with open(csv_eff_path, "w") as f:
         f.write("frequency,overlap_start,overlap_end,comm_sm_number,comm_block_size,time_s,avg_energy_J,effect_energy_J\n")
@@ -1083,7 +885,6 @@ def main() -> None:
             )
     print(f"Saved effective-energy Pareto frontier to {csv_eff_path}")
 
-    # Save real-energy Pareto frontier
     csv_real_path = os.path.join(logs_dir, "results_pareto_frontier_real.csv")
     with open(csv_real_path, "w") as f:
         f.write("frequency,overlap_start,overlap_end,comm_sm_number,comm_block_size,time_s,avg_energy_J,effect_energy_J\n")
@@ -1097,7 +898,6 @@ def main() -> None:
             )
     print(f"Saved real-energy Pareto frontier to {csv_real_path}")
 
-    # Save all evaluated results
     csv_all_path = os.path.join(logs_dir, "results_all.csv")
     with open(csv_all_path, "w") as f:
         f.write("frequency,overlap_start,overlap_end,comm_sm_number,comm_block_size,time_s,avg_energy_J,effect_energy_J\n")

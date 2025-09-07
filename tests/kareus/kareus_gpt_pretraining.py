@@ -20,7 +20,9 @@ import torch._dynamo
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf, open_dict
 
-from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
+import sys
+sys.path.append("/workspaces/Kareus")
+
 from nemo.collections.nlp.parts.megatron_trainer_builder import MegatronTrainerBuilder
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.core.config import hydra_runner
@@ -30,7 +32,7 @@ from nemo.utils.exp_manager import exp_manager
 import pytorch_lightning as pl
 import torch
 
-from zeus.optimizer.pipeline_frequency import PipelineFrequencyOptimizer
+from kareus.nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
 
 torch._dynamo.config.suppress_errors = True
 mp.set_start_method("spawn", force=True)
@@ -51,12 +53,7 @@ def main(cfg) -> None:
 
     exp_manager(trainer, cfg.exp_manager)
 
-    # opt = PipelineFrequencyOptimizer(
-    #     server_addr="127.0.0.1", 
-    #     server_port=7787
-    # )
-
-    model = MegatronGPTModel(cfg.model, trainer, None)
+    model = MegatronGPTModel(cfg.model, trainer)
 
     trainer.fit(model)
 
