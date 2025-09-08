@@ -8,8 +8,10 @@ import torch
 import torch.distributed as dist
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
 from megatron.core.transformer.transformer_config import TransformerConfig
+from common_config import FuserTestConfig
 from megatron.core.parallel_state import (
     initialize_model_parallel,
     destroy_model_parallel,
@@ -55,28 +57,12 @@ class LossProfiler:
         # Dims
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len
-        self.hidden_size = 3072
+        self.hidden_size = FuserTestConfig.HIDDEN_SIZE
         self.vocab_size = args.vocab_size
-        self.ffn_hidden_size = 8192
+        self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
 
         # Config: enable native fused CE if available
-        self.config = TransformerConfig(
-            num_layers=1,
-            hidden_size=self.hidden_size,
-            num_attention_heads=24,
-            ffn_hidden_size=self.ffn_hidden_size,
-            layernorm_epsilon=1e-5,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            rotary_interleaved=False,
-            apply_rope_fusion=True,
-            params_dtype=self.dtype,
-            tensor_model_parallel_size=world_size,
-            add_bias_linear=False,
-            cross_entropy_loss_fusion=False,
-            cross_entropy_fusion_impl='native',
-            use_cpu_initialization=True,
-        )
+        self.config = FuserTestConfig.create_loss_config(world_size, self.dtype)
 
         self.frequency = args.frequency
 
@@ -198,10 +184,10 @@ if __name__ == '__main__':
     from torch.multiprocessing import spawn
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--world_size', '-w', type=int, default=2)
-    parser.add_argument('--batch_size', '-b', type=int, default=4)
-    parser.add_argument('--seq_len', '-s', type=int, default=4096)
-    parser.add_argument('--vocab_size', '-v', type=int, default=128256)
+    parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument('--batch_size', '-b', type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
+    parser.add_argument('--seq_len', '-s', type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
+    parser.add_argument('--vocab_size', '-v', type=int, default=FuserTestConfig.VOCAB_SIZE)
     parser.add_argument('--frequency', '-f', type=str, default='default')
     args = parser.parse_args()
 

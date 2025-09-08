@@ -6,8 +6,10 @@ import sys
 import traceback
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
 from megatron.core.transformer.transformer_config import TransformerConfig
+from common_config import FuserTestConfig
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
 from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
@@ -17,7 +19,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range
@@ -116,30 +118,14 @@ class AttentionFuserTest:
         # Test configuration
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len
-        self.hidden_size = 3072
-        self.num_attention_heads = 24
-        self.num_query_groups = 8  # For grouped query attention
+        self.hidden_size = FuserTestConfig.HIDDEN_SIZE
+        self.num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
+        self.num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
         self.head_dim = self.hidden_size // self.num_attention_heads
-        self.ffn_hidden_size = 8192
+        self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
         
         # Create transformer config
-        self.config = TransformerConfig(
-            num_layers=1,
-            hidden_size=self.hidden_size,
-            num_attention_heads=self.num_attention_heads,
-            num_query_groups=self.num_query_groups,
-            layernorm_epsilon=1e-5,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            qk_layernorm=False,
-            apply_query_key_layer_scaling=False,
-            rotary_interleaved=False,
-            flash_decode=False,
-            apply_rope_fusion=True,
-            params_dtype=self.dtype,
-            tensor_model_parallel_size=world_size,
-            add_bias_linear=False,
-        )
+        self.config = FuserTestConfig.create_attention_config(world_size, self.dtype)
 
         self.frequency = args.frequency
         self.repeat_num = 1
@@ -450,9 +436,9 @@ def overlap_test(rank, world_size, args, master_port):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
-    parser.add_argument("--seq_len", "-s", type=int, default=4096)
+    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
+    parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     args = parser.parse_args()
 

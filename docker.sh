@@ -29,3 +29,6 @@ docker run -it \
 # pip install -e . 
 
 # zeus pip install -e . pip install '.[pfo-server]'
+
+# huggingface-cli login 
+# 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
