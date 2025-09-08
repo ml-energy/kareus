@@ -117,12 +117,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Parse baseline time and energy results from zeus monitor files")
     parser.add_argument(
         "--baseline_path", 
-        default="nemo_experiments/megatron_llama_3_2_3b/baseline",
+        default="nemo_experiments/megatron_llama_3_2_1b/dominok",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(
         "--perseus_path", 
-        default="nemo_experiments/megatron_llama_3_2_3b/optimized",
+        default="nemo_experiments/megatron_llama_3_2_1b/testevent",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(
@@ -140,7 +140,7 @@ def main() -> None:
     parser.add_argument(
         "--profile_iters", 
         type=int, 
-        default=100,
+        default=20,
         help="Number of profiling iterations to use for averaging"
     )
     
@@ -154,13 +154,13 @@ def main() -> None:
     )
     save_csv(baseline_results, "baseline_results.csv")
 
-    perseus_results = parse_results(
+    dominok_results = parse_results(
         args.perseus_path, 
         args.num_ranks,
         args.warmup_iters,
         args.profile_iters
     )
-    save_csv(perseus_results, "perseus_results.csv")
+    save_csv(dominok_results, "dominok_results.csv")
     
     print("Baseline results:")
     for rank, (avg_time, avg_energy) in baseline_results.items():
@@ -169,12 +169,12 @@ def main() -> None:
     baseline_sum_energy = sum([x[1] for x in baseline_results.values()])
     print(f"  Total: {baseline_max_time:.6f}s, {baseline_sum_energy:.6f}J")
 
-    print("Perseus results:")
-    for rank, (avg_time, avg_energy) in perseus_results.items():
+    print("Dominok results:")
+    for rank, (avg_time, avg_energy) in dominok_results.items():
         print(f"  Rank {rank}: {avg_time:.6f}s, {avg_energy:.6f}J")
-    perseus_max_time = max([x[0] for x in perseus_results.values()]) if perseus_results else 0.0
-    perseus_sum_energy = sum([x[1] for x in perseus_results.values()])
-    print(f"  Total: {perseus_max_time:.6f}s, {perseus_sum_energy:.6f}J")
+    dominok_max_time = max([x[0] for x in dominok_results.values()]) if dominok_results else 0.0
+    dominok_sum_energy = sum([x[1] for x in dominok_results.values()])
+    print(f"  Total: {dominok_max_time:.6f}s, {dominok_sum_energy:.6f}J")
             
 
 

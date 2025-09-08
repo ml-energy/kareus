@@ -31,10 +31,10 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
     comm_scheduler = config.kareus_scheduler
     if comm_scheduler is None:
         return {
-            "comm_overlap_window": (0, 6),
-            "comm_sm_configs": (None, None),
+            "comm_overlap_window": (2, 6),
+            "comm_sm_configs": (6, 1024),
             "comm_overlap_window_backward": (0, 6),
-            "comm_sm_configs_backward": (None, None),
+            "comm_sm_configs_backward": (6, 1024),
         }
     else:
         assert comm_scheduler.current_schedule is not None, "current_schedule is not set"

@@ -1,6 +1,6 @@
 name: megatron_llama_3_2_1b
 trainer:
-  devices: 4
+  devices: 8
   num_nodes: 1
   accelerator: gpu
   precision: bf16
@@ -47,9 +47,9 @@ model:
   mcore_gpt: True
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
-  micro_batch_size: 2 # Increased for smaller model
-  global_batch_size: 16 # will use more micro batches to reach global batch size
-  tensor_model_parallel_size: 1 # Reduced for smaller model
+  micro_batch_size: 8 # Increased for smaller model
+  global_batch_size: 64 # will use more micro batches to reach global batch size
+  tensor_model_parallel_size: 2 # Reduced for smaller model
   pipeline_model_parallel_size: 4 # inter-layer model parallelism
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
 
@@ -93,6 +93,7 @@ model:
     enable_energy_monitoring: true
     
   enable_zeus_monitor: true
+  enable_power_monitor: false
   enable_perseus_optimizer: true
 
   tokenizer:
@@ -112,14 +113,14 @@ model:
   fp16_lm_cross_entropy: False # Move the cross entropy unreduced loss calculation for lm head to fp16
 
   # Megatron O2-style half-precision
-  megatron_amp_O2: False # Enable O2-level automatic mixed precision using main parameters
+  megatron_amp_O2: True # Enable O2-level automatic mixed precision using main parameters
   grad_allreduce_chunk_size_mb: 125
 
   # Fusion
   grad_div_ar_fusion: True # Fuse grad division into torch.distributed.all_reduce. Only used with O2 and no pipeline parallelism..
   gradient_accumulation_fusion: False # Fuse weight gradient accumulation to GEMMs. Only used with pipeline parallelism and O2.
-  bias_activation_fusion: False # Use a kernel that fuses the bias addition from weight matrices with the subsequent activation function.
-  bias_dropout_add_fusion: False # Use a kernel that fuses the bias addition, dropout and residual connection addition.
+  bias_activation_fusion: True # Use a kernel that fuses the bias addition from weight matrices with the subsequent activation function.
+  bias_dropout_add_fusion: True # Use a kernel that fuses the bias addition, dropout and residual connection addition.
   masked_softmax_fusion: True # Use a kernel that fuses the attention softmax with it's mask.
   get_attention_mask_from_fusion: True # When using fused softmax it will create the attention mask so we won't copy it to the pipeline stages.
   apply_rope_fusion: True # Use a kernel to add rotary positional embeddings. Only used if position_embedding_type=rope
@@ -212,7 +213,7 @@ model:
 
   # Nsys profiling options
   nsys_profile:
-    enabled: True
+    enabled: False
     start_step: 10  # Global batch to start profiling
     end_step: 15 # Global batch to end profiling
     ranks: [0] # Global rank IDs to profile

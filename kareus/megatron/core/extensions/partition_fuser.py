@@ -118,8 +118,8 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             )
             comm_op_fwd.sync()
         
-        # if ar_start == 0:
-        #     comm_op.event_record(current_stream)
+        if ar_start == 0:
+            comm_op.event_record(current_stream)
 
         # Apply forward ops
         x = hidden_states
@@ -167,8 +167,8 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
 
             if ar_start == fused_idx:
                 # Wait for the event from the previous operation before starting allreduce
-                # comm_op.event_wait()
-                current_stream.synchronize()
+                comm_op_fwd.event_wait()
+                # current_stream.synchronize()
                 comm_op_fwd.fuser_forward(
                     [OperationContext()],
                     comm_input,
@@ -185,11 +185,11 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             )
 
             # Record event after the operation at fused_idx-1 completes
-            # if fused_idx == ar_start - 1:
-            #     comm_op.event_record(current_stream)
+            if fused_idx == ar_start - 1:
+                comm_op_fwd.event_record(current_stream)
 
-            if ar_end == fused_idx:
-                comm_op_fwd.sync()
+            # if ar_end == fused_idx:
+            #     comm_op_fwd.sync()
 
             # Get extra outputs
             if isinstance(op, QKVPostProcessOp):
@@ -229,7 +229,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_ctxs = basic_op_ctxs
             func_ctx.basic_op_num_params = [sum(1 for _ in op.parameters()) for op in basic_ops]
 
-        current_stream.synchronize()
+        # current_stream.synchronize()
         assert get_bias and get_residual, f"get_bias: {get_bias}, get_residual: {get_residual}"
         return x, bias, residual, comm_input
 
@@ -275,8 +275,8 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             )
             comm_op_bwd.sync()
     
-        # if ar_start == 0:
-        #     comm_op.event_record(current_stream)
+        if ar_start == 0:
+            comm_op_bwd.event_record(current_stream)
 
         # Apply backward ops
         dx = grad_output
@@ -302,8 +302,8 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 grad_extra_outputs = [(grad_bias,)]
 
             if ar_start == fused_idx:
-                # comm_op.event_wait()
-                current_stream.synchronize()
+                comm_op_bwd.event_wait()
+                # current_stream.synchronize()
                 comm_op_bwd.fuser_forward(
                     [None], grad_comm_input,
                     basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
@@ -319,11 +319,11 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 grad_params[idx] = dparams
                 basic_op_ctxs[idx].saved_tensors = None
 
-            # if fused_idx == ar_start - 1:
-            #     comm_op.event_record(current_stream)
+            if fused_idx == ar_start - 1:
+                comm_op_bwd.event_record(current_stream)
 
-            if ar_end == fused_idx:
-                comm_op_bwd.sync()
+            # if ar_end == fused_idx:
+            #     comm_op_bwd.sync()
 
             if isinstance(op, BiasDropoutAddOp):
                 grad_bias, grad_residual = fused_op_grad_extra_inputs[0]
@@ -357,7 +357,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 )
             grad_params_flat.extend(dparams)
 
-        current_stream.synchronize()
+        # current_stream.synchronize()
         return (
             dx,  # hidden_states
             grad_bias,  # bias

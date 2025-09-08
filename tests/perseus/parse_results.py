@@ -117,12 +117,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Parse baseline time and energy results from zeus monitor files")
     parser.add_argument(
         "--baseline_path", 
-        default="nemo_experiments/megatron_llama_3_2_3b/baseline",
+        default="nemo_experiments/megatron_llama_3_2_1b/baseline",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(
         "--perseus_path", 
-        default="nemo_experiments/megatron_llama_3_2_3b/optimized",
+        default="nemo_experiments/megatron_llama_3_2_1b/optimized",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(

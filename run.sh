@@ -1,11 +1,11 @@
 cd tests/perseus
 # /workspaces/Kareus/tests/simple_test/data/my-gpt_text_document
 # droupout?
-nsys profile -c cudaProfilerApi -o megatron_llama3b -f true python megatron_gpt_pretraining.py
+nsys profile -c cudaProfilerApi -o megatron_llama1b -f true python megatron_gpt_pretraining.py
 # nsys_profile: False
 
 cd tests/kareus
-nsys profile -c cudaProfilerApi -o dominok_llama3b -f true python kareus_gpt_pretraining.py
+nsys profile -c cudaProfilerApi -o dominok_llama1b -f true python kareus_gpt_pretraining.py
 # nsys_profile: False
 
 # Megatron baseline
@@ -21,7 +21,7 @@ python run_optimization.py
 # enable_megatron_timers: false
 # enable_zeus_monitor: true
 python megatron_gpt_pretraining.py
-mv nemo_experiments/megatron_llama_3_2_3b/2025* nemo_experiments/megatron_llama_3_2_3b/baseline/
+mv nemo_experiments/megatron_llama_3_2_1b/2025* nemo_experiments/megatron_llama_3_2_1b/baseline/
 # enable_perseus_optimizer: true
 # ZEUS_PFO_SCHEDULER=PointSolution3D ZEUS_PFO_SCHEDULER_ARGS='{"solution_path": "/workspaces/Kareus/tests/perseus/nemo_experiments/megatron_llama_3_2_3b/perseus_results/freqs_pipeline_*.py"}' uvicorn zeus.optimizer.pipeline_frequency.server.router:app --port 7787
 python megatron_gpt_pretraining.py

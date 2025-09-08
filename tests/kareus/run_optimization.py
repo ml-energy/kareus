@@ -39,15 +39,15 @@ logger = logging.getLogger()
 @dataclass
 class Args:
     # Path to instruction profile results
-    inst_profile: str = "profile.csv"
+    inst_profile: str = "nemo_experiments/megatron_llama_3_2_1b/profiling/profile.csv"
     # Directory to output results
-    output_dir: str = "nemo_experiments/megatron_llama_3_2_3b/kareus_results"
+    output_dir: str = "nemo_experiments/megatron_llama_3_2_1b/perseus_results"
     # Number of microbatchs
-    num_mbs: int = 2
+    num_mbs: int = 8
     # Number of stages
-    num_stages: int = 2
+    num_stages: int = 4
     # GPU power consumption while blocking on P2P communication, in Watts
-    p2p_power: float = 90.0
+    p2p_power: float = 87.62
     # Interval to draw the state of the pipeline
     plot_interval: int = 100
     # The unit of reduction for each iteration, in seconds

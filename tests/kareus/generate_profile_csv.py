@@ -192,7 +192,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile_dir", default="nemo_experiments/megatron_llama_3_2_1b/profiling", help="Directory containing profiling results.")
     parser.add_argument("--num_microbatches", default=8, type=int, help="Number of microbatches.")
-    parser.add_argument("--num_prof_iters", default=100, type=int, help="Number of profiling iterations.")
+    parser.add_argument("--num_prof_iters", default=20, type=int, help="Number of profiling iterations.")
     parser.add_argument("--warmup_iters", default=10, type=int, help="Number of warmup iterations.")
     parser.add_argument("--gpu_type", default="A100", choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--tensor_parallel_size", default=2, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")

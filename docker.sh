@@ -28,4 +28,4 @@ docker run -it \
 # pip install -e ".[all]" 
 # pip install -e . 
 
-# pip install zeus==0.12.1.post2
+# zeus pip install -e . pip install '.[pfo-server]'
