@@ -25,8 +25,12 @@ import pandas as pd
 CUR_DIR = os.path.dirname(__file__)
 if CUR_DIR not in sys.path:
     sys.path.append(CUR_DIR)
+FUSER_DIR = os.path.join(CUR_DIR, '..', '..', 'fuser')
+if FUSER_DIR not in sys.path:
+    sys.path.append(FUSER_DIR)
 
 from overlap_test_mlp import MLPFuserTest  # noqa: E402
+from common_config import FuserTestConfig  # noqa: E402
 
 from zeus.monitor import ZeusMonitor  # noqa: E402
 from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser  # noqa: E402
@@ -51,11 +55,12 @@ from botorch.utils.multi_objective.hypervolume import Hypervolume
 # -----------------------------
 
 OVERLAP_WINDOWS: List[Tuple[int, int]] = [
-    (-1, -1),
-    (0, 1), (2, 3), (4, 4), (5, 6),
-    (0, 3), (2, 4), (4, 6),
-    (0, 4), (2, 6),
-    (0, 6),
+    # (-1, -1),
+    # (0, 1), (2, 3), (4, 4), (5, 6),
+    # (0, 3), (2, 4), (4, 6),
+    # (0, 4), (2, 6),
+    # (0, 6),
+    (-1, -1), (0, 6), (2, 6), (4, 6), (5, 6),
 ]
 
 SM_VALUES: List[int] = list(range(1, 21))
@@ -238,7 +243,7 @@ def measure_on_hardware(
         target_indices = None
     _set_gpu_frequency(freq_mhz, device_indices=target_indices)
 
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/"
     os.makedirs(logs_dir, exist_ok=True)
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
@@ -536,14 +541,14 @@ def try_load_initial_from_cache(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
-    parser.add_argument("--seq_len", "-s", type=int, default=4096)
+    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
+    parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default="A100")
 
-    parser.add_argument("--n_init", type=int, default=128)
-    parser.add_argument("--batches", type=int, default=16)
-    parser.add_argument("--acq_batch", type=int, default=32, help="New evaluations per batch")
+    parser.add_argument("--n_init", type=int, default=FuserTestConfig.BO_DEFAULT_N_INIT)
+    parser.add_argument("--batches", type=int, default=FuserTestConfig.BO_DEFAULT_BATCHES)
+    parser.add_argument("--acq_batch", type=int, default=FuserTestConfig.BO_DEFAULT_ACQ_BATCH, help="New evaluations per batch")
     parser.add_argument("--use_effective_energy", action="store_true",
                         help="Use effective energy instead of real energy for GBT training (Pareto frontier still uses effective energy)")
     parser.add_argument("--normalize_objectives", action="store_true",
@@ -565,13 +570,10 @@ def main() -> None:
     if args.gpu_type == "A40":
         FREQ_VALUES = list(map(int, np.arange(1740, 1000 - 30, -30)))
     else:
-        FREQ_VALUES = list(map(int, np.arange(1410, 960 - 15, -15)))
+        FREQ_VALUES = list(map(int, np.arange(1410, 900 - 30, -30)))
     print(f"Frequency search set has {len(FREQ_VALUES)} values (min={min(FREQ_VALUES)}, max={max(FREQ_VALUES)})")
 
-    if args.gpu_type == "A40":
-        p2p_power_w = 90.0
-    else:
-        p2p_power_w = 70.0
+    p2p_power_w = FuserTestConfig.get_p2p_power(args.gpu_type)
 
     all_configs = generate_all_configurations()
     total_configs = len(all_configs)

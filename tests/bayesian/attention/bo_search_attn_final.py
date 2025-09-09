@@ -40,8 +40,12 @@ import pandas as pd
 CUR_DIR = os.path.dirname(__file__)
 if CUR_DIR not in sys.path:
     sys.path.append(CUR_DIR)
+FUSER_DIR = os.path.join(CUR_DIR, '..', '..', 'fuser')
+if FUSER_DIR not in sys.path:
+    sys.path.append(FUSER_DIR)
 
 from overlap_test_attn import AttentionFuserTest  # noqa: E402
+from common_config import FuserTestConfig  # noqa: E402
 
 # Third-party utilities used by the evaluation path
 from zeus.monitor import ZeusMonitor  # noqa: E402
@@ -667,14 +671,14 @@ def is_config_in_dataset(config: np.ndarray, dataset: np.ndarray) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
-    parser.add_argument("--seq_len", "-s", type=int, default=4096)
+    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
+    parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default="A100")
 
-    parser.add_argument("--n_init", type=int, default=128)
-    parser.add_argument("--batches", type=int, default=16)
-    parser.add_argument("--acq_batch", type=int, default=32, help="New evaluations per batch")
+    parser.add_argument("--n_init", type=int, default=FuserTestConfig.BO_DEFAULT_N_INIT)
+    parser.add_argument("--batches", type=int, default=FuserTestConfig.BO_DEFAULT_BATCHES)
+    parser.add_argument("--acq_batch", type=int, default=FuserTestConfig.BO_DEFAULT_ACQ_BATCH, help="New evaluations per batch")
     parser.add_argument("--use_effective_energy", action="store_true",
                         help="Use effective energy instead of real energy for GBT training (Pareto frontier still uses effective energy)")
     parser.add_argument("--normalize_objectives", action="store_true",
@@ -712,14 +716,11 @@ def main() -> None:
         FREQ_VALUES = list(map(int, np.arange(1740, 1000 - 30, -30)))
         # FREQ_VALUES = [1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000]
     else:  # A100
-        FREQ_VALUES = list(map(int, np.arange(1410, 960 - 15, -15)))
+        FREQ_VALUES = list(map(int, np.arange(1410, 900 - 30, -30)))
     print(f"Frequency search set has {len(FREQ_VALUES)} values (min={min(FREQ_VALUES)}, max={max(FREQ_VALUES)})")
 
     # p2p power per GPU type (W)
-    if args.gpu_type == "A40":
-        p2p_power_w = 90.0
-    else:
-        p2p_power_w = 70.0
+    p2p_power_w = FuserTestConfig.get_p2p_power(args.gpu_type)
 
     # Build initial design by random sampling from the discrete space
     all_configs = generate_all_configurations()
