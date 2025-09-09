@@ -3,8 +3,7 @@
 GPU1=4
 GPU2=5
 
-# Test frequencies from 1700 to 1200 (step -100) and sm_num from 1 to 20
-for frequency in 1400 1300 1200 1100 1000; do
+for frequency in $(seq 1410 -30 900); do
     echo "Testing frequency: ${frequency}"
     
     # Lock GPU clocks to current frequency

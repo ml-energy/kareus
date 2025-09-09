@@ -256,11 +256,12 @@ class MLPFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1),
-            (0, 1), (2, 2), (3, 4), (5, 6),
-            (0, 2), (2, 4), (3, 6),
-            (0, 4), (2, 6),
-            (0, 6),
+            # (-1, -1),
+            # (0, 1), (2, 2), (3, 4), (5, 6),
+            # (0, 2), (2, 4), (3, 6),
+            # (0, 4), (2, 6),
+            # (0, 6),
+            (-1, -1), (0, 6), (2, 6), (3, 6), (5, 6),
         ]
         return overlap_windows
     
@@ -420,7 +421,7 @@ class MLPFuserTest:
                             overlap_window, sm_configs
                         )
                     # return
-                    time.sleep(30)
+                    time.sleep(10)
 
 
 def overlap_test(rank, world_size, args, master_port):

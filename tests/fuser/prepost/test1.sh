@@ -1,10 +1,9 @@
 #!/bin/bash
 
-GPU1=0
-GPU2=1
+GPU1=2
+GPU2=3
 
-# Test frequencies from 1700 to 1200 (step -100) and sm_num from 1 to 20
-for frequency in 1700 1600 1500 1400 1300 1200 1100 1000; do
+for frequency in $(seq 1140 -30 900); do
     echo "Testing frequency: ${frequency}"
     
     # Lock GPU clocks to current frequency
@@ -14,8 +13,11 @@ for frequency in 1700 1600 1500 1400 1300 1200 1100 1000; do
     output_file="output_${frequency}.log"
     
     # Run the test
-    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u profile_postprocess.py --frequency ${frequency} > ${output_file} 2>&1
-    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u profile_postprocess_backward.py --frequency ${frequency} > ${output_file} 2>&1
+    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u profile_preprocess.py --frequency ${frequency} > ${output_file} 2>&1
+    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u profile_preprocess_backward.py --frequency ${frequency} >> ${output_file} 2>&1
+    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u profile_loss.py --frequency ${frequency} >> ${output_file} 2>&1
+    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u profile_postprocess.py --frequency ${frequency} >> ${output_file} 2>&1
+    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u profile_postprocess_backward.py --frequency ${frequency} >> ${output_file} 2>&1
     
     echo "    Completed: ${output_file}"
     

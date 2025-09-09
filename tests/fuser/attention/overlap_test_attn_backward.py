@@ -308,12 +308,13 @@ class AttentionFuserBackwardTest:
     
     def get_backward_overlap_windows(self):
         overlap_windows = [
-            (-1, -1),
-            (0, 1), (2, 2), (3, 4), (5, 6), (7, 8),
-            (0, 2), (2, 4), (3, 6), (5, 8),
-            (0, 4), (2, 6), (3, 8),
-            (0, 6), (2, 8),
-            (0, 8),
+            # (-1, -1),
+            # (0, 1), (2, 2), (3, 4), (5, 6), (7, 8),
+            # (0, 2), (2, 4), (3, 6), (5, 8),
+            # (0, 4), (2, 6), (3, 8),
+            # (0, 6), (2, 8),
+            # (0, 8),
+            (-1, -1), (0, 8), (2, 8), (3, 8), (5, 8), (7, 8),
         ]
         return overlap_windows
     
@@ -488,7 +489,7 @@ class AttentionFuserBackwardTest:
                             sm_configs
                         )
                     # return
-                    time.sleep(30)
+                    time.sleep(10)
 
 
 def overlap_test(rank, world_size, args, master_port):

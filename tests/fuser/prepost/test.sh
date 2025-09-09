@@ -3,7 +3,7 @@
 GPU1=0
 GPU2=1
 
-for frequency in $(seq 1410 -15 960); do
+for frequency in $(seq 1410 -30 1170); do
     echo "Testing frequency: ${frequency}"
     
     # Lock GPU clocks to current frequency

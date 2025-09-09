@@ -1,17 +1,16 @@
 #!/bin/bash
 
-GPU1=0
-GPU2=1
+GPU1=2
+GPU2=3
 
-# Test frequencies from 1700 to 1200 (step -100) and sm_num from 1 to 20
-for frequency in 1400 1300 1200 1100 1000; do
+for frequency in $(seq 1410 -30 900); do
     echo "Testing frequency: ${frequency}"
     
     # Lock GPU clocks to current frequency
     nvidia-smi -i ${GPU1},${GPU2} --lock-gpu-clocks=${frequency},${frequency}
     
     # Create unique output filename
-    output_file="output_bwd_${frequency}.log"
+    output_file="output_${frequency}.log"
     
     # Run the test
     CUDA_VISIBLE_DEVICES=${GPU1},${GPU2} python -u overlap_test_mlp_backward.py --frequency ${frequency} > ${output_file} 2>&1

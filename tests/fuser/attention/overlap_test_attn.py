@@ -219,12 +219,13 @@ class AttentionFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1),
-            (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
-            (0, 3), (2, 5), (4, 6), (6, 8),
-            (0, 5), (2, 6), (4, 8),
-            (0, 6), (2, 8),
-            (0, 8),
+            # (-1, -1),
+            # (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
+            # (0, 3), (2, 5), (4, 6), (6, 8),
+            # (0, 5), (2, 6), (4, 8),
+            # (0, 6), (2, 8),
+            # (0, 8),
+            (-1, -1), (0, 8), (2, 8), (4, 8), (6, 8), (7, 8),
         ]
         return overlap_windows
     
@@ -257,64 +258,64 @@ class AttentionFuserTest:
         dist.barrier()
         time_end = time.time()
         duration = (time_end - time_start) / 8
-        # if self.rank == 0:
-        #     iterations = int(8 / duration)
-        #     dist_list = [iterations]
-        # else:
-        #     dist_list = [None]
-        # dist.broadcast_object_list(dist_list, src=0, group=self.tp_group)
-        # iterations = dist_list[0]
-        # print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
+        if self.rank == 0:
+            iterations = int(8 / duration)
+            dist_list = [iterations]
+        else:
+            dist_list = [None]
+        dist.broadcast_object_list(dist_list, src=0, group=self.tp_group)
+        iterations = dist_list[0]
+        print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
 
-        # for repeat in range(self.repeat_num):
-        #     # manager = multiprocessing.Manager()
-        #     # temperature_data = manager.list()
-        #     # proc = temperature_start(temperature_data, self.rank)
+        for repeat in range(self.repeat_num):
+            # manager = multiprocessing.Manager()
+            # temperature_data = manager.list()
+            # proc = temperature_start(temperature_data, self.rank)
 
-        #     torch.cuda.synchronize()
-        #     dist.barrier()
-        #     if self.rank == 0:
-        #         monitor.begin_window("step")
+            torch.cuda.synchronize()
+            dist.barrier()
+            if self.rank == 0:
+                monitor.begin_window("step")
 
-        #     for i in range(iterations):
-        #         output, output_bias, output_residual, allreduce_output = attention_fuser(
-        #             hidden_states=hidden_states,
-        #             bias=bias,
-        #             residual=residual,
-        #             rotary_pos_emb=rotary_pos_emb,
-        #             attention_mask=attention_mask,
-        #             allreduce_input=allreduce_inputs,
-        #             allreduce_overlap_window=overlap_window,
-        #             allreduce_sm_configs=sm_configs,
-        #         )
-        #     torch.cuda.synchronize()
-        #     dist.barrier()
+            for i in range(iterations):
+                output, output_bias, output_residual, allreduce_output = attention_fuser(
+                    hidden_states=hidden_states,
+                    bias=bias,
+                    residual=residual,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_mask=attention_mask,
+                    allreduce_input=allreduce_inputs,
+                    allreduce_overlap_window=overlap_window,
+                    allreduce_sm_configs=sm_configs,
+                )
+            torch.cuda.synchronize()
+            dist.barrier()
 
-        #     if self.rank == 0:
-        #         result = monitor.end_window("step")
-        #         t_result = result.time / iterations
-        #         e_result = result.total_energy / iterations
-        #         ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
-        #         t_results_list.append(t_result)
-        #         e_results_list.append(e_result)
-        #         ranks_energy_list.append(ranks_energy)
+            if self.rank == 0:
+                result = monitor.end_window("step")
+                t_result = result.time / iterations
+                e_result = result.total_energy / iterations
+                ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
+                t_results_list.append(t_result)
+                e_results_list.append(e_result)
+                ranks_energy_list.append(ranks_energy)
 
-        #     # temperature_end(proc, temperature_data)
-        #     # with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/" \
-        #     #     f"{self.frequency}/overlap_{overlap_window[0]}_{overlap_window[1]}_sm_{sm_configs[0]}_{sm_configs[1]}/" \
-        #     #     f"gpu{self.rank}_iter{repeat}.csv", "w") as f:
+            # temperature_end(proc, temperature_data)
+            # with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/" \
+            #     f"{self.frequency}/overlap_{overlap_window[0]}_{overlap_window[1]}_sm_{sm_configs[0]}_{sm_configs[1]}/" \
+            #     f"gpu{self.rank}_iter{repeat}.csv", "w") as f:
                 
-        #     #     file_str = "timestamp,temperature,clock,power\n"
-        #     #     for data in temperature_data:
-        #     #         file_str += ",".join(map(str, data)) + "\n"
-        #     #     f.write(file_str)
+            #     file_str = "timestamp,temperature,clock,power\n"
+            #     for data in temperature_data:
+            #         file_str += ",".join(map(str, data)) + "\n"
+            #     f.write(file_str)
         
-        # if self.rank == 0:
-        #     with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "a") as f:
-        #         line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
-        #         for i in range(self.repeat_num):
-        #             line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
-        #         f.write(line_str.rstrip(",") + "\n")
+        if self.rank == 0:
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "a") as f:
+                line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
+                for i in range(self.repeat_num):
+                    line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
+                f.write(line_str.rstrip(",") + "\n")
             
     
     def run_overlap_test(self):
@@ -332,17 +333,17 @@ class AttentionFuserTest:
         print(f"attention_fuser._backward_ops: {attention_fuser._backward_ops}")
 
         monitor = None
-        # if self.rank == 0:
-        #     gpu_indices = list(range(self.world_size))
-        #     monitor = ZeusMonitor(gpu_indices=gpu_indices)
-        #     os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-        #     with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
-        #         title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
-        #         for i in range(self.repeat_num):
-        #             title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
-        #         title = title.rstrip(",")
-        #         title += "\n"
-        #         f.write(title)
+        if self.rank == 0:
+            gpu_indices = list(range(self.world_size))
+            monitor = ZeusMonitor(gpu_indices=gpu_indices)
+            os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
+                title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
+                for i in range(self.repeat_num):
+                    title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
+                title = title.rstrip(",")
+                title += "\n"
+                f.write(title)
         
         # skip = True
         overlap_windows = self.get_overlap_windows()
@@ -366,7 +367,7 @@ class AttentionFuserTest:
                             overlap_window, sm_configs
                         )
                     # return
-                    # time.sleep(30)
+                    time.sleep(10)
 
 
 def overlap_test(rank, world_size, args, master_port):
@@ -385,10 +386,10 @@ def overlap_test(rank, world_size, args, master_port):
         print(f"Error: {e}")
         traceback.print_exc()
     finally:
-        # if rank == 0:
-        #     pid = os.getpid()
-        #     print(f"Killing process group {pid}")
-        #     os.system(f'pkill -P {pid}')
+        if rank == 0:
+            pid = os.getpid()
+            print(f"Killing process group {pid}")
+            os.system(f'pkill -P {pid}')
 
         if dist.is_initialized():
             dist.destroy_process_group()
