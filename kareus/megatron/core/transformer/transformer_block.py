@@ -317,30 +317,199 @@ class TransformerBlock(MegatronModule):
             raise ValueError(f"Batch size must be at least 2 for nano-batch splitting, got {batch_size}")
         
         mid_point = batch_size // 2
+
+        assert attention_mask is None
+        assert context is None
+        assert context_mask is None
+        assert sequence_len_offset is None
+        assert attention_bias is None
+        assert sequence_len_offset is None
         
         # Split input tensors
         hidden_states_1 = hidden_states[:, :mid_point, ...]
         hidden_states_2 = hidden_states[:, mid_point:, ...]
+
+        attention_mask_1 = None
+        attention_mask_2 = None
+        context_1 = None
+        context_2 = None
+        context_mask_1 = None
+        context_mask_2 = None
+        attention_bias_1 = None
+        attention_bias_2 = None
+        sequence_len_offset_1 = None
+        sequence_len_offset_2 = None
         
-        attention_mask_1 = attention_mask[:, :, :, :mid_point] if attention_mask is not None else None
-        attention_mask_2 = attention_mask[:, :, :, mid_point:] if attention_mask is not None else None
+        # attention_mask_1 = attention_mask[:, :, :, :mid_point] if attention_mask is not None else None
+        # attention_mask_2 = attention_mask[:, :, :, mid_point:] if attention_mask is not None else None
         
-        context_1 = context[:, :mid_point, ...] if context is not None else None
-        context_2 = context[:, mid_point:, ...] if context is not None else None
+        # context_1 = context[:, :mid_point, ...] if context is not None else None
+        # context_2 = context[:, mid_point:, ...] if context is not None else None
         
-        context_mask_1 = context_mask[:, :mid_point, ...] if context_mask is not None else None
-        context_mask_2 = context_mask[:, mid_point:, ...] if context_mask is not None else None
+        # context_mask_1 = context_mask[:, :mid_point, ...] if context_mask is not None else None
+        # context_mask_2 = context_mask[:, mid_point:, ...] if context_mask is not None else None
         
-        attention_bias_1 = attention_bias[:mid_point, ...] if attention_bias is not None else None
-        attention_bias_2 = attention_bias[mid_point:, ...] if attention_bias is not None else None
+        # attention_bias_1 = attention_bias[:mid_point, ...] if attention_bias is not None else None
+        # attention_bias_2 = attention_bias[mid_point:, ...] if attention_bias is not None else None
         
-        sequence_len_offset_1 = sequence_len_offset[:mid_point] if sequence_len_offset is not None else None
-        sequence_len_offset_2 = sequence_len_offset[mid_point:] if sequence_len_offset is not None else None
+        # sequence_len_offset_1 = sequence_len_offset[:mid_point] if sequence_len_offset is not None else None
+        # sequence_len_offset_2 = sequence_len_offset[mid_point:] if sequence_len_offset is not None else None
         
         return (
             (hidden_states_1, attention_mask_1, context_1, context_mask_1, attention_bias_1, sequence_len_offset_1),
             (hidden_states_2, attention_mask_2, context_2, context_mask_2, attention_bias_2, sequence_len_offset_2)
         )
+
+    def _checkpointed_forward(
+        self,
+        *,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor],
+        context: Optional[Tensor],
+        context_mask: Optional[Tensor],
+        rotary_pos_emb: Optional[Tensor],
+        attention_bias: Optional[Tensor],
+        inference_context: Optional[BaseInferenceContext],
+        packed_seq_params: Optional[PackedSeqParams],
+    ) -> Tensor:
+        """
+        Activation-checkpointed forward path. Only supports recompute_granularity == 'full'.
+
+        We checkpoint the entire block execution in a single function to avoid
+        per-layer state plumbing for the custom nano-batch interleaving.
+        """
+        
+
+        def run_layers(
+            h1: Tensor,
+            h2: Tensor,
+            am1: Optional[Tensor],
+            am2: Optional[Tensor],
+            c1: Optional[Tensor],
+            c2: Optional[Tensor],
+            cm1: Optional[Tensor],
+            cm2: Optional[Tensor],
+            ab1: Optional[Tensor],
+            ab2: Optional[Tensor],
+            psp: Optional[PackedSeqParams],
+        ):
+            # Local copies of closures that may be None
+            current_hidden_1 = h1
+            current_hidden_2 = h2
+            current_context_1 = c1
+            current_context_2 = c2
+
+            # Initialize residual/comm as in the non-checkpoint forward
+            residual_1 = h2
+            residual_2 = h1
+            comm_hidden_1 = (h2, None)
+
+            for l_no in range(len(self.attention_layers)):
+                attention_layer = self.attention_layers[l_no]
+                mlp_layer = self.mlp_layers[l_no]
+
+                # Attention pass - micro-batch 1
+                current_hidden_1, residual_1, comm_hidden_1, current_context_1 = attention_layer(
+                    batch_idx=1,
+                    hidden_states=current_hidden_1,
+                    residual=residual_1,
+                    comm_hidden_states=comm_hidden_1,
+                    attention_mask=am1,
+                    context=current_context_1,
+                    context_mask=cm1,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_bias=ab1,
+                    inference_context=inference_context,
+                    packed_seq_params=psp,
+                )
+                comm_hidden_2 = current_hidden_1
+                current_hidden_2 = comm_hidden_1 if not l_no == 0 else current_hidden_2
+
+                # Attention pass - micro-batch 2
+                current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(
+                    batch_idx=2,
+                    hidden_states=current_hidden_2,
+                    residual=residual_2,
+                    comm_hidden_states=comm_hidden_2,
+                    attention_mask=am2,
+                    context=current_context_2,
+                    context_mask=cm2,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_bias=ab2,
+                    inference_context=inference_context,
+                    packed_seq_params=psp,
+                )
+                comm_hidden_1 = current_hidden_2
+                current_hidden_1 = comm_hidden_2
+
+                # MLP pass - micro-batch 1
+                current_hidden_1, residual_1, comm_hidden_1 = mlp_layer(
+                    batch_idx=1,
+                    hidden_states=current_hidden_1,
+                    residual=residual_1,
+                    comm_hidden_states=comm_hidden_1,
+                )
+                comm_hidden_2 = current_hidden_1
+                current_hidden_2 = comm_hidden_1
+
+                # MLP pass - micro-batch 2
+                current_hidden_2, residual_2, comm_hidden_2 = mlp_layer(
+                    batch_idx=2,
+                    hidden_states=current_hidden_2,
+                    residual=residual_2,
+                    comm_hidden_states=comm_hidden_2,
+                )
+                comm_hidden_1 = current_hidden_2
+                current_hidden_1 = comm_hidden_2
+
+            return current_hidden_1, current_hidden_2, current_context_1, current_context_2
+
+        def checkpoint_handler(forward_func):
+            # Match the original calling convention: pass a single set of canonical inputs
+            # and keep nano-batch splits in the closure.
+            if self.config.fp8:
+                return te_checkpoint(
+                    forward_func,
+                    self.config.distribute_saved_activations,
+                    tensor_parallel.random.get_cuda_rng_tracker,
+                    parallel_state.get_tensor_model_parallel_group(),
+                    hidden_states,
+                    attention_mask,
+                    context,
+                    context_mask,
+                    rotary_pos_emb,
+                    attention_bias,
+                    packed_seq_params,
+                )
+            else:
+                return tensor_parallel.checkpoint(
+                    forward_func,
+                    self.config.distribute_saved_activations,
+                    hidden_states,
+                    attention_mask,
+                    context,
+                    context_mask,
+                    rotary_pos_emb,
+                    attention_bias,
+                    packed_seq_params,
+                )
+
+        # Accept canonical inputs and recompute nano-batch splits inside the checkpointed func
+        def custom_forward(_hs, _am, _ctx, _cm, _rpe, _ab, _psp):
+            (
+                hs1, am1, ctx1, cm1, ab1, _,
+            ), (
+                hs2, am2, ctx2, cm2, ab2, _,
+            ) = self._split_tensors_for_nanobatch(
+                _hs, _am, _ctx, _cm, _ab, None
+            )
+            out_h1, out_h2, _, _ = run_layers(hs1, hs2, am1, am2, ctx1, ctx2, cm1, cm2, ab1, ab2, _psp)
+            hidden_states_1 = out_h1[0]
+            hidden_states_2 = out_h2[0]
+            return torch.cat([hidden_states_1, hidden_states_2], dim=1)
+
+        hidden_states = checkpoint_handler(custom_forward)
+        return hidden_states
 
     def forward(
         self,
@@ -418,17 +587,6 @@ class TransformerBlock(MegatronModule):
         #   is called here to be future-proof and corner-case-proof.
         hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
 
-        # save_tensors(hidden_states, "make_viewless_tensor")
-        
-        # print(f"hidden_dropout: {self.config.hidden_dropout}")
-
-        # Split input tensors using helper function
-        (hidden_states_1, attention_mask_1, context_1, context_mask_1, attention_bias_1, sequence_len_offset_1), \
-        (hidden_states_2, attention_mask_2, context_2, context_mask_2, attention_bias_2, sequence_len_offset_2) = \
-            self._split_tensors_for_nanobatch(
-                hidden_states, attention_mask, context, context_mask, attention_bias, sequence_len_offset
-            )
-
         # Process nano-batches with interleaved execution:
         # 1. Execute attention for batch 1
         # 2. Execute attention for batch 2  
@@ -452,8 +610,22 @@ class TransformerBlock(MegatronModule):
         with rng_context, outer_fp8_context:
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
-                raise NotImplementedError("Activation checkpointing not implemented")
+                hidden_states = self._checkpointed_forward(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    context=context,
+                    context_mask=context_mask,
+                    rotary_pos_emb=rotary_pos_emb,
+                    attention_bias=attention_bias,
+                    inference_context=inference_context,
+                    packed_seq_params=packed_seq_params,
+                )
             else:
+                (hidden_states_1, attention_mask_1, context_1, context_mask_1, attention_bias_1, sequence_len_offset_1), \
+                (hidden_states_2, attention_mask_2, context_2, context_mask_2, attention_bias_2, sequence_len_offset_2) = \
+                    self._split_tensors_for_nanobatch(
+                        hidden_states, attention_mask, context, context_mask, attention_bias, sequence_len_offset
+                    )
                 # Layer-by-layer execution: For each layer, process both nano-batches
                 # through attention, then both nano-batches through MLP
                 current_hidden_1 = hidden_states_1

@@ -119,7 +119,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             comm_op_fwd.sync()
         
         if ar_start == 0:
-            comm_op.event_record(current_stream)
+            comm_op_fwd.event_record(current_stream)
 
         # Apply forward ops
         x = hidden_states
@@ -230,6 +230,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_num_params = [sum(1 for _ in op.parameters()) for op in basic_ops]
 
         # current_stream.synchronize()
+        comm_op_fwd.sync()
         assert get_bias and get_residual, f"get_bias: {get_bias}, get_residual: {get_residual}"
         return x, bias, residual, comm_input
 
@@ -358,6 +359,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             grad_params_flat.extend(dparams)
 
         # current_stream.synchronize()
+        comm_op_bwd.sync()
         return (
             dx,  # hidden_states
             grad_bias,  # bias
