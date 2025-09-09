@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Type
 from collections import defaultdict
 from dataclasses import dataclass
+import sys
+import os
+FUSER_DIR = os.path.join(os.path.dirname(__file__), '..', 'fuser')
+if FUSER_DIR not in sys.path:
+    sys.path.append(FUSER_DIR)
+from common_config import FuserTestConfig  # noqa: E402
 
 import tyro
 import pandas as pd
@@ -39,15 +45,15 @@ logger = logging.getLogger()
 @dataclass
 class Args:
     # Path to instruction profile results
-    inst_profile: str = "nemo_experiments/megatron_llama_3_2_1b/profiling/profile.csv"
+    inst_profile: str = "nemo_experiments/megatron_llama_3_2_3b/profiling/profile.csv"
     # Directory to output results
-    output_dir: str = "nemo_experiments/megatron_llama_3_2_1b/perseus_results"
+    output_dir: str = "nemo_experiments/megatron_llama_3_2_3b/perseus_results"
     # Number of microbatchs
-    num_mbs: int = 8
+    num_mbs: int = FuserTestConfig.DEFAULT_NUM_MICROBATCHES
     # Number of stages
-    num_stages: int = 4
+    num_stages: int = FuserTestConfig.DEFAULT_STAGES
     # GPU power consumption while blocking on P2P communication, in Watts
-    p2p_power: float = 87.62
+    p2p_power: float = FuserTestConfig.get_p2p_power('A100')
     # Interval to draw the state of the pipeline
     plot_interval: int = 100
     # The unit of reduction for each iteration, in seconds
