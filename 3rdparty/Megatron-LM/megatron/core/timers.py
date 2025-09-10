@@ -290,7 +290,7 @@ class Timer(TimerBase):
         return self._energy_consumed.copy()
 
 
-def energy_polling_process(device_idx: int, channel: mp.SimpleQueue, output_dir: str, rank: int) -> None:
+def energy_polling_process(device_idx: int, channel: mp.SimpleQueue, output_dir: str, global_rank: int, local_rank: int) -> None:
     pynvml.nvmlInit()
     gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
 
@@ -308,12 +308,12 @@ def energy_polling_process(device_idx: int, channel: mp.SimpleQueue, output_dir:
 
         i += 1
         if not channel.empty():
-            print(f"energy polling process for rank {rank} received stop signal")
+            print(f"energy polling process for global {global_rank} local {local_rank} received stop signal")
             break
 
     pynvml.nvmlShutdown()
 
-    with open(f"{output_dir}/time-energy-{rank}.csv", "w") as f:
+    with open(f"{output_dir}/time-energy-{global_rank}-{local_rank}.csv", "w") as f:
         f.write("time,energy\n")
         for timing, energy in zip(timings, energy_consumed):
             f.write(f"{timing},{energy}\n")
@@ -322,7 +322,7 @@ def energy_polling_process(device_idx: int, channel: mp.SimpleQueue, output_dir:
 class Timers:
     """Class for a group of Timers with optional energy monitoring."""
 
-    def __init__(self, log_level, log_option, device_idx=None, enable_energy_monitoring=False, output_dir=None):
+    def __init__(self, log_level, log_option, device_idx=None, enable_energy_monitoring=False, output_dir=None, global_rank=None, local_rank=None):
         """Initialize group of timers.
 
         Args:
@@ -350,6 +350,8 @@ class Timers:
         self._device_idx = device_idx
         self._enable_energy_monitoring = enable_energy_monitoring
         self._output_dir = output_dir
+        self._global_rank = global_rank
+        self._local_rank = local_rank
         self._energy_polling_channel = None
         self._energy_polling_process = None
 
@@ -357,17 +359,18 @@ class Timers:
         if self._enable_energy_monitoring:
             assert self._device_idx is not None, "device_idx must be provided for energy monitoring"
             assert self._output_dir is not None, "output_dir must be provided for energy monitoring"
-            assert self._device_idx is not None, "device_idx must be provided for energy monitoring"
+            # Ranks are optional, but required for disambiguated filenames
+            assert self._global_rank is not None and self._local_rank is not None, "global_rank and local_rank must be provided for energy monitoring output filenames"
             os.makedirs(self._output_dir, exist_ok=True)
             self._start_energy_polling()
 
     def _start_energy_polling(self):
         """Start the background energy polling process."""
-        print(f"Starting energy polling process for rank {self._device_idx}")
+        print(f"Starting energy polling process for global {self._global_rank} local {self._local_rank}")
         self._energy_polling_channel = mp.SimpleQueue()
         self._energy_polling_process = mp.Process(
             target=energy_polling_process,
-            args=(self._device_idx, self._energy_polling_channel, self._output_dir, self._device_idx)
+            args=(self._device_idx, self._energy_polling_channel, self._output_dir, self._global_rank, self._local_rank)
         )
         self._energy_polling_process.start()
         time.sleep(1)
@@ -376,7 +379,7 @@ class Timers:
         """Stop the background energy polling process."""
         if self._energy_polling_process and self._energy_polling_channel:
             self._energy_polling_channel.put("end")
-            print(f"Stopping energy polling process for rank {self._device_idx}")
+            print(f"Stopping energy polling process for global {self._global_rank} local {self._local_rank}")
             self._energy_polling_process.join(timeout=5.0)
             if self._energy_polling_process.is_alive():
                 self._energy_polling_process.terminate()
@@ -430,7 +433,9 @@ class Timers:
             return
         
         # Export timing data
-        with open(f"{self._output_dir}/instructions-{self._device_idx}.csv", "w") as f:
+        suffix_global = self._global_rank if self._global_rank is not None else "unknown"
+        suffix_local = self._local_rank if self._local_rank is not None else "unknown"
+        with open(f"{self._output_dir}/instructions-{suffix_global}-{suffix_local}.csv", "w") as f:
             f.write("instruction,start,end\n")
             for name, timer in self._timers.items():
                 if isinstance(timer, Timer):  # Skip DummyTimer

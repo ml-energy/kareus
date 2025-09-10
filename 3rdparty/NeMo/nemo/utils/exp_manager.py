@@ -1129,12 +1129,39 @@ def get_log_dir(
                     "No version folders would be created under the log folder as " "'resume_if_exists' is enabled."
                 )
                 version = None
-            elif is_global_rank_zero():
-                if use_datetime_version:
-                    version = time.strftime('%Y-%m-%d_%H-%M-%S')
-                else:
-                    tensorboard_logger = TensorBoardLogger(save_dir=Path(_exp_dir), name=name, version=version)
-                    version = f"version_{tensorboard_logger.version}"
+            else:
+                # Generate a single version on global rank 0 and share it with others via a marker file.
+                base_dir = Path(_exp_dir) / str(name)
+                marker_path = base_dir / '.nemo_version'
+                try:
+                    if is_global_rank_zero():
+                        os.makedirs(base_dir, exist_ok=True)
+                        if not marker_path.exists():
+                            if use_datetime_version:
+                                version = time.strftime('%Y-%m-%d_%H-%M-%S')
+                            else:
+                                tensorboard_logger = TensorBoardLogger(save_dir=Path(_exp_dir), name=name, version=version)
+                                version = f"version_{tensorboard_logger.version}"
+                            with open(marker_path, 'w') as f:
+                                f.write("" if version is None else str(version))
+                        else:
+                            with open(marker_path, 'r') as f:
+                                version = f.read().strip()
+                    else:
+                        # Wait for rank 0 to create the marker for up to 30 seconds.
+                        wait_start = time.time()
+                        while not marker_path.exists() and (time.time() - wait_start) < 30.0:
+                            time.sleep(0.1)
+                        if marker_path.exists():
+                            with open(marker_path, 'r') as f:
+                                version = f.read().strip()
+                        else:
+                            # Fallback: generate a local timestamp if marker not found in time.
+                            version = time.strftime('%Y-%m-%d_%H-%M-%S') if use_datetime_version else None
+                except Exception as e:
+                    logging.warning(f"Failed to synchronize logging version across ranks: {e}")
+                    if not version and use_datetime_version:
+                        version = time.strftime('%Y-%m-%d_%H-%M-%S')
                 os.environ[NEMO_ENV_VARNAME_VERSION] = "" if version is None else version
 
     log_dir = Path(_exp_dir) / Path(str(name)) / Path("" if version is None else str(version))

@@ -182,7 +182,9 @@ class MegatronBaseModel(NLPModel):
             self.megatron_timers = Timers(log_level=2, log_option=self.megatron_timers_cfg['log_option'], 
                 enable_energy_monitoring=self.megatron_timers_cfg['enable_energy_monitoring'],
                 output_dir=self.megatron_timers_cfg['output_dir'],
-                device_idx=trainer.local_rank
+                device_idx=trainer.local_rank,
+                global_rank=trainer.global_rank,
+                local_rank=trainer.local_rank,
             )
         
         self.zeus_monitor = None
