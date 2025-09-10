@@ -51,14 +51,16 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
             "comm_sm_configs_backward": (6, 1024),
         }
     else:
-        print("using comm scheduler")
-        assert comm_scheduler.current_schedule is not None, "current_schedule is not set"
-        # TODO: first layer
+        item = getattr(comm_scheduler, "current_schedule", None)
+        if item is None:
+            raise RuntimeError("current_schedule is not set")
+        fwd_attn = item.fwd_attn
+        bwd_attn = item.bwd_attn
         return {
-            "comm_overlap_window": comm_scheduler.current_schedule[0].attn.overlap_window,
-            "comm_sm_configs": comm_scheduler.current_schedule[0].attn.resource_shape,
-            "comm_overlap_window_backward": comm_scheduler.current_schedule[1].attn.overlap_window,
-            "comm_sm_configs_backward": comm_scheduler.current_schedule[1].attn.resource_shape,
+            "comm_overlap_window": None if fwd_attn is None else fwd_attn.overlap_window,
+            "comm_sm_configs": None if fwd_attn is None else fwd_attn.resource_shape,
+            "comm_overlap_window_backward": None if bwd_attn is None else bwd_attn.overlap_window,
+            "comm_sm_configs_backward": None if bwd_attn is None else bwd_attn.resource_shape,
         }
 
 

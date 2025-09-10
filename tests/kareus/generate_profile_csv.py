@@ -11,6 +11,13 @@ import os
 import numpy as np
 import pandas as pd
 
+# Import shared defaults for frequency sets
+import sys
+FUSER_DIR = os.path.join(os.path.dirname(__file__), '..', 'fuser')
+if FUSER_DIR not in sys.path:
+    sys.path.append(FUSER_DIR)
+from common_config import FuserTestConfig  # noqa: E402
+
 
 class PiecewiseLinearModel:
     """A energy model that connects (x, y) measurements with a straight line."""
@@ -46,9 +53,9 @@ def main(
 
     # Enumerate supported GPU frequencies.
     if gpu_type == "A100":
-        freqs = np.arange(1410, 960 - 30, -30).tolist()
+        freqs = np.arange(1410, 900 - 30, -30).tolist()
     elif gpu_type == "A40":
-        freqs = np.arange(1740, 1000 - 15, -15).tolist()
+        freqs = np.arange(1740, 1000 - 30, -30).tolist()
     else:
         raise ValueError(f"Unsupported GPU type {gpu_type}.")
     print(f"Frequencies: {freqs}")
@@ -195,7 +202,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_prof_iters", default=20, type=int, help="Number of profiling iterations.")
     parser.add_argument("--warmup_iters", default=10, type=int, help="Number of warmup iterations.")
     parser.add_argument("--gpu_type", default="A100", choices=["A40", "A100"], help="Name of the GPU type.")
-    parser.add_argument("--tensor_parallel_size", default=2, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
+    parser.add_argument("--tensor_parallel_size", default=FuserTestConfig.DEFAULT_WORLD_SIZE, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
     args = parser.parse_args()
 
     main(args.profile_dir, args.num_microbatches, args.num_prof_iters, args.warmup_iters, args.gpu_type, args.tensor_parallel_size)

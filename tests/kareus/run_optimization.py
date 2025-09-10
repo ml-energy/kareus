@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Type
 from collections import defaultdict
 from dataclasses import dataclass
+import sys
+import os
+FUSER_DIR = os.path.join(os.path.dirname(__file__), '..', 'fuser')
+if FUSER_DIR not in sys.path:
+    sys.path.append(FUSER_DIR)
+from common_config import FuserTestConfig  # noqa: E402
 
 import tyro
 import pandas as pd
@@ -39,21 +45,23 @@ logger = logging.getLogger()
 @dataclass
 class Args:
     # Path to instruction profile results
-    inst_profile: str = "nemo_experiments/megatron_llama_3_2_1b/profiling/profile.csv"
+    inst_profile: str = "profile.csv"
     # Directory to output results
-    output_dir: str = "nemo_experiments/megatron_llama_3_2_1b/perseus_results"
+    output_dir: str = "perseus_results"
     # Number of microbatchs
-    num_mbs: int = 8
+    num_mbs: int = FuserTestConfig.DEFAULT_NUM_MICROBATCHES
     # Number of stages
-    num_stages: int = 4
+    num_stages: int = FuserTestConfig.DEFAULT_STAGES
     # GPU power consumption while blocking on P2P communication, in Watts
-    p2p_power: float = 87.62
+    p2p_power: float = FuserTestConfig.get_p2p_power('A100')
     # Interval to draw the state of the pipeline
     plot_interval: int = 100
     # The unit of reduction for each iteration, in seconds
     unit_time: float = 0.001
     # Noise factor for soft Pareto frontier filtering
     noise_factor: float = 0.95
+    # Whether to use activation checkpointing parsing (backward has recompute-forward configs)
+    use_activation_checkpointing: bool = True
 
 
 def main(args: Args) -> None:
@@ -88,30 +96,54 @@ def main(args: Args) -> None:
             )
             for _, row in _df.iterrows():
                 row = row.to_dict()
-                options.append(
-                    ExecutionOption[tuple[int, str, str]](
-                        real_time=row["time"],
-                        unit_time=args.unit_time,
-                        cost=row["energy"],
-                        knob=(
-                            int(row["frequency"]),
-                            str(row.get("attention_configs", "")),
-                            str(row.get("mlp_configs", "")),
-                        ),
+                if instruction is Backward and args.use_activation_checkpointing:
+                    # Backward knob includes recompute-forward and backward configs due to activation checkpointing
+                    options.append(
+                        ExecutionOption[tuple[int, str, str, str, str]](
+                            real_time=row["time"],
+                            unit_time=args.unit_time,
+                            cost=row["energy"],
+                            knob=(
+                                int(row["frequency"]),
+                                str(row.get("recompute_attention_configs", "")),
+                                str(row.get("recompute_mlp_configs", "")),
+                                str(row.get("attention_configs", "")),
+                                str(row.get("mlp_configs", "")),
+                            ),
+                        )
                     )
-                )
+                else:
+                    options.append(
+                        ExecutionOption[tuple[int, str, str]](
+                            real_time=row["time"],
+                            unit_time=args.unit_time,
+                            cost=row["energy"],
+                            knob=(
+                                int(row["frequency"]),
+                                str(row.get("attention_configs", "")),
+                                str(row.get("mlp_configs", "")),
+                            ),
+                        )
+                    )
 
             # Map the cost to be effective computation energy.
             # Everything from now on is in terms of effective energy.
             for option in options:
                 option.cost -= args.p2p_power * option.quant_time * option.unit_time
 
-            # Get the Preto frontier, quantize time, and deduplicate time.
-            cand_options = CandidateExecutionOptions[tuple[int, str, str]](options=options)
-            if len(cand_options.options) <= 3:
-                cand_options = CandidateExecutionOptions[tuple[int, str, str]](
-                    options=options, noise_factor=args.noise_factor
-                )
+            # Get the Pareto frontier, quantize time, and deduplicate time.
+            if instruction is Backward and args.use_activation_checkpointing:
+                cand_options = CandidateExecutionOptions[tuple[int, str, str, str, str]](options=options)
+                if len(cand_options.options) <= 3:
+                    cand_options = CandidateExecutionOptions[tuple[int, str, str, str, str]](
+                        options=options, noise_factor=args.noise_factor
+                    )
+            else:
+                cand_options = CandidateExecutionOptions[tuple[int, str, str]](options=options)
+                if len(cand_options.options) <= 3:
+                    cand_options = CandidateExecutionOptions[tuple[int, str, str]](
+                        options=options, noise_factor=args.noise_factor
+                    )
 
             # Fit the cost model.
             model = ExponentialModel(cand_options, search_strategy="best")
@@ -122,7 +154,10 @@ def main(args: Args) -> None:
             fig.savefig(f"{output_dir}/{inst_name.lower()}_{stage_id}.png")
 
             # Initialize the operation spec.
-            op_spec = OperationSpec[tuple[int, str, str]](options=cand_options, cost_model=model)
+            if instruction is Backward and args.use_activation_checkpointing:
+                op_spec = OperationSpec[tuple[int, str, str, str, str]](options=cand_options, cost_model=model)
+            else:
+                op_spec = OperationSpec[tuple[int, str, str]](options=cand_options, cost_model=model)
             op_spec_map[stage_id][instruction] = op_spec
 
     ####################
@@ -224,32 +259,99 @@ def main(args: Args) -> None:
         for stage_id, stage_insts in enumerate(instructions):
             stage_freq = []
             # For configs, group by microbatch id and store (forward_tuple, backward_tuple)
-            stage_cfgs_by_mb: dict[int, dict[str, tuple[str, str, str]]] = defaultdict(dict)
+            # forward tuple: ("forward", attn_cfg, mlp_cfg)
+            # backward tuple: if AC on -> ("backward", rec_attn_cfg, rec_mlp_cfg, bwd_attn_cfg, bwd_mlp_cfg)
+            #                 else     -> ("backward", bwd_attn_cfg, bwd_mlp_cfg)
+            if args.use_activation_checkpointing:
+                # Collect configs directly in 1F1B order (per instruction)
+                stage_cfgs_1f1b: list[tuple] = []
+            else:
+                stage_cfgs_by_mb: dict[int, dict[str, tuple]] = defaultdict(dict)
             for inst in stage_insts:
                 inst_name = type(inst).__name__.lower()
                 knob = inst.assigned_knob
-                # Expect knob to be a tuple: (frequency, attention_configs, mlp_configs)
-                if isinstance(knob, tuple):
-                    freq = knob[0] if len(knob) > 0 else None
-                    attn_cfg = knob[1] if len(knob) > 1 else ""
-                    mlp_cfg = knob[2] if len(knob) > 2 else ""
+                # Expect knob to be a tuple: forward => (frequency, attention_configs, mlp_configs)
+                # backward => (frequency, rec_attn_cfg, rec_mlp_cfg, bwd_attn_cfg, bwd_mlp_cfg)
+                if args.use_activation_checkpointing:
+                    if isinstance(knob, tuple):
+                        freq = knob[0] if len(knob) > 0 else None
+                        if inst_name == "backward" and len(knob) >= 5:
+                            rec_attn_cfg = knob[1]
+                            rec_mlp_cfg = knob[2]
+                            bwd_attn_cfg = knob[3]
+                            bwd_mlp_cfg = knob[4]
+                            stage_cfgs_1f1b.append(
+                                (
+                                    inst_name,
+                                    rec_attn_cfg,
+                                    rec_mlp_cfg,
+                                    bwd_attn_cfg,
+                                    bwd_mlp_cfg,
+                                )
+                            )
+                        else:
+                            attn_cfg = knob[1] if len(knob) > 1 else ""
+                            mlp_cfg = knob[2] if len(knob) > 2 else ""
+                            stage_cfgs_1f1b.append(
+                                (
+                                    inst_name,
+                                    attn_cfg,
+                                    mlp_cfg,
+                                )
+                            )
+                    else:
+                        raise ValueError(f"Invalid knob type: {type(knob)}")
                 else:
-                    freq = knob
-                    attn_cfg = ""
-                    mlp_cfg = ""
+                    if isinstance(knob, tuple):
+                        freq = knob[0] if len(knob) > 0 else None
+                        if inst_name == "backward":
+                            bwd_attn_cfg = knob[1] if len(knob) > 1 else ""
+                            bwd_mlp_cfg = knob[2] if len(knob) > 2 else ""
+                            stage_cfgs_by_mb[inst.micro_batch_id][inst_name] = (
+                                inst_name,
+                                bwd_attn_cfg,
+                                bwd_mlp_cfg,
+                            )
+                        else:
+                            attn_cfg = knob[1] if len(knob) > 1 else ""
+                            mlp_cfg = knob[2] if len(knob) > 2 else ""
+                            stage_cfgs_by_mb[inst.micro_batch_id][inst_name] = (
+                                inst_name,
+                                attn_cfg,
+                                mlp_cfg,
+                            )
+                    else:
+                        freq = knob
+                        if inst_name == "backward":
+                            stage_cfgs_by_mb[inst.micro_batch_id][inst_name] = (
+                                inst_name,
+                                "",
+                                "",
+                            )
+                        else:
+                            stage_cfgs_by_mb[inst.micro_batch_id][inst_name] = (
+                                inst_name,
+                                "",
+                                "",
+                            )
                 stage_freq.append((inst_name, freq))
-                # Save config tuple under its microbatch id and instruction name
-                stage_cfgs_by_mb[inst.micro_batch_id][inst_name] = (inst_name, attn_cfg, mlp_cfg)
 
             f_freqs.write(f"{stage_freq},\n")
-            # Build a list ordered by microbatch id, each entry is (forward_tuple, backward_tuple)
-            stage_mb_cfgs: list[tuple[tuple[str, str, str], tuple[str, str, str]]] = []
-            for mb_id in range(args.num_mbs):
-                mb_cfgs = stage_cfgs_by_mb.get(mb_id, {})
-                fwd_tuple = mb_cfgs.get("forward", ("forward", "", ""))
-                bwd_tuple = mb_cfgs.get("backward", ("backward", "", ""))
-                stage_mb_cfgs.append((fwd_tuple, bwd_tuple))
-            f_cfgs.write(f"{stage_mb_cfgs},\n")
+            if args.use_activation_checkpointing:
+                # When using activation checkpointing, also save configs in 1F1B order
+                f_cfgs.write(f"{stage_cfgs_1f1b},\n")
+            else:
+                # Build a list ordered by microbatch id, each entry is (forward_tuple, backward_tuple)
+                stage_mb_cfgs: list[tuple[tuple, tuple]] = []
+                for mb_id in range(args.num_mbs):
+                    mb_cfgs = stage_cfgs_by_mb.get(mb_id, {})
+                    fwd_tuple = mb_cfgs.get("forward", ("forward", "", ""))
+                    if args.use_activation_checkpointing:
+                        bwd_tuple = mb_cfgs.get("backward", ("backward", "", "", "", ""))
+                    else:
+                        bwd_tuple = mb_cfgs.get("backward", ("backward", "", ""))
+                    stage_mb_cfgs.append((fwd_tuple, bwd_tuple))
+                f_cfgs.write(f"{stage_mb_cfgs},\n")
 
         f_freqs.write("]\n")
         f_cfgs.write("]\n")
