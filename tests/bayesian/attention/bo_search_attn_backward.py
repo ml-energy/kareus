@@ -1085,7 +1085,7 @@ def main() -> None:
     logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/backward"
     os.makedirs(logs_dir, exist_ok=True)
     # Save effective-energy Pareto frontier
-    csv_eff_path = os.path.join(logs_dir, "results_bwd_pareto_frontier_effective.csv")
+    csv_eff_path = os.path.join(logs_dir, "results_pareto_frontier_effective.csv")
     with open(csv_eff_path, "w") as f:
         f.write("frequency,overlap_start,overlap_end,comm_sm_number,comm_block_size,time_s,avg_energy_J,effect_energy_J\n")
         for idx in pareto_indices_eff:
@@ -1099,7 +1099,7 @@ def main() -> None:
     print(f"Saved effective-energy Pareto frontier to {csv_eff_path}")
 
     # Save real-energy Pareto frontier
-    csv_real_path = os.path.join(logs_dir, "results_bwd_pareto_frontier_real.csv")
+    csv_real_path = os.path.join(logs_dir, "results_pareto_frontier_real.csv")
     with open(csv_real_path, "w") as f:
         f.write("frequency,overlap_start,overlap_end,comm_sm_number,comm_block_size,time_s,avg_energy_J,effect_energy_J\n")
         for idx in pareto_indices_real:
@@ -1113,7 +1113,7 @@ def main() -> None:
     print(f"Saved real-energy Pareto frontier to {csv_real_path}")
 
     # Save all evaluated results
-    csv_all_path = os.path.join(logs_dir, "results_all_bwd.csv")
+    csv_all_path = os.path.join(logs_dir, "results_all.csv")
     with open(csv_all_path, "w") as f:
         f.write("frequency,overlap_start,overlap_end,comm_sm_number,comm_block_size,time_s,avg_energy_J,effect_energy_J\n")
         for rec in all_records:

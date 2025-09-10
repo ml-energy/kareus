@@ -29,6 +29,8 @@ from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
 from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttentionOp
 from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
+from kareus.megatron.core.extensions.bias_gelu_op import BiasGeluOp
+from kareus.megatron.core.extensions.bias_geglu_op import BiasGegluOp
 
 
 class _PartitionFuserAutogradFunction(torch.autograd.Function):
@@ -140,7 +142,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 extra_inputs = [(key, rotary_pos_emb)]
             elif isinstance(op, DotProductAttentionOp):
                 extra_inputs = [(key, value)]
-            elif isinstance(op, BiasSwigluOp):
+            elif isinstance(op, BiasSwigluOp) or isinstance(op, BiasGeluOp) or isinstance(op, BiasGegluOp):
                 assert get_bias == True
                 get_bias = False
                 extra_inputs = [(bias,)]
@@ -338,7 +340,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 grad_key, grad_rotary_pos_emb = fused_op_grad_extra_inputs[0]
             elif isinstance(op, DotProductAttentionOp):
                 grad_key, grad_value = fused_op_grad_extra_inputs[0]
-            elif isinstance(op, BiasSwigluOp):
+            elif isinstance(op, BiasSwigluOp) or isinstance(op, BiasGeluOp) or isinstance(op, BiasGegluOp):
                 grad_bias = fused_op_grad_extra_inputs[0][0]
             elif isinstance(op, Bias) and op.return_bias:
                 grad_bias = None

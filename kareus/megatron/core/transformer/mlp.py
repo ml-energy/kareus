@@ -22,6 +22,8 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
+from kareus.megatron.core.extensions.bias_geglu_op import BiasGegluOp
+from kareus.megatron.core.extensions.bias_gelu_op import BiasGeluOp
 
 
 # pylint: disable=missing-class-docstring
@@ -87,9 +89,13 @@ class MLP(MegatronModule):
 
         self.activation_func = self.config.activation_func
         if self.activation_func == F.silu and self.config.gated_linear_unit:
-            self.bias_swiglu_op = BiasSwigluOp(self.config.activation_func_fp8_input_store)
+            self.activation_op = BiasSwigluOp(self.config.activation_func_fp8_input_store)
+        elif self.activation_func == F.gelu and self.config.gated_linear_unit:
+            self.activation_op = BiasGegluOp(self.config.activation_func_fp8_input_store)
+        elif self.activation_func == F.gelu and not self.config.gated_linear_unit:
+            self.activation_op = BiasGeluOp(self.config.activation_func_fp8_input_store)
         else:
-            raise NotImplementedError("Only support swiglu in MLP.")
+            raise NotImplementedError("Only support gelu (with/without gate) and swiglu in MLP.")
 
         self.linear_fc2 = build_module(
             submodules.linear_fc2,
@@ -105,7 +111,7 @@ class MLP(MegatronModule):
         )
     
     def get_compute_ops(self):
-        return [self.linear_fc1, self.bias_swiglu_op, self.linear_fc2]
+        return [self.linear_fc1, self.activation_op, self.linear_fc2]
     
     def get_persistent_outputs_fwd(self):
         return self.linear_fc2.persistent_outputs_fwd
@@ -136,27 +142,11 @@ class MLP(MegatronModule):
                 # else:
                 #     raise ValueError("Only support fusion of swiglu with per_token_scale in MLP.")
             else:
-                if self.activation_func == F.gelu:
-                    raise NotImplementedError("GELU is not supported in MLP.")
-                    # if self.config.gated_linear_unit:
-                    #     intermediate_parallel = bias_geglu_impl(
-                    #         intermediate_parallel, bias_parallel
-                    #     )
-                    # else:
-                    #     assert self.config.add_bias_linear is True
-                    #     intermediate_parallel = bias_gelu_impl(intermediate_parallel, bias_parallel)
-                elif self.activation_func == F.silu and self.config.gated_linear_unit:
-                    # intermediate_parallel = bias_swiglu_impl(
-                    #     intermediate_parallel,
-                    #     bias_parallel,
-                    #     self.config.activation_func_fp8_input_store,
-                    # )
-                    intermediate_parallel = self.bias_swiglu_op(
-                        intermediate_parallel,
-                        bias_parallel,
-                    )
-                else:
-                    raise ValueError("Only support fusion of gelu and swiglu")
+                # Unified activation op call (handles GELU, GeGLU, SwiGLU)
+                intermediate_parallel = self.activation_op(
+                    intermediate_parallel,
+                    bias_parallel,
+                )
         else:
             raise NotImplementedError("Only bias activation fusion is supported in MLP.")
             # if bias_parallel is not None:
