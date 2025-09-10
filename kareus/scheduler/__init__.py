@@ -184,12 +184,12 @@ class PipelineCommScheduler:
                 )
         # Iterator: AC iterates per instruction, non-AC advances on forward only
         self._iter_items: Iterator[ScheduleItem] = iter(self._schedule_items)
-        self.current_item: Optional[ScheduleItem] = None
+        self.current_schedule: Optional[ScheduleItem] = None
 
     def _reset(self) -> None:
         """Reset iterator and counters for the next step."""
         self._iter_items = iter(self._schedule_items)
-        self.current_item = None
+        self.current_schedule = None
 
     def on_instruction_begin(self, name) -> None:
         """Return the next scheduled item for this PP rank.
@@ -208,14 +208,14 @@ class PipelineCommScheduler:
                 raise RuntimeError(
                     f"Schedule/item mismatch: expected '{expected}', got '{name}'"
                 )
-            self.current_item = item
+            self.current_schedule = item
         else:
             if name == "forward":
                 try:
                     item = next(self._iter_items)
                 except StopIteration as exc:
                     raise RuntimeError("No more forward microbatches available for this step") from exc
-                self.current_item = item
+                self.current_schedule = item
     
     def on_instruction_end(self, name: Optional[str] = None) -> None:
         """Mark the end of an instruction, like forward or backward."""
