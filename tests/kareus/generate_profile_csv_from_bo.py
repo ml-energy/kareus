@@ -70,7 +70,7 @@ def read_prepost_profile(
         emb_bwd = _read_time_energy_csv(emb_bwd_path, tensor_parallel_size)
         try:
             out_bwd = _read_time_energy_csv(out_bwd_path, tensor_parallel_size)
-        except FileNotFoundError:
+        except:
             warnings.warn(
                 f"Backward-output CSV not found at {out_bwd_path}; using 2x forward-output as fallback."
             )
@@ -130,10 +130,18 @@ def read_bo_partition_results(
     return results_by_freq
 
 
-def pareto_optimal(config_results: list[tuple[Any, tuple[float, float]]], p2p_power: float) -> list[tuple[Any, tuple[float, float]]]:
+def pareto_optimal(
+    config_results: list[tuple[Any, tuple[float, float]]],
+    p2p_power: float,
+    min_effective_energy_improvement: float = 1e-4,
+) -> list[tuple[Any, tuple[float, float]]]:
     """Filter a list of (config, (time, energy)) to Pareto-optimal ones.
 
-    A point a dominates b if a.time <= b.time and a.energy <= b.energy and at least one strict.
+    - A point a dominates b if a.time <= b.time and a.energy <= b.energy and at least one strict.
+    - Effective energy is defined as: energy - p2p_power * time.
+    - "min_effective_energy_improvement" prunes near-duplicates: a new point is kept only if its
+      effective energy is strictly lower than the best so far by at least this tolerance.
+
     Works for any hashable config payload (frequency, overlaps, etc.).
     """
     if not config_results:
@@ -142,12 +150,13 @@ def pareto_optimal(config_results: list[tuple[Any, tuple[float, float]]], p2p_po
     # Sort by time asc, then energy asc for efficient sweep
     sorted_items = sorted(config_results, key=lambda x: (x[1][0], x[1][1]))
 
-    pareto: list[tuple[tuple[int, int, int, int], tuple[float, float]]] = []
+    pareto: list[tuple[Any, tuple[float, float]]] = []
     best_energy = float("inf")
     for cfg, (t, e) in sorted_items:
         # Map the cost to be effective computation energy.
         ef_e = e - p2p_power * t
-        if ef_e < best_energy:  # strictly better in energy at this time
+        # Keep only if it improves effective energy by at least the tolerance
+        if ef_e + min_effective_energy_improvement < best_energy:
             pareto.append((cfg, (t, e)))
             best_energy = ef_e
     return pareto
@@ -368,7 +377,7 @@ def main(
                 profile_csv.write(f"{stage},forward,{frequency},{'-'.join(map(str, attn_config))},{'-'.join(map(str, mlp_config))},{fwd_time},{fwd_energy}\n")
 
         # Backward
-        bwd_pareto = pareto_optimal(backward_points_by_stage[stage], p2p_power)
+        bwd_pareto = pareto_optimal(backward_points_by_stage[stage], p2p_power, 0.01)
         print(f"generated {len(bwd_pareto)}/{len(backward_points_by_stage[stage])} Pareto-optimal backward candidates for stage {stage}")
         if use_activation_checkpointing:
             for (frequency, rec_attn_cfg, rec_mlp_cfg, bwd_attn_cfg, bwd_mlp_cfg), (bwd_time, bwd_energy) in bwd_pareto:
@@ -396,7 +405,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_layers_in_last_pipeline_stage", default=FuserTestConfig.num_layers_in_last_pipeline_stage, type=int, help="Layers in the last pipeline stage when using uneven split.")
     parser.add_argument("--gpu_type", default="A100", choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--p2p_power", default=None, type=float, help="GPU power while blocking on P2P (W). If omitted, uses FuserTestConfig.")
-    parser.add_argument("--use_activation_checkpointing", action="store_true", help="When set, generate backward candidates with recompute-forward configs and extended CSV header.")
+    parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="When set, generate backward candidates with recompute-forward configs and extended CSV header.")
     args = parser.parse_args()
 
     p2p_power = args.p2p_power if args.p2p_power is not None else FuserTestConfig.get_p2p_power(args.gpu_type)

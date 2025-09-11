@@ -20,16 +20,65 @@ class FuserTestConfig:
     FFN_HIDDEN_SIZE = 8192
     VOCAB_SIZE = 128256
     DROP_RATE = 0.0
+
+    NUM_LAYERS = 16
     
     # Default test parameters
-    DEFAULT_WORLD_SIZE = 2
-    DEFAULT_BATCH_SIZE = 8
+    DEFAULT_WORLD_SIZE = 4
+    DEFAULT_BATCH_SIZE = 16
     DEFAULT_SEQ_LENGTH = 4096
+
+    DEFAULT_STAGES = 4
+    DEFAULT_NUM_MICROBATCHES = 16
+    num_layers_in_first_pipeline_stage = 4
+    num_layers_in_last_pipeline_stage = 2
+    
+    # Default Bayesian Optimization parameters
+    BO_DEFAULT_N_INIT = 96
+    BO_DEFAULT_BATCHES = 8
+    BO_DEFAULT_ACQ_BATCH = 32
+    
+    # GPU p2p power (W) configuration
+    P2P_POWER_W_BY_GPU = {
+        'A40': 90.0,
+        'A100': 86.35,
+    }
+
+    @staticmethod
+    def get_p2p_power(gpu_type: str) -> float:
+        """Return default p2p power (W) for given GPU type, with a conservative fallback."""
+        return float(FuserTestConfig.P2P_POWER_W_BY_GPU.get(gpu_type, 70.0))
+    
+    # Architecture presets
+    ARCH_PRESETS = {
+        'llama': {
+            'hidden_size': 2048,
+            'num_attention_heads': 32,
+            'num_query_groups': 8,
+            'ffn_hidden_size': 8192,
+            'apply_rope_fusion': True,
+            'apply_query_key_layer_scaling': False,
+        },
+        'gpt3': {
+            'hidden_size': 2560,
+            'num_attention_heads': 32,
+            'num_query_groups': 32,  # no GQA
+            'ffn_hidden_size': 10240,
+            'apply_rope_fusion': False,
+            'apply_query_key_layer_scaling': True,
+        },
+    }
+    
+    @staticmethod
+    def get_arch_preset(arch: str) -> dict:
+        """Return preset dictionary for a given architecture name."""
+        return dict(FuserTestConfig.ARCH_PRESETS.get(arch, FuserTestConfig.ARCH_PRESETS['llama']))
     
     @staticmethod
     def create_transformer_config(
         world_size: int,
         dtype: torch.dtype = torch.bfloat16,
+        arch: str | None = None,
         # Model architecture parameters
         num_layers: int = 1,
         hidden_size: int = None,
@@ -62,24 +111,34 @@ class FuserTestConfig:
         Args:
             world_size: Number of processes for tensor parallelism
             dtype: Model data type
+            arch: Optional architecture preset name (e.g., 'llama', 'gpt3')
             **kwargs: Additional parameters to override defaults
             
         Returns:
             TransformerConfig instance
         """
-        # Use class defaults if not provided
+        # Apply architecture presets if provided and fields are not explicitly set
+        arch_preset = FuserTestConfig.get_arch_preset(arch) if arch else None
+
+        # Use class defaults if not provided (possibly overridden by arch preset)
         if hidden_size is None:
-            hidden_size = FuserTestConfig.HIDDEN_SIZE
+            hidden_size = arch_preset['hidden_size'] if arch_preset else FuserTestConfig.HIDDEN_SIZE
         if num_attention_heads is None:
-            num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
+            num_attention_heads = arch_preset['num_attention_heads'] if arch_preset else FuserTestConfig.NUM_ATTENTION_HEADS
         if num_query_groups is None:
-            num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
+            num_query_groups = arch_preset['num_query_groups'] if arch_preset else FuserTestConfig.NUM_QUERY_GROUPS
         if ffn_hidden_size is None:
-            ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
+            ffn_hidden_size = arch_preset['ffn_hidden_size'] if arch_preset else FuserTestConfig.FFN_HIDDEN_SIZE
         if vocab_size is None:
             vocab_size = FuserTestConfig.VOCAB_SIZE
         if drop_rate is None:
             drop_rate = FuserTestConfig.DROP_RATE
+        # Feature toggles via arch preset (if user hasn't explicitly set them)
+        if arch_preset is not None:
+            if 'apply_rope_fusion' in arch_preset and 'apply_rope_fusion' not in kwargs and apply_rope_fusion is True:
+                apply_rope_fusion = arch_preset['apply_rope_fusion']
+            if 'apply_query_key_layer_scaling' in arch_preset and 'apply_query_key_layer_scaling' not in kwargs and apply_query_key_layer_scaling is False:
+                apply_query_key_layer_scaling = arch_preset['apply_query_key_layer_scaling']
             
         config_params = {
             'num_layers': num_layers,
@@ -122,20 +181,22 @@ class FuserTestConfig:
         return TransformerConfig(**config_params)
     
     @staticmethod
-    def create_attention_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_attention_config(world_size: int, dtype: torch.dtype = torch.bfloat16, arch: str | None = None, **kwargs) -> TransformerConfig:
         """Create config optimized for attention tests."""
         return FuserTestConfig.create_transformer_config(
             world_size=world_size,
             dtype=dtype,
+            arch=arch,
             **kwargs
         )
     
     @staticmethod
-    def create_mlp_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_mlp_config(world_size: int, dtype: torch.dtype = torch.bfloat16, arch: str | None = None, **kwargs) -> TransformerConfig:
         """Create config optimized for MLP tests."""
         return FuserTestConfig.create_transformer_config(
             world_size=world_size,
             dtype=dtype,
+            arch=arch,
             gated_linear_unit=True,
             activation_func=F.silu,
             bias_activation_fusion=True,
@@ -143,21 +204,23 @@ class FuserTestConfig:
         )
     
     @staticmethod
-    def create_postprocess_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_postprocess_config(world_size: int, dtype: torch.dtype = torch.bfloat16, arch: str | None = None, **kwargs) -> TransformerConfig:
         """Create config optimized for postprocess tests."""
         return FuserTestConfig.create_transformer_config(
             world_size=world_size,
             dtype=dtype,
+            arch=arch,
             use_cpu_initialization=True,
             **kwargs
         )
     
     @staticmethod
-    def create_loss_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_loss_config(world_size: int, dtype: torch.dtype = torch.bfloat16, arch: str | None = None, **kwargs) -> TransformerConfig:
         """Create config optimized for loss computation tests."""
         return FuserTestConfig.create_transformer_config(
             world_size=world_size,
             dtype=dtype,
+            arch=arch,
             cross_entropy_loss_fusion=True,
             cross_entropy_fusion_impl='te',
             use_cpu_initialization=True,

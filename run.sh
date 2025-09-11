@@ -1,3 +1,6 @@
+cd tests/fuser/
+bash test_fwd_latency.sh
+
 cd tests/perseus
 # /workspaces/Kareus/tests/simple_test/data/my-gpt_text_document
 # droupout?
@@ -25,7 +28,7 @@ mv nemo_experiments/megatron_llama_3_2_1b/2025* nemo_experiments/megatron_llama_
 # enable_perseus_optimizer: true
 # ZEUS_PFO_SCHEDULER=PointSolution3D ZEUS_PFO_SCHEDULER_ARGS='{"solution_path": "/workspaces/Kareus/tests/perseus/nemo_experiments/megatron_llama_3_2_3b/perseus_results/freqs_pipeline_*.py"}' uvicorn zeus.optimizer.pipeline_frequency.server.router:app --port 7787
 python megatron_gpt_pretraining.py
-mv nemo_experiments/megatron_llama_3_2_3b/2025* nemo_experiments/megatron_llama_3_2_3b/optimized/
+mv nemo_experiments/megatron_llama_3_2_1b/2025* nemo_experiments/megatron_llama_3_2_1b/optimized/
 python parse_results.py
 
 # Kareus partition

@@ -1,7 +1,7 @@
-name: megatron_gpt3_2_7b
+name: megatron_llama_3_1_8b
 trainer:
   devices: 8
-  num_nodes: 1
+  num_nodes: 2
   accelerator: gpu
   precision: bf16
   logger: False # logger provided by exp_manager
@@ -22,7 +22,7 @@ trainer:
 exp_manager:
   explicit_log_dir: null
   exp_dir: null
-  name: megatron_gpt3_2_7b
+  name: megatron_llama_3_1_8b
   create_wandb_logger: False
   wandb_logger_kwargs:
     project: null
@@ -47,53 +47,55 @@ model:
   mcore_gpt: True
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
-  micro_batch_size: 8
-  global_batch_size: 128
-  tensor_model_parallel_size: 2
-  pipeline_model_parallel_size: 4
+  micro_batch_size: 8 # Safer for 8B model memory
+  global_batch_size: 96 # will use more micro batches to reach global batch size
+  tensor_model_parallel_size: 4 # Suitable default for 8B model
+  pipeline_model_parallel_size: 4 # inter-layer model parallelism
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
-  
-  num_layers_in_first_pipeline_stage: 7
-  num_layers_in_last_pipeline_stage: 5
 
-  # model architecture - GPT-3 2.7B
-  encoder_seq_length: 4096
+  num_layers_in_first_pipeline_stage: 8
+  num_layers_in_last_pipeline_stage: 8
+
+  # model architecture - LLaMA 3.1 8B
+  encoder_seq_length: 4096 # Same context used in local configs
   max_position_embeddings: ${.encoder_seq_length}
-  num_layers: 32
-  hidden_size: 2560
-  ffn_hidden_size: 10240
-  num_attention_heads: 32
-  kv_channels: 80 # hidden_size // num_attention_heads = 2560 // 32
-  init_method_std: 0.02
-  use_scaled_init_method: True
-  hidden_dropout: 0.0
-  attention_dropout: 0.0
-  ffn_dropout: 0.0
+  num_layers: 32 # LLaMA 3.1 8B: 32 layers
+  hidden_size: 4096 # LLaMA 3.1 8B: 4096
+  ffn_hidden_size: 14336 # Typical LLaMA 3.1 8B MLP dimension
+  num_attention_heads: 32 # LLaMA 3.1 8B: 32 attention heads
+  init_method_std: 0.02 # Standard deviation of the zero mean normal distribution used for weight initialization.')
+  use_scaled_init_method: True # use scaled residuals initialization
+  hidden_dropout: 0.0 # Dropout probability for hidden state transformer.
+  attention_dropout: 0.0 # Dropout probability for attention
+  ffn_dropout: 0.0 # Dropout probability in the feed-forward layer.
+  kv_channels: 128 # 4096 // 32
   apply_query_key_layer_scaling: True # scale Q * K^T by 1 / layer-number.
-  normalization: 'layernorm'
+  normalization: 'rmsnorm' # Normalization layer to use. Options are 'layernorm', 'rmsnorm'
   layernorm_epsilon: 1e-5
   do_layer_norm_weight_decay: False # True means weight decay on all params
-  make_vocab_size_divisible_by: 128
+  make_vocab_size_divisible_by: 128 # Pad the vocab size to be divisible by this value for computation efficiency.
   pre_process: True # add embedding
   post_process: True # add pooler
   persist_layer_norm: True # Use of persistent fused layer norm kernel.
-  bias: True
-  activation: 'gelu' # GPT-3 uses GELU
-  headscale: False
-  transformer_block_type: 'pre_ln'
-  openai_gelu: False # Use OpenAI's GELU
-  normalize_attention_scores: True
-  position_embedding_type: 'learned_absolute'
-  share_embeddings_and_output_weights: True
-  overlap_p2p_comm: False
-  batch_p2p_comm: True
-  attention_type: 'multihead'
+  bias: False # Whether to use bias terms in all weight matrices.
+  activation: 'fast-swiglu' # Options ['gelu', 'geglu', 'swiglu', 'reglu', 'squared-relu', 'fast-geglu', 'fast-swiglu', 'fast-reglu']
+  headscale: False # Whether to learn extra parameters that scale the output of the each self-attention head.
+  transformer_block_type: 'pre_ln' # Options ['pre_ln', 'post_ln', 'normformer']
+  openai_gelu: False # Use OpenAI's GELU instead of the default GeLU
+  normalize_attention_scores: True # Whether to scale the output Q * K^T by 1 / sqrt(hidden_size_per_head). This arg is provided as a configuration option mostly for compatibility with models that have been weight-converted from HF. You almost always want to se this to True.
+  position_embedding_type: 'rope' # Position embedding type. Options ['learned_absolute', 'rope']
+  rotary_percentage: 1.0 # If using position_embedding_type=rope, then the per head dim is multiplied by this.
+  attention_type: 'multihead' # Attention type. Options ['multihead']
+  share_embeddings_and_output_weights: False # Share embedding and output layer weights.
+  overlap_p2p_comm: False # Overlap p2p communication with computes. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
+  batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
+  num_query_groups: 8 # LLaMA 3.1 8B uses grouped query attention with 8 key-value heads
 
-  enable_megatron_timers: true
+  enable_megatron_timers: false
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
-  enable_zeus_monitor: true
+  enable_zeus_monitor: false
   enable_power_monitor: false
   enable_perseus_optimizer: false
   enable_kareus_scheduler: false
@@ -102,9 +104,10 @@ model:
 
   tokenizer:
     library: 'huggingface'
-    type: 'gpt2'
+    type: 'meta-llama/Llama-3.1-8B-Instruct'
     use_fast: True
     delimiter: null # only used for tabular tokenizer
+    sentencepiece_legacy: False # Legacy=True allows you to add special tokens to sentencepiece tokenizers.
 
   # Mixed precision
   native_amp_init_scale: 4294967296 # 2 ** 32
@@ -124,9 +127,10 @@ model:
   bias_dropout_add_fusion: True # Use a kernel that fuses the bias addition, dropout and residual connection addition.
   masked_softmax_fusion: True # Use a kernel that fuses the attention softmax with it's mask.
   get_attention_mask_from_fusion: True # When using fused softmax it will create the attention mask so we won't copy it to the pipeline stages.
-  apply_rope_fusion: False # Not used for learned absolute position embeddings
+  apply_rope_fusion: True # Use a kernel to add rotary positional embeddings. Only used if position_embedding_type=rope
   cross_entropy_loss_fusion: True # Use a kernel to compute the cross entropy loss.
   cross_entropy_fusion_impl: 'te' # Use a kernel to compute the cross entropy loss.
+
 
   # Miscellaneous
   seed: 1234
@@ -138,13 +142,36 @@ model:
   sync_batch_comm: False # Enable stream synchronization after each p2p communication between pipeline stages
 
   ## Activation Checkpointing
+  # NeMo Megatron supports 'selective' activation checkpointing where only the memory intensive part of attention is checkpointed.
+  # These memory intensive activations are also less compute intensive which makes activation checkpointing more efficient for LLMs (20B+).
+  # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
+  # 'full' will checkpoint the entire transformer layer.
   activations_checkpoint_granularity: 'full' # Checkpoint entire layers for maximum memory savings
   activations_checkpoint_method: 'uniform' # Evenly distribute checkpoints across all layers
+  # 'uniform' divides the total number of transformer layers and checkpoints the input activation
+  # of each chunk at the specified granularity. When used with 'selective', 'uniform' checkpoints all attention blocks in the model.
+  # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
   activations_checkpoint_num_layers: 1 # Checkpoint every single layer (maximum memory savings)
+  # when using 'uniform' this creates groups of transformer layers to checkpoint. Usually set to 1. Increase to save more memory.
+  # when using 'block' this this will checkpoint the first activations_checkpoint_num_layers per pipeline stage.
   num_micro_batches_with_partial_activation_checkpoints: null
+  # This feature is valid only when used with pipeline-model-parallelism.
+  # When an integer value is provided, it sets the number of micro-batches where only a partial number of Transformer layers get checkpointed
+  # and recomputed within a window of micro-batches. The rest of micro-batches in the window checkpoint all Transformer layers. The size of window is
+  # set by the maximum outstanding micro-batch backpropagations, which varies at different pipeline stages. The number of partial layers to checkpoint
+  # per micro-batch is set by 'activations_checkpoint_num_layers' with 'activations_checkpoint_method' of 'block'.
+  # This feature enables using activation checkpoint at a fraction of micro-batches up to the point of full GPU memory usage.
   activations_checkpoint_layers_per_pipeline: null
+  # This feature is valid only when used with pipeline-model-parallelism.
+  # When an integer value (rounded down when float is given) is provided, it sets the number of Transformer layers to skip checkpointing at later
+  # pipeline stages. For example, 'activations_checkpoint_layers_per_pipeline' of 3 makes pipeline stage 1 to checkpoint 3 layers less than
+  # stage 0 and stage 2 to checkpoint 6 layers less stage 0, and so on. This is possible because later pipeline stage
+  # uses less GPU memory with fewer outstanding micro-batch backpropagations. Used with 'num_micro_batches_with_partial_activation_checkpoints',
+  # this feature removes most of activation checkpoints at the last pipeline stage, which is the critical execution path.
 
   ## Sequence Parallelism
+  # Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer norms and dropout sequentially
+  # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
   sequence_parallel: False
 
   ## Transformer Engine
@@ -160,11 +187,21 @@ model:
   use_emha: False # Use fused multi-head attention for large sequence-length. Note this is not yet supported. Please set to False.
 
   data:
-    # Path to data must be specified by the user.
+   # Path to data must be specified by the user.
     # Supports List, String and Dictionary
-    data_prefix:
+    # List : can override from the CLI: "model.data.data_prefix=[.5,/raid/data/pile/my-gpt3_00_text_document,.5,/raid/data/pile/my-gpt3_01_text_document]",
+    # Or see example below: 
+    # data_prefix: 
+    #   - .5
+    #   - /raid/data/pile/my-gpt3_00_text_document
+    #   - .5
+    #   - /raid/data/pile/my-gpt3_01_text_document
+    # Dictionary: can override from CLI "model.data.data_prefix"={"train":[1.0, /path/to/data], "validation":/path/to/data, "test":/path/to/test}
+    # Or see example below:
+    # "model.data.data_prefix: {train:[1.0,/path/to/data], validation:[/path/to/data], test:[/path/to/test]}"
+    data_prefix: 
       - 1.0
-      - /root/data/my-gpt_text_document
+      - /workspaces/Kareus/tests/simple_test/data/my-gpt_text_document
     index_mapping_dir: null # path to save index mapping .npy files, by default will save in the same location as data_prefix
     data_impl: mmap
     splits_string: 900,50,50

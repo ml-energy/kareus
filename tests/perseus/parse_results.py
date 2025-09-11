@@ -117,12 +117,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Parse baseline time and energy results from zeus monitor files")
     parser.add_argument(
         "--baseline_path", 
-        default="nemo_experiments/megatron_llama_3_2_3b/baseline",
+        default="/workspaces/Kareus/tests/perseus/nemo_experiments/megatron_llama_3_2_1b/2025-09-10_21-45-23",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(
         "--perseus_path", 
-        default="nemo_experiments/megatron_llama_3_2_3b/optimized",
+        default="nemo_experiments/megatron_llama_3_2_1b/optimized",
+        help="Path to directory containing zeus_monitor_localrank-*.txt files"
+    )
+    parser.add_argument(
+        "--kareus_path", 
+        default="/workspaces/Kareus/tests/kareus/nemo_experiments/megatron_llama_3_2_1b/2025-09-10_22-00-23",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(
@@ -140,7 +145,7 @@ def main() -> None:
     parser.add_argument(
         "--profile_iters", 
         type=int, 
-        default=100,
+        default=20,
         help="Number of profiling iterations to use for averaging"
     )
     
@@ -162,6 +167,14 @@ def main() -> None:
     )
     save_csv(perseus_results, "perseus_results.csv")
     
+    kareus_results = parse_results(
+        args.kareus_path, 
+        args.num_ranks,
+        args.warmup_iters,
+        args.profile_iters
+    )
+    save_csv(kareus_results, "kareus_results.csv")
+    
     print("Baseline results:")
     for rank, (avg_time, avg_energy) in baseline_results.items():
         print(f"  Rank {rank}: {avg_time:.6f}s, {avg_energy:.6f}J")
@@ -175,6 +188,13 @@ def main() -> None:
     perseus_max_time = max([x[0] for x in perseus_results.values()]) if perseus_results else 0.0
     perseus_sum_energy = sum([x[1] for x in perseus_results.values()])
     print(f"  Total: {perseus_max_time:.6f}s, {perseus_sum_energy:.6f}J")
+    
+    print("Kareus results:")
+    for rank, (avg_time, avg_energy) in kareus_results.items():
+        print(f"  Rank {rank}: {avg_time:.6f}s, {avg_energy:.6f}J")
+    kareus_max_time = max([x[0] for x in kareus_results.values()]) if kareus_results else 0.0
+    kareus_sum_energy = sum([x[1] for x in kareus_results.values()])
+    print(f"  Total: {kareus_max_time:.6f}s, {kareus_sum_energy:.6f}J")
             
 
 
