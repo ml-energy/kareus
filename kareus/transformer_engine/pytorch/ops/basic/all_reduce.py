@@ -13,7 +13,12 @@ import torch
 
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
-import cfuser.msccl_comm as msccl_comm
+try:
+    import cfuser.msccl_comm as msccl_comm
+    HAVE_CFUSER = True
+except ImportError:
+    HAVE_CFUSER = False
+import kareus.msccl.msccl_comm as new_msccl_comm
 
 
 class AllReduce(BasicOperation):
@@ -52,6 +57,7 @@ class AllReduce(BasicOperation):
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.async_op: bool = async_op
         self.backend: str = backend
+        # self.new_backend: bool = False
         
         self.comm_stream: Optional[torch.cuda.Stream] = None
         self._work_handle: Optional[torch.distributed.Work] = None
@@ -71,14 +77,24 @@ class AllReduce(BasicOperation):
 
         if self.backend == "msccl":
             if use_persistent_output:
-                msccl_comm.msccl_AllReduce_init(
+                # if input_buffer.dtype == torch.float16:
+                #     print("Use mscclpp_op for all-reduce")
+                new_msccl_comm.msccl_AllReduce_init(
                     rank, world_size, 
-                    self.input_buffer, self.output_buffer,
+                    self.input_buffer,
                     self.process_group
                 )
+                #     self.new_backend = True
+                # else:
+                #     msccl_comm.msccl_AllReduce_init(
+                #         rank, world_size, 
+                #         self.input_buffer, self.output_buffer,
+                #         self.process_group
+                #     )
+                self.comm_stream = new_msccl_comm.COMM_STREAM
             else:
                 msccl_comm.msccl_AllReduce_init_cached(rank, world_size)
-            self.comm_stream = msccl_comm.COMM_STREAM
+                self.comm_stream = msccl_comm.COMM_STREAM
     
     def set_stream(self, stream: torch.cuda.Stream):
         self.comm_stream = stream
@@ -121,7 +137,10 @@ class AllReduce(BasicOperation):
                 self.backend = "nccl"
                 return x
             if self.use_persistent_output:
-                msccl_comm.msccl_AllReduce(sm_num, block_size)
+                # if self.new_backend:
+                new_msccl_comm.msccl_AllReduce(sm_num, block_size)
+                # else:
+                #     msccl_comm.msccl_AllReduce(sm_num, block_size)
                 return self.output_buffer
             else:
                 # output = torch.empty_like(x)
@@ -149,7 +168,10 @@ class AllReduce(BasicOperation):
             If no async operation is pending or if the operation was synchronous
         """
         if self.backend == "msccl":
-            msccl_comm.msccl_sync()
+            # if self.new_backend:
+            new_msccl_comm.msccl_sync()
+            # else:
+            #     msccl_comm.msccl_sync()
         else:
             if self._work_handle is None:
                 raise Warning("No AllReduce operation to sync")

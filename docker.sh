@@ -24,12 +24,21 @@ docker run -it \
 # pip uninstall nemo_toolkit
 # rm -r /usr/local/lib/python3.12/dist-packages/megatron*
 # rm -r /usr/local/lib/python3.12/dist-packages/nemo*
-# /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/layernorm_linear.py
 
-# pip install -e ".[all]" 
+# Megatron
+# pip install -e .
+
+# Nemo
 # pip install -e . 
 
-# zeus pip install -e . pip install '.[pfo-server]'
+# /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/layernorm_linear.py
+
+# mscclpp
+# python3 -m pip install .
+
+# zeus 
+# pip install -e . 
+# pip install '.[pfo-server]'
 
 # huggingface-cli login 
 # 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
