@@ -1130,34 +1130,55 @@ def get_log_dir(
                 )
                 version = None
             else:
-                # Generate a single version on global rank 0 and share it with others via a marker file.
+                # Generate a single version per run by electing a leader via file locking.
                 base_dir = Path(_exp_dir) / str(name)
                 marker_path = base_dir / '.nemo_version'
+                lock_path = base_dir / '.nemo_version.lock'
                 try:
-                    if is_global_rank_zero():
-                        os.makedirs(base_dir, exist_ok=True)
-                        if not marker_path.exists():
-                            if use_datetime_version:
-                                version = time.strftime('%Y-%m-%d_%H-%M-%S')
-                            else:
-                                tensorboard_logger = TensorBoardLogger(save_dir=Path(_exp_dir), name=name, version=version)
-                                version = f"version_{tensorboard_logger.version}"
-                            with open(marker_path, 'w') as f:
-                                f.write("" if version is None else str(version))
+                    os.makedirs(base_dir, exist_ok=True)
+                    # Try to become the leader by exclusively creating the lock.
+                    became_leader = False
+                    try:
+                        # 'x' ensures exclusive creation; fails if file exists.
+                        with open(lock_path, 'x') as lf:
+                            lf.write(f"pid={os.getpid()} time={time.time()}")
+                        became_leader = True
+                    except FileExistsError:
+                        became_leader = False
+
+                    if became_leader:
+                        # Leader generates a fresh version for this run and publishes it atomically.
+                        if use_datetime_version:
+                            version = time.strftime('%Y-%m-%d_%H-%M-%S')
                         else:
-                            with open(marker_path, 'r') as f:
-                                version = f.read().strip()
+                            tensorboard_logger = TensorBoardLogger(save_dir=Path(_exp_dir), name=name, version=version)
+                            version = f"version_{tensorboard_logger.version}"
+                        tmp_path = base_dir / '.nemo_version.tmp'
+                        with open(tmp_path, 'w') as f:
+                            f.write("" if version is None else str(version))
+                        os.replace(tmp_path, marker_path)  # atomic rename
+                        # Release the lock
+                        try:
+                            os.remove(lock_path)
+                        except FileNotFoundError:
+                            pass
                     else:
-                        # Wait for rank 0 to create the marker for up to 30 seconds.
+                        # Followers wait for leader to publish the marker file.
                         wait_start = time.time()
-                        while not marker_path.exists() and (time.time() - wait_start) < 30.0:
-                            time.sleep(0.1)
+                        while not marker_path.exists() and (time.time() - wait_start) < 600.0:
+                            time.sleep(0.2)
                         if marker_path.exists():
                             with open(marker_path, 'r') as f:
                                 version = f.read().strip()
                         else:
-                            # Fallback: generate a local timestamp if marker not found in time.
-                            version = time.strftime('%Y-%m-%d_%H-%M-%S') if use_datetime_version else None
+                            # As a last resort, try to pick the newest existing version directory if any exists.
+                            existing_versions = [
+                                p.name for p in base_dir.glob('*') if p.is_dir() and '-' in p.name and '_' in p.name
+                            ]
+                            if existing_versions:
+                                version = sorted(existing_versions)[-1]
+                            else:
+                                version = time.strftime('%Y-%m-%d_%H-%M-%S') if use_datetime_version else None
                 except Exception as e:
                     logging.warning(f"Failed to synchronize logging version across ranks: {e}")
                     if not version and use_datetime_version:
