@@ -55,6 +55,8 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
         comm_sm_configs: Optional[Tuple[int, int]],
         comm_overlap_window_backward: Optional[Tuple[int, int]],
         comm_sm_configs_backward: Optional[Tuple[int, int]],
+        is_first_attn: bool,
+        is_last_mlp: bool,
         comm_op_fwd: Optional[FusibleOperation],
         comm_op_bwd: Optional[FusibleOperation],
         forward_ops: list[tuple[FusibleOperation, list[int]]],
@@ -223,6 +225,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             func_ctx.save_for_backward(*to_save)
 
             # Other context
+            func_ctx.is_first_attn = is_first_attn
             func_ctx.comm_window_backward = comm_overlap_window_backward
             func_ctx.comm_sm_configs_backward = comm_sm_configs_backward
             func_ctx.comm_op_bwd = comm_op_bwd
@@ -232,7 +235,18 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_num_params = [sum(1 for _ in op.parameters()) for op in basic_ops]
 
         # current_stream.synchronize()
-        comm_op_fwd.sync()
+        # comm_op_fwd.sync()
+        if comm_op_fwd is not None:
+            # comm_op_fwd.event_record(current_stream)
+            # comm_op_fwd.event_wait()
+            comm_op_fwd.sync()
+        
+        if is_last_mlp:
+            comm_op_fwd.fuser_forward(
+                [None], comm_input,
+                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": 30, "block_size": 1024}]
+            )
+            comm_op_fwd.sync()
         assert get_bias and get_residual, f"get_bias: {get_bias}, get_residual: {get_residual}"
         return x, bias, residual, comm_input
 
@@ -248,6 +262,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
         """Backward pass"""
 
         # Operations and autograd state
+        is_first_attn = func_ctx.is_first_attn
         comm_op_bwd = func_ctx.comm_op_bwd
         comm_overlap_window = func_ctx.comm_window_backward
         comm_sm_configs = func_ctx.comm_sm_configs_backward
@@ -361,7 +376,18 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             grad_params_flat.extend(dparams)
 
         # current_stream.synchronize()
-        comm_op_bwd.sync()
+        # comm_op_bwd.sync()
+        if comm_op_bwd is not None:
+            # comm_op_bwd.event_record(current_stream)
+            # comm_op_bwd.event_wait()
+            comm_op_bwd.sync()
+
+        if is_first_attn:
+            comm_op_bwd.fuser_forward(
+                [None], grad_comm_input,
+                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": 30, "block_size": 1024}]
+            )
+            comm_op_bwd.sync()
         return (
             dx,  # hidden_states
             grad_bias,  # bias
@@ -373,6 +399,8 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             None,  # comm_sm_configs
             None,  # comm_overlap_window_backward
             None,  # comm_sm_configs_backward
+            None,  # is_first_attn
+            None,  # is_last_mlp
             None,  # comm_op_fwd
             None,  # comm_op_bwd
             None,  # forward_ops
@@ -401,7 +429,9 @@ class PartitionFuser:
         ops: list[FusibleOperation],
         comm_op_fwd: Optional[FusibleOperation] = None,
         comm_op_bwd: Optional[FusibleOperation] = None,
-        fuse_ops: bool = True,    
+        fuse_ops: bool = True,   
+        is_first_attn: bool = False,
+        is_last_mlp: bool = False,
     ) -> None:
 
         # Get list of basic operations
@@ -471,6 +501,8 @@ class PartitionFuser:
         comm_sm_configs: Optional[Tuple[int, int]] = None,
         comm_overlap_window_backward: Optional[Tuple[int, int]] = None,
         comm_sm_configs_backward: Optional[Tuple[int, int]] = None,
+        is_first_attn: bool = False,
+        is_last_mlp: bool = False,
     ) -> tuple[torch.Tensor, ...]: # hidden_states, bias, residual
 
         # Initialization before forward pass
@@ -499,6 +531,8 @@ class PartitionFuser:
             comm_sm_configs,
             comm_overlap_window_backward,
             comm_sm_configs_backward,
+            is_first_attn,
+            is_last_mlp,
             self._comm_op_fwd,
             self._comm_op_bwd,
             self._forward_ops,

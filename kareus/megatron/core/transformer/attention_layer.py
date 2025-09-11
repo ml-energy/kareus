@@ -46,14 +46,20 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
     if comm_scheduler is None:
         return {
             "comm_overlap_window": (2, 8),
-            "comm_sm_configs": (6, 1024),
+            "comm_sm_configs": (12, 1024),
             "comm_overlap_window_backward": (0, 8),
-            "comm_sm_configs_backward": (6, 1024),
+            "comm_sm_configs_backward": (12, 1024),
         }
     else:
         item = getattr(comm_scheduler, "current_schedule", None)
         if item is None:
-            raise RuntimeError("current_schedule is not set")
+            print("current_schedule is not set")
+            return {
+                "comm_overlap_window": (2, 8),
+                "comm_sm_configs": (6, 1024),
+                "comm_overlap_window_backward": (0, 8),
+                "comm_sm_configs_backward": (6, 1024),
+            }
         fwd_attn = item.fwd_attn
         bwd_attn = item.bwd_attn
         return {
@@ -143,6 +149,10 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
 
     def build_attention_fuser(self):
         assert len(self.tp_comms) == 2, "tp_comms is not initialized"
+        # if self.is_first_layer:
+        #     comp_ops = [self.input_layernorm]
+        # else:
+        #     comp_ops = [self.post_self_attn_bda, self.input_layernorm]
         comp_ops = [self.post_self_attn_bda, self.input_layernorm] # TODO: first layer
         comp_ops.extend(self.self_attention.get_compute_ops())
         for i in range(len(self.tp_comms)):
@@ -152,22 +162,23 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
                     comm_op_fwd=self.tp_comms[i][0],
                     comm_op_bwd=self.tp_comms[i][1],
                     fuse_ops=False,
+                    is_first_attn=self.is_first_layer and i == 0,
                 )
             )
     
     def init_tensor_parallel_comm_fwd(self, batch_idx, comm_tensor):
-        # if self.is_first_layer and batch_idx == 1: # TODO: first layer
-        #     fwd_comm = None
-        # else:
-        fwd_comm = AllReduce(
-            process_group=get_tensor_model_parallel_group(check_initialized=False),
-            async_op=True,
-            backend="msccl",
-            rank=get_tensor_model_parallel_rank(),
-            world_size=get_tensor_model_parallel_world_size(),
-            use_persistent_output=True,
-            input_buffer=comm_tensor,
-        )
+        if self.is_first_layer and batch_idx == 1: # TODO: first layer
+            fwd_comm = None
+        else:
+            fwd_comm = AllReduce(
+                process_group=get_tensor_model_parallel_group(check_initialized=False),
+                async_op=True,
+                backend="msccl",
+                rank=get_tensor_model_parallel_rank(),
+                world_size=get_tensor_model_parallel_world_size(),
+                use_persistent_output=True,
+                input_buffer=comm_tensor,
+            )
         assert len(self.tp_comms) == batch_idx - 1, "batch_idx is not correct"
         self.tp_comms.append([fwd_comm, None])
     

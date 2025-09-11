@@ -193,7 +193,7 @@ class MegatronBaseModel(NLPModel):
             if 'gpu_indices' not in zeus_monitor_cfg:
                 zeus_monitor_cfg['gpu_indices'] = [trainer.local_rank]
             if 'approx_instant_energy' not in zeus_monitor_cfg:
-                zeus_monitor_cfg['approx_instant_energy'] = True
+                zeus_monitor_cfg['approx_instant_energy'] = False
             if 'log_file' not in zeus_monitor_cfg:
                 app_state = AppState()
                 if app_state.log_dir is not None:

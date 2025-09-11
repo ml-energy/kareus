@@ -32,14 +32,20 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
     if comm_scheduler is None:
         return {
             "comm_overlap_window": (2, 6),
-            "comm_sm_configs": (6, 1024),
+            "comm_sm_configs": (12, 1024),
             "comm_overlap_window_backward": (0, 6),
-            "comm_sm_configs_backward": (6, 1024),
+            "comm_sm_configs_backward": (12, 1024),
         }
     else:
         item = getattr(comm_scheduler, "current_schedule", None)
         if item is None:
-            raise RuntimeError("current_schedule is not set")
+            print("current_schedule is not set")
+            return {
+                "comm_overlap_window": (2, 6),
+                "comm_sm_configs": (6, 1024),
+                "comm_overlap_window_backward": (0, 6),
+                "comm_sm_configs_backward": (6, 1024),
+            }
         fwd_mlp = item.fwd_mlp
         bwd_mlp = item.bwd_mlp
         return {
@@ -136,6 +142,7 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
                     comm_op_fwd=self.tp_comms[i][0],
                     comm_op_bwd=self.tp_comms[i][1],
                     fuse_ops=False,
+                    is_last_mlp=self.is_last_layer and i == 1,
                 )
             )
     
@@ -153,18 +160,18 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         self.tp_comms.append([fwd_comm, None])
     
     def init_tensor_parallel_comm_bwd(self, batch_idx, comm_tensor):
-        # if self.is_last_layer and batch_idx == 2: # TODO: last layer
-        #     bwd_comm = None
-        # else:
-        bwd_comm = AllReduce(
-            process_group=get_tensor_model_parallel_group(check_initialized=False),
-            async_op=True,
-            backend="msccl",
-            rank=get_tensor_model_parallel_rank(),
-            world_size=get_tensor_model_parallel_world_size(),
-            use_persistent_output=True,
-            input_buffer=comm_tensor,
-        )
+        if self.is_last_layer and batch_idx == 2: # TODO: last layer
+            bwd_comm = None
+        else:
+            bwd_comm = AllReduce(
+                process_group=get_tensor_model_parallel_group(check_initialized=False),
+                async_op=True,
+                backend="msccl",
+                rank=get_tensor_model_parallel_rank(),
+                world_size=get_tensor_model_parallel_world_size(),
+                use_persistent_output=True,
+                input_buffer=comm_tensor,
+            )
         self.tp_comms[batch_idx - 1][1] = bwd_comm
 
     def get_persistent_outputs_fwd(self, batch_idx: int):
@@ -203,6 +210,9 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         # if self.is_last_layer:
         #     return output, output_residual, allreduce_output
         # else:
+        # if self.is_last_layer and batch_idx == 2:
+        #     self.tp_comms[batch_idx - 1][0](output)
+
         return (output, output_bias), output_residual, (allreduce_output, comm_hidden_states[1])
 
         # # if comm_hidden_states is not None:
