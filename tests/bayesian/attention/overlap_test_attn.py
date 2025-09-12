@@ -65,7 +65,7 @@ class AttentionFuserTest:
         self.hidden_size = FuserTestConfig.HIDDEN_SIZE
         self.num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
         self.num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
-        self.head_dim = self.hidden_size // self.num_attention_heads
+        self.head_dim = FuserTestConfig.HEAD_DIM
         self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
         
         # Create transformer config
@@ -175,7 +175,7 @@ class AttentionFuserTest:
         )
         
         # 7. Linear Projection Operation
-        hidden_size_in = self.hidden_size // self.tensor_parallel_size
+        hidden_size_in = (self.head_dim * self.num_attention_heads) // self.tensor_parallel_size
         linear_proj_op = Linear(
             in_features=hidden_size_in,
             out_features=self.hidden_size,

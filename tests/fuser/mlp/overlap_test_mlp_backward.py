@@ -118,7 +118,6 @@ class MLPFuserTest:
         self.hidden_size = FuserTestConfig.HIDDEN_SIZE
         self.num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
         self.num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
-        self.head_dim = self.hidden_size // self.num_attention_heads
         self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
         
         # Create transformer config

@@ -78,7 +78,7 @@ OVERLAP_WINDOWS: List[Tuple[int, int]] = [
     # (0, 4), (2, 6), (3, 8),
     # (0, 6), (2, 8),
     # (0, 8),
-    (-1, -1), (0, 8), (2, 8), (3, 8), (5, 8), (7, 8),
+    (-1, -1), (0, 8), (2, 8), (3, 8), (5, 8), # (7, 8),
 ]
 
 # Communication SM counts and CUDA block sizes to consider
