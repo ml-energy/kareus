@@ -380,7 +380,6 @@ class AttentionFuserTest:
                             test_tensors, attention_fuser, 
                             overlap_window, sm_configs
                         )
-                    # return
                     time.sleep(30)
 
 

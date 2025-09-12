@@ -62,48 +62,14 @@ class AttentionFuserTest:
         # Test configuration
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len
-        self.arch = getattr(args, 'arch', 'llama')
-
-        if self.arch == 'gpt3':
-            # GPT-3 (2.7B-like) settings
-            self.hidden_size = 2560
-            self.num_attention_heads = 32
-            self.num_query_groups = 32  # no GQA
-            self.ffn_hidden_size = 10240
-            self.use_rope = False
-            self.use_rmsnorm = False
-            # Create transformer config for GPT-3
-            self.config = FuserTestConfig.create_attention_config(
-                world_size,
-                self.dtype,
-                hidden_size=self.hidden_size,
-                num_attention_heads=self.num_attention_heads,
-                num_query_groups=self.num_query_groups,
-                ffn_hidden_size=self.ffn_hidden_size,
-                apply_rope_fusion=False,
-                qk_layernorm=False,
-                apply_query_key_layer_scaling=True,
-            )
-        else:
-            # Llama-like defaults
-            self.hidden_size = FuserTestConfig.HIDDEN_SIZE
-            self.num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
-            self.num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
-            self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
-            self.use_rope = True
-            self.use_rmsnorm = True
-            # Create transformer config for Llama
-            self.config = FuserTestConfig.create_attention_config(
-                world_size,
-                self.dtype,
-                hidden_size=self.hidden_size,
-                num_attention_heads=self.num_attention_heads,
-                num_query_groups=self.num_query_groups,
-                ffn_hidden_size=self.ffn_hidden_size,
-                apply_rope_fusion=True,
-            )
-
-        self.head_dim = self.hidden_size // self.num_attention_heads
+        self.hidden_size = FuserTestConfig.HIDDEN_SIZE
+        self.num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
+        self.num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
+        self.head_dim = FuserTestConfig.HEAD_DIM
+        self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
+        
+        # Create transformer config
+        self.config = FuserTestConfig.create_attention_config(world_size, self.dtype)
 
         self.frequency = args.frequency
         self.repeat_num = 1
@@ -125,20 +91,17 @@ class AttentionFuserTest:
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
-        if self.use_rope:
-            seq = (
-                torch.arange(self.seq_length, device=self.device, dtype=torch.float32)
-                + 0
-            )
-            rotary_base = 10000
-            inv_freq = 1.0 / (
-                rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
-            )
-            freqs = torch.outer(seq, inv_freq)
-            rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
-            rotary_pos_emb = rotary_pos_emb[:, None, None, :]
-        else:
-            rotary_pos_emb = None
+        seq = (
+            torch.arange(self.seq_length, device=self.device, dtype=torch.float32)
+            + 0
+        )
+        rotary_base = 10000
+        inv_freq = 1.0 / (
+            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
+        )
+        freqs = torch.outer(seq, inv_freq)
+        rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
+        rotary_pos_emb = rotary_pos_emb[:, None, None, :]
         
         attention_mask = None
 
@@ -159,20 +122,12 @@ class AttentionFuserTest:
         )
         
         # 2. LayerNorm Operation
-        if self.use_rmsnorm:
-            layernorm_op = RMSNorm(
-                normalized_shape=self.hidden_size,
-                eps=self.config.layernorm_epsilon,
-                device=self.device,
-                dtype=self.dtype
-            )
-        else:
-            layernorm_op = LayerNorm(
-                normalized_shape=self.hidden_size,
-                eps=self.config.layernorm_epsilon,
-                device=self.device,
-                dtype=self.dtype
-            )
+        layernorm_op = RMSNorm(
+            normalized_shape=self.hidden_size,
+            eps=self.config.layernorm_epsilon,
+            device=self.device,
+            dtype=self.dtype
+        )
         
         # 3. Linear QKV Operation (transforms input to queries, keys, values)
         qkv_hidden_size = (
@@ -206,19 +161,10 @@ class AttentionFuserTest:
             test_mode=False,
         ) 
         
-        comp_ops = [
-            bda_op,
-            layernorm_op,
-            linear_qkv_op,
-            qkv_postprocess_op,
-        ]
-
-        # 5. Rotary Embedding Operation (optional for GPT-3)
-        if self.use_rope:
-            rotary_embedding_op = RotaryEmbeddingOp(
-                config=self.config,
-            )
-            comp_ops.append(rotary_embedding_op)
+        # 5. Rotary Embedding Operation
+        rotary_embedding_op = RotaryEmbeddingOp(
+            config=self.config,
+        ) 
         
         # 6. Dot Product Attention Operation
         attention_op = TEFusibleDotProductAttention(
@@ -227,10 +173,9 @@ class AttentionFuserTest:
             attn_mask_type=AttnMaskType.causal,
             attention_type="self",
         )
-        comp_ops.append(attention_op)
 
         # 7. Linear Projection Operation
-        hidden_size_in = self.hidden_size // self.tensor_parallel_size
+        hidden_size_in = (self.head_dim * self.num_attention_heads) // self.tensor_parallel_size
         linear_proj_op = Linear(
             in_features=hidden_size_in,
             out_features=self.hidden_size,
@@ -242,7 +187,6 @@ class AttentionFuserTest:
             tensor_parallel_group=None,
             tensor_parallel_size=None,
         )
-        comp_ops.append(linear_proj_op)
         
         # 8. AllReduce Communication Operation
         if self.tensor_parallel_size > 1:
@@ -259,7 +203,16 @@ class AttentionFuserTest:
                 dtype=self.dtype,
             )
         
-            return comp_ops, allreduce_comm_op
+            return [
+                bda_op,
+                layernorm_op,
+                linear_qkv_op,
+                qkv_postprocess_op,
+                rotary_embedding_op,
+                attention_op,
+                linear_proj_op,
+                allreduce_comm_op
+            ]
 
         else:
             raise ValueError("Tensor parallel size must be greater than 1")
@@ -367,7 +320,9 @@ class AttentionFuserTest:
     
     def run_overlap_test(self):
         test_tensors = self.create_test_tensors()
-        comp_ops, allreduce_comm_op = self.create_operations(test_tensors[-1])
+        operations = self.create_operations(test_tensors[-1])
+        comp_ops = operations[:7]
+        allreduce_comm_op = operations[7]
 
         attention_fuser = PartitionFuser(
             ops=comp_ops,
@@ -448,7 +403,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--frequency", "-f", type=str, default="default")
-    parser.add_argument("--arch", "-a", type=str, choices=["llama", "gpt3"], default="llama")
     args = parser.parse_args()
 
     print("Running overlap test for attention fuser")
@@ -456,7 +410,6 @@ if __name__ == "__main__":
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
     print(f"Frequency: {args.frequency}")
-    print(f"Architecture: {args.arch}")
 
     from torch.multiprocessing import spawn
     import random

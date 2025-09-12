@@ -14,24 +14,24 @@ class FuserTestConfig:
     """Configuration factory for fuser test scripts."""
     
     # Default model dimensions (Llama-like)
-    HIDDEN_SIZE = 2048
-    NUM_ATTENTION_HEADS = 32
-    HEAD_DIM = 64
+    HIDDEN_SIZE = 3072
+    NUM_ATTENTION_HEADS = 24
+    HEAD_DIM = 128
     NUM_QUERY_GROUPS = 8  # For grouped query attention
     FFN_HIDDEN_SIZE = 8192
     VOCAB_SIZE = 128256
     DROP_RATE = 0.0
-    NUM_LAYERS = 16
+    NUM_LAYERS = 28
     
     # Default test parameters
-    DEFAULT_WORLD_SIZE = 4
+    DEFAULT_WORLD_SIZE = 8
     DEFAULT_BATCH_SIZE = 16
     DEFAULT_SEQ_LENGTH = 4096
 
-    DEFAULT_STAGES = 4
-    DEFAULT_NUM_MICROBATCHES = 16
-    num_layers_in_first_pipeline_stage = 4
-    num_layers_in_last_pipeline_stage = 2
+    DEFAULT_STAGES = 2
+    DEFAULT_NUM_MICROBATCHES = 8
+    # num_layers_in_first_pipeline_stage = 4
+    # num_layers_in_last_pipeline_stage = 2
     
     # Default Bayesian Optimization parameters
     BO_DEFAULT_N_INIT = 96
@@ -103,8 +103,6 @@ class FuserTestConfig:
             vocab_size = FuserTestConfig.VOCAB_SIZE
         if drop_rate is None:
             drop_rate = FuserTestConfig.DROP_RATE
-        if num_layers is None:
-            num_layers = FuserTestConfig.NUM_LAYERS
             
         config_params = {
             'num_layers': num_layers,

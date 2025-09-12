@@ -1,16 +1,16 @@
-name: megatron_llama_3_2_3b_sp # CUDA_DEVICE_MAX_CONNECTIONS=1
+name: megatron_qwen3_1p7b
 trainer:
-  devices: 4
-  num_nodes: 1
+  devices: 8
+  num_nodes: 2
   accelerator: gpu
   precision: bf16
   logger: False # logger provided by exp_manager
   enable_checkpointing: False
   use_distributed_sampler: False
   max_epochs: 1 # PTL default. In practice, max_steps will be reached first. 
-  max_steps: 2 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
-  log_every_n_steps: 4
-  val_check_interval: 4
+  max_steps: 30 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
+  log_every_n_steps: 40
+  val_check_interval: 40
   limit_val_batches: 1
   limit_test_batches: 1
   accumulate_grad_batches: 1 # do not modify, grad acc is automatic for training megatron models
@@ -22,7 +22,7 @@ trainer:
 exp_manager:
   explicit_log_dir: null
   exp_dir: null
-  name: megatron_llama_3_2_3b
+  name: megatron_qwen3_1p7b
   create_wandb_logger: False
   wandb_logger_kwargs:
     project: null
@@ -47,28 +47,31 @@ model:
   mcore_gpt: True
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
-  micro_batch_size: 4 # Reduced for larger 3B model
-  global_batch_size: 8 # will use more micro batches to reach global batch size
-  tensor_model_parallel_size: 2 # Appropriate for 3B model
-  pipeline_model_parallel_size: 2 # inter-layer model parallelism for larger model
+  micro_batch_size: 16 # Mirror LLaMA 2-nodes setting
+  global_batch_size: 256 # Mirror LLaMA 2-nodes setting
+  tensor_model_parallel_size: 4 # Mirror LLaMA 2-nodes setting
+  pipeline_model_parallel_size: 4 # inter-layer model parallelism
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
+ 
+  # num_layers_in_first_pipeline_stage: 7
+  # num_layers_in_last_pipeline_stage: 7
 
-  # model architecture - LLaMA 3.2 3B
-  encoder_seq_length: 4096 # Same as 3.1 8B for consistency
+  # model architecture - Qwen3 ~1.7B
+  encoder_seq_length: 4096 # Keep aligned with dataset and LLaMA/Qwen config
   max_position_embeddings: ${.encoder_seq_length}
-  num_layers: 28 # LLaMA 3.2 3B: 28 layers
-  hidden_size: 3072 # LLaMA 3.2 3B: 3072
-  ffn_hidden_size: 8192 # LLaMA 3.2 3B: 8192 (intermediate size)
-  num_attention_heads: 24 # LLaMA 3.2 3B: 24 attention heads
+  num_layers: 28 # ~1.7B scale (aligned with Qwen2 1.5B)
+  hidden_size: 2048
+  ffn_hidden_size: 6144
+  num_attention_heads: 16
   init_method_std: 0.02 # Standard deviation of the zero mean normal distribution used for weight initialization.')
   use_scaled_init_method: True # use scaled residuals initialization
   hidden_dropout: 0.0 # Dropout probability for hidden state transformer.
   attention_dropout: 0.0 # Dropout probability for attention
   ffn_dropout: 0.0 # Dropout probability in the feed-forward layer.
-  kv_channels: 128 # LLaMA 3.2 3B: 128 (hidden_size // num_attention_heads = 3072 // 24)
+  kv_channels: 128 # decoupled head_dim per HF config (hidden_size/heads)
   apply_query_key_layer_scaling: True # scale Q * K^T by 1 / layer-number.
   normalization: 'rmsnorm' # Normalization layer to use. Options are 'layernorm', 'rmsnorm'
-  layernorm_epsilon: 1e-5
+  layernorm_epsilon: 1e-6
   do_layer_norm_weight_decay: False # True means weight decay on all params
   make_vocab_size_divisible_by: 128 # Pad the vocab size to be divisible by this value for computation efficiency.
   pre_process: True # add embedding
@@ -79,29 +82,31 @@ model:
   headscale: False # Whether to learn extra parameters that scale the output of the each self-attention head.
   transformer_block_type: 'pre_ln' # Options ['pre_ln', 'post_ln', 'normformer']
   openai_gelu: False # Use OpenAI's GELU instead of the default GeLU
-  normalize_attention_scores: True # Whether to scale the output Q * K^T by 1 / sqrt(hidden_size_per_head). This arg is provided as a configuration option mostly for compatibility with models that have been weight-converted from HF. You almost always want to se this to True.
+  normalize_attention_scores: True # Whether to scale the output Q * K^T by 1 / sqrt(hidden_size_per_head).
   position_embedding_type: 'rope' # Position embedding type. Options ['learned_absolute', 'rope']
   rotary_percentage: 1.0 # If using position_embedding_type=rope, then the per head dim is multiplied by this.
   attention_type: 'multihead' # Attention type. Options ['multihead']
-  share_embeddings_and_output_weights: False # Share embedding and output layer weights.
+  share_embeddings_and_output_weights: True # Share embedding and output layer weights.
   overlap_p2p_comm: False # Overlap p2p communication with computes. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
   batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
-  num_query_groups: 8 # LLaMA 3.2 3B uses grouped query attention with 8 key-value heads
+  num_query_groups: 8 # Grouped-query attention with 8 KV groups
 
-  enable_megatron_timers: false
+  enable_megatron_timers: true
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
   enable_zeus_monitor: false
   enable_power_monitor: false
   enable_perseus_optimizer: false
+  enable_kareus_scheduler: false
+  kareus_scheduler_kwargs:
+    solution_path: /workspaces/Kareus/tests/llama/conf/solution.py
 
   tokenizer:
-    library: 'megatron'
-    type: 'GPT2BPETokenizer'
-    model: null
-    vocab_file: /workspaces/NeMo/model_test/simple_test/data/gpt2-vocab.json
-    merge_file: /workspaces/NeMo/model_test/simple_test/data/gpt2-merges.txt
+    library: 'huggingface'
+    type: 'Qwen/Qwen2.5-1.5B-Instruct'
+    use_fast: True
+    trust_remote_code: True
     delimiter: null # only used for tabular tokenizer
     sentencepiece_legacy: False # Legacy=True allows you to add special tokens to sentencepiece tokenizers.
 
@@ -124,6 +129,8 @@ model:
   masked_softmax_fusion: True # Use a kernel that fuses the attention softmax with it's mask.
   get_attention_mask_from_fusion: True # When using fused softmax it will create the attention mask so we won't copy it to the pipeline stages.
   apply_rope_fusion: True # Use a kernel to add rotary positional embeddings. Only used if position_embedding_type=rope
+  cross_entropy_loss_fusion: True # Use a kernel to compute the cross entropy loss.
+  cross_entropy_fusion_impl: 'te' # Use a kernel to compute the cross entropy loss.
 
 
   # Miscellaneous
@@ -140,12 +147,12 @@ model:
   # These memory intensive activations are also less compute intensive which makes activation checkpointing more efficient for LLMs (20B+).
   # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
   # 'full' will checkpoint the entire transformer layer.
-  activations_checkpoint_granularity: null # 'selective' or 'full' 
-  activations_checkpoint_method: null # 'uniform', 'block'
+  activations_checkpoint_granularity: 'full' # Checkpoint entire layers for maximum memory savings
+  activations_checkpoint_method: 'uniform' # Evenly distribute checkpoints across all layers
   # 'uniform' divides the total number of transformer layers and checkpoints the input activation
   # of each chunk at the specified granularity. When used with 'selective', 'uniform' checkpoints all attention blocks in the model.
   # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
-  activations_checkpoint_num_layers: null
+  activations_checkpoint_num_layers: 1 # Checkpoint every single layer (maximum memory savings)
   # when using 'uniform' this creates groups of transformer layers to checkpoint. Usually set to 1. Increase to save more memory.
   # when using 'block' this this will checkpoint the first activations_checkpoint_num_layers per pipeline stage.
   num_micro_batches_with_partial_activation_checkpoints: null
@@ -166,8 +173,7 @@ model:
   ## Sequence Parallelism
   # Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer norms and dropout sequentially
   # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
-  sequence_parallel: True
-  tp_comm_overlap: True
+  sequence_parallel: False
 
   ## Transformer Engine
   transformer_engine: True
@@ -214,7 +220,7 @@ model:
 
   # Nsys profiling options
   nsys_profile:
-    enabled: True
+    enabled: False
     start_step: 10  # Global batch to start profiling
     end_step: 15 # Global batch to end profiling
     ranks: [0] # Global rank IDs to profile
@@ -232,3 +238,6 @@ model:
       warmup_steps: 500
       constant_steps: 50000
       min_lr: 2e-5 
+
+
+

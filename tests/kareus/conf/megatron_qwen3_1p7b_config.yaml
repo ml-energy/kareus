@@ -1,6 +1,6 @@
 name: megatron_qwen3_1p7b
 trainer:
-  devices: 8
+  devices: 4
   num_nodes: 1
   accelerator: gpu
   precision: bf16
@@ -8,9 +8,9 @@ trainer:
   enable_checkpointing: False
   use_distributed_sampler: False
   max_epochs: 1 # PTL default. In practice, max_steps will be reached first. 
-  max_steps: 30 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
-  log_every_n_steps: 40
-  val_check_interval: 40
+  max_steps: 2 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
+  log_every_n_steps: 4
+  val_check_interval: 4
   limit_val_batches: 1
   limit_test_batches: 1
   accumulate_grad_batches: 1 # do not modify, grad acc is automatic for training megatron models
@@ -47,22 +47,22 @@ model:
   mcore_gpt: True
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
-  micro_batch_size: 8 # Reduced for Qwen3 ~1.7B model
-  global_batch_size: 128 # will use more micro batches to reach global batch size
+  micro_batch_size: 4 # Reduced for Qwen3 ~1.7B model
+  global_batch_size: 8 # will use more micro batches to reach global batch size
   tensor_model_parallel_size: 2 # Keep consistent topology
-  pipeline_model_parallel_size: 4 # inter-layer model parallelism
+  pipeline_model_parallel_size: 2 # inter-layer model parallelism
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
  
-  num_layers_in_first_pipeline_stage: 7
-  num_layers_in_last_pipeline_stage: 7
+  # num_layers_in_first_pipeline_stage: 7
+  # num_layers_in_last_pipeline_stage: 7
 
   # model architecture - Qwen3 ~1.7B
   encoder_seq_length: 4096 # Keep aligned with dataset and LLaMA/Qwen config
   max_position_embeddings: ${.encoder_seq_length}
   num_layers: 28 # ~1.7B scale (aligned with Qwen2 1.5B)
-  hidden_size: 1536
-  ffn_hidden_size: 8960
-  num_attention_heads: 12
+  hidden_size: 2048
+  ffn_hidden_size: 6144
+  num_attention_heads: 16
   init_method_std: 0.02 # Standard deviation of the zero mean normal distribution used for weight initialization.')
   use_scaled_init_method: True # use scaled residuals initialization
   hidden_dropout: 0.0 # Dropout probability for hidden state transformer.
@@ -89,7 +89,7 @@ model:
   share_embeddings_and_output_weights: True # Share embedding and output layer weights.
   overlap_p2p_comm: False # Overlap p2p communication with computes. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
   batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
-  num_query_groups: 2 # Grouped-query attention with 2 KV groups
+  num_query_groups: 8 # Grouped-query attention with 8 KV groups
 
   enable_megatron_timers: true
   megatron_timer_kwargs:
@@ -202,7 +202,7 @@ model:
     # "model.data.data_prefix: {train:[1.0,/path/to/data], validation:[/path/to/data], test:[/path/to/test]}"
     data_prefix: 
       - 1.0
-      - /root/data/my-gpt_text_document
+      - /workspaces/Kareus/tests/simple_test/data/my-gpt_text_document
     index_mapping_dir: null # path to save index mapping .npy files, by default will save in the same location as data_prefix
     data_impl: mmap
     splits_string: 900,50,50
