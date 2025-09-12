@@ -1874,9 +1874,9 @@ def forward_backward_pipelining_without_interleaving(
 
         input_tensor = recv_forward(recv_tensor_shapes, config)
 
-        if config.zeus_monitor is not None:
-            torch.cuda.synchronize()
-            config.zeus_monitor.begin_window(f"forward_step microbatch {i}")
+        # if config.zeus_monitor is not None:
+        #     torch.cuda.synchronize()
+        #     config.zeus_monitor.begin_window(f"forward_step microbatch {i}")
 
         output_tensor, num_tokens = forward_step(
             forward_step_func,
@@ -1894,9 +1894,9 @@ def forward_backward_pipelining_without_interleaving(
             forward_only=forward_only,
         )
 
-        if config.zeus_monitor is not None:
-            torch.cuda.synchronize()
-            config.zeus_monitor.end_window(f"forward_step microbatch {i}")
+        # if config.zeus_monitor is not None:
+        #     torch.cuda.synchronize()
+        #     config.zeus_monitor.end_window(f"forward_step microbatch {i}")
 
         send_forward(output_tensor, send_tensor_shapes, config)
         total_num_tokens += num_tokens
@@ -1924,9 +1924,9 @@ def forward_backward_pipelining_without_interleaving(
         else:
             checkpoint_activations_microbatch = None
 
-        if config.zeus_monitor is not None:
-            torch.cuda.synchronize()
-            config.zeus_monitor.begin_window(f"forward_step microbatch {i + num_warmup_microbatches}")
+        # if config.zeus_monitor is not None:
+        #     torch.cuda.synchronize()
+        #     config.zeus_monitor.begin_window(f"forward_step microbatch {i + num_warmup_microbatches}")
 
         output_tensor, num_tokens = forward_step(
             forward_step_func,
@@ -1947,9 +1947,9 @@ def forward_backward_pipelining_without_interleaving(
         )
         total_num_tokens += num_tokens
 
-        if config.zeus_monitor is not None:
-            torch.cuda.synchronize()
-            config.zeus_monitor.end_window(f"forward_step microbatch {i + num_warmup_microbatches}")
+        # if config.zeus_monitor is not None:
+        #     torch.cuda.synchronize()
+        #     config.zeus_monitor.end_window(f"forward_step microbatch {i + num_warmup_microbatches}")
 
         if forward_only:
             send_forward(output_tensor, send_tensor_shapes, config)
@@ -1978,17 +1978,17 @@ def forward_backward_pipelining_without_interleaving(
                 if config.grad_sync_func is None or rank == 0:
                     enable_grad_sync()
 
-            if config.zeus_monitor is not None:
-                torch.cuda.synchronize()
-                config.zeus_monitor.begin_window(f"backward_step microbatch {i}")
+            # if config.zeus_monitor is not None:
+            #     torch.cuda.synchronize()
+            #     config.zeus_monitor.begin_window(f"backward_step microbatch {i}")
 
             input_tensor_grad = backward_step(
                 input_tensor, output_tensor, output_tensor_grad, model_type, config
             )
 
-            if config.zeus_monitor is not None:
-                torch.cuda.synchronize()
-                config.zeus_monitor.end_window(f"backward_step microbatch {i}")
+            # if config.zeus_monitor is not None:
+            #     torch.cuda.synchronize()
+            #     config.zeus_monitor.end_window(f"backward_step microbatch {i}")
 
             if last_iteration:
                 input_tensor = None
@@ -2016,17 +2016,17 @@ def forward_backward_pipelining_without_interleaving(
 
             output_tensor_grad = recv_backward(send_tensor_shapes, config)
 
-            if config.zeus_monitor is not None:
-                torch.cuda.synchronize()
-                config.zeus_monitor.begin_window(f"backward_step microbatch {i + num_microbatches_remaining}")
+            # if config.zeus_monitor is not None:
+            #     torch.cuda.synchronize()
+            #     config.zeus_monitor.begin_window(f"backward_step microbatch {i + num_microbatches_remaining}")
 
             input_tensor_grad = backward_step(
                 input_tensor, output_tensor, output_tensor_grad, model_type, config
             )
 
-            if config.zeus_monitor is not None:
-                torch.cuda.synchronize()
-                config.zeus_monitor.end_window(f"backward_step microbatch {i + num_microbatches_remaining}")
+            # if config.zeus_monitor is not None:
+            #     torch.cuda.synchronize()
+            #     config.zeus_monitor.end_window(f"backward_step microbatch {i + num_microbatches_remaining}")
 
             send_backward(input_tensor_grad, recv_tensor_shapes, config)
 

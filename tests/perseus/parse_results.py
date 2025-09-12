@@ -37,39 +37,42 @@ def parse_results(
     if not files:
         raise RuntimeError(f"No files found in {path}")
 
-    # Build a mapping from local_rank to file path
-    rank_to_file: Dict[int, str] = {}
+    # Build a mapping from global_rank to (file path, local_rank)
+    global_to_file: Dict[int, Tuple[str, int]] = {}
     for file_path in files:
         basename = os.path.basename(file_path)
         m_new = re.match(r"zeus_monitor_global_rank-(\d+)_local_rank-(\d+)\.txt$", basename)
         if m_new:
-            # We use local_rank for indexing energy columns and mapping
+            # Use global rank for keying results; keep local rank to pick energy column
+            global_rank = int(m_new.group(1))
             local_rank = int(m_new.group(2))
-            rank_to_file[local_rank] = file_path
+            global_to_file[global_rank] = (file_path, local_rank)
             continue
 
-    if not rank_to_file:
+    if not global_to_file:
         raise RuntimeError(f"No valid zeus monitor files matched expected patterns in {path}")
     
     
     results = {}
 
-    # Determine which ranks to process
+    # Determine which global ranks to process
     if num_ranks is None:
-        target_ranks = sorted(rank_to_file.keys())
+        target_ranks = sorted(global_to_file.keys())
     else:
         target_ranks = list(range(num_ranks))
 
     for rank in target_ranks:
-        file = rank_to_file.get(rank)
-        if not file or not os.path.exists(file):
-            print(f"  Warning: file for rank {rank} not found")
+        file_and_local = global_to_file.get(rank)
+        if not file_and_local or not os.path.exists(file_and_local[0]):
+            print(f"  Warning: file for global rank {rank} not found")
             continue
             
+        file = file_and_local[0]
+        local_rank = file_and_local[1]
         df = pd.read_csv(file)
-        training_steps = df[df['window_name'] == 'training_step']
+        training_steps = df[df['window_name'] == 'training_step_fwd_bwd_step_call']
         if training_steps.empty:
-            print(f"    No training_step entries found for rank {rank}")
+            print(f"    No training_step entries found for global rank {rank}")
             continue
 
         if len(training_steps) < warmup_iters + profile_iters:
@@ -80,7 +83,7 @@ def parse_results(
             selected_steps = training_steps.iloc[warmup_iters:warmup_iters + profile_iters]
             
         times = selected_steps['elapsed_time'].values
-        energies = selected_steps[f'gpu{rank}_energy'].values
+        energies = selected_steps[f'gpu{local_rank}_energy'].values
         avg_time = np.mean(times)
         avg_energy = np.mean(energies)
         

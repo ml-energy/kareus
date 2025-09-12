@@ -45,3 +45,6 @@ docker run -it \
 
 # docker login -u ruofanwu7
 # dckr_pat_DI1BqD7uAvlv4tNRX_H_fDxxYG4
+
+# AWS
+# https://github.com/ml-energy/vllm/commit/0ecb7b84140630f885c36bac0233023b8e9df7c0

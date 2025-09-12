@@ -8,5 +8,5 @@ done
 
 nvidia-smi -i 0,1,2,3,4,5,6,7 --reset-gpu-clocks
 
-mkdir -p nemo_experiments/megatron_llama_3_2_1b/profiling
-mv nemo_experiments/megatron_llama_3_2_1b/* nemo_experiments/megatron_llama_3_2_1b/profiling/
+mkdir -p nemo_experiments/megatron_llama_3_2_1b/profiling/node0
+mv nemo_experiments/megatron_llama_3_2_1b/* nemo_experiments/megatron_llama_3_2_1b/profiling/node0/
