@@ -65,6 +65,12 @@ except ImportError as exc:
 from botorch.utils.multi_objective.pareto import is_non_dominated
 from botorch.utils.multi_objective.hypervolume import Hypervolume
 
+try:
+    import matplotlib.pyplot as plt  # noqa: F401
+    _MATPLOTLIB_AVAILABLE = True
+except Exception:
+    _MATPLOTLIB_AVAILABLE = False
+
 
 # -----------------------------
 # Search space and encodings
@@ -82,7 +88,7 @@ OVERLAP_WINDOWS: List[Tuple[int, int]] = [
 ]
 
 # Communication SM counts and CUDA block sizes to consider
-SM_VALUES: List[int] = list(range(1, 21))
+SM_VALUES: List[int] = FuserTestConfig.get_comm_sm_values()
 BLOCK_VALUES: List[int] = [512, 1024]
 
 # Frequency values are determined at runtime from --gpu_type
@@ -163,8 +169,8 @@ def _set_gpu_frequency(target_freq_mhz: int, device_indices: List[int] | None = 
     for i in indices:
         handle = pynvml.nvmlDeviceGetHandleByIndex(i)
         pynvml.nvmlDeviceSetGpuLockedClocks(handle, target_freq_mhz, target_freq_mhz)
+        time.sleep(1)
     pynvml.nvmlShutdown()
-    time.sleep(1)
 
 
 def _dist_eval_worker(
@@ -175,9 +181,11 @@ def _dist_eval_worker(
     overlap_window: Tuple[int, int],
     sm_num: int,
     block_size: int,
-    eval_log_path: str,
     master_port: int,
     shared_results: dict,
+    eval_log_path: str,
+    selection_flags: Optional[Dict[str, bool]] = None,
+    predicted_values: Optional[Dict[str, float]] = None,
 ) -> None:
     """
     Distributed worker: run a single configuration and measure time/energy.
@@ -269,6 +277,21 @@ def _dist_eval_worker(
             "time_s": avg_time_s,
             "energy_j": avg_energy_j,
         }
+        # BO selection category flags (default False if not provided)
+        flags = selection_flags or {}
+        record.update({
+            "selected_exploit_eff": bool(flags.get("selected_exploit_eff", False)),
+            "selected_exploit_real": bool(flags.get("selected_exploit_real", False)),
+            "selected_time": bool(flags.get("selected_time", False)),
+            "selected_explore": bool(flags.get("selected_explore", False)),
+        })
+        preds = predicted_values or {}
+        # Optional model predictions captured at selection time
+        record.update({
+            "pred_time_s": preds.get("time_s"),
+            "pred_energy_eff_j": preds.get("energy_eff_j"),
+            "pred_energy_real_j": preds.get("energy_real_j"),
+        })
         
         # Store results in shared dictionary
         shared_results["energy_j"] = avg_energy_j
@@ -289,6 +312,8 @@ def _dist_eval_worker(
 def measure_on_hardware(
     x_vec: np.ndarray,
     args: argparse.Namespace,
+    selection_flags: Optional[Dict[str, bool]] = None,
+    predicted_values: Optional[Dict[str, float]] = None,
 ) -> Tuple[float, float]:
     """
     Evaluate a candidate configuration on real hardware by spawning a
@@ -327,9 +352,11 @@ def measure_on_hardware(
             overlap_window,
             sm_num,
             block_size,
-            eval_log_path,
             master_port,
             shared_results,
+            eval_log_path,
+            selection_flags,
+            predicted_values,
         ),
         nprocs=args.world_size,
         join=True,
@@ -488,6 +515,21 @@ def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.nda
     energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
     time_model = xgb.train(params, dtrain_time, num_boost_round=100)
     return energy_model, time_model
+
+
+def train_xgb_energy_only(X_encoded: np.ndarray, y_energy: np.ndarray):
+    dtrain_energy = xgb.DMatrix(X_encoded, label=y_energy)
+    params = {
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "max_depth": 6,
+        "eta": 0.3,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_weight": 1,
+    }
+    energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
+    return energy_model
 
 
 def train_xgb_ensemble(
@@ -666,6 +708,104 @@ def is_config_in_dataset(config: np.ndarray, dataset: np.ndarray) -> bool:
 
 
 # -----------------------------
+# Visualization helpers
+# -----------------------------
+
+def _save_iteration_plots(
+    ib: int,
+    args: argparse.Namespace,
+    prev_energy_eff: np.ndarray,
+    prev_energy_real: np.ndarray,
+    prev_time: np.ndarray,
+    new_time: List[float],
+    new_eff_energy: List[float],
+    new_real_energy: List[float],
+    cat_exploit_eff: List[bool],
+    cat_exploit_real: List[bool],
+    cat_time: List[bool],
+    cat_explore: List[bool],
+) -> None:
+    if not _MATPLOTLIB_AVAILABLE:
+        print("Matplotlib not available; skipping iteration plots.")
+        return
+
+    # Prepare directories (align with forward path under /forward/figures)
+    base_logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward/figures"
+    os.makedirs(base_logs_dir, exist_ok=True)
+
+    # Compute previous Pareto fronts (measured before this iteration's new points)
+    Y_eff_prev = np.column_stack((prev_energy_eff, prev_time)) if len(prev_time) > 0 else np.empty((0, 2))
+    pareto_mask_eff_prev = is_non_dominated(-torch.tensor(Y_eff_prev, dtype=torch.double)).cpu().numpy().astype(bool) if Y_eff_prev.shape[0] > 0 else np.array([], dtype=bool)
+    Y_real_prev = np.column_stack((prev_energy_real, prev_time)) if len(prev_time) > 0 else np.empty((0, 2))
+    pareto_mask_real_prev = is_non_dominated(-torch.tensor(Y_real_prev, dtype=torch.double)).cpu().numpy().astype(bool) if Y_real_prev.shape[0] > 0 else np.array([], dtype=bool)
+
+    # Convert new lists to arrays
+    new_time_arr = np.array(new_time, dtype=float)
+    new_eff_arr = np.array(new_eff_energy, dtype=float)
+    new_real_arr = np.array(new_real_energy, dtype=float)
+    cat_eff = np.array(cat_exploit_eff, dtype=bool)
+    cat_real = np.array(cat_exploit_real, dtype=bool)
+    cat_time_arr = np.array(cat_time, dtype=bool)
+    cat_explore_arr = np.array(cat_explore, dtype=bool)
+
+    # Plot Effective-energy frontier
+    try:
+        plt.figure(figsize=(7, 5))
+        # Previous measured points (effective): x=time, y=energy
+        if Y_eff_prev.shape[0] > 0:
+            plt.scatter(Y_eff_prev[:, 1], Y_eff_prev[:, 0], c="#888888", s=20, label="Measured prev")
+            if np.any(pareto_mask_eff_prev):
+                front = Y_eff_prev[pareto_mask_eff_prev]
+                front_sorted = front[np.argsort(front[:, 1])]
+                plt.plot(front_sorted[:, 1], front_sorted[:, 0], "-", c="#1f77b4", label="Pareto prev (eff)")
+        # New measured points (categorized)
+        if new_time_arr.size > 0:
+            if np.any(cat_eff):
+                plt.scatter(new_time_arr[cat_eff], new_eff_arr[cat_eff], marker="x", c="#d62728", s=50, label="Exploit eff")
+            if np.any(cat_time_arr):
+                plt.scatter(new_time_arr[cat_time_arr], new_eff_arr[cat_time_arr], marker="o", facecolors="none", edgecolors="#2ca02c", s=60, label="Time picks")
+            if np.any(cat_explore_arr):
+                plt.scatter(new_time_arr[cat_explore_arr], new_eff_arr[cat_explore_arr], marker="s", c="#9467bd", s=40, label="Explore")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Effective energy (J)")
+        plt.title(f"Iter {ib+1}: Time vs Effective energy (measured)")
+        plt.legend(loc="best")
+        eff_path = os.path.join(base_logs_dir, f"iter_{ib+1:02d}_effective.png")
+        plt.tight_layout()
+        plt.savefig(eff_path)
+        plt.close()
+    except Exception as _exc:
+        print(f"Warning: failed to save effective plot for iter {ib+1}: {_exc}")
+
+    # Plot Real-energy frontier
+    try:
+        plt.figure(figsize=(7, 5))
+        if Y_real_prev.shape[0] > 0:
+            plt.scatter(Y_real_prev[:, 1], Y_real_prev[:, 0], c="#888888", s=20, label="Measured prev")
+            if np.any(pareto_mask_real_prev):
+                front = Y_real_prev[pareto_mask_real_prev]
+                front_sorted = front[np.argsort(front[:, 1])]
+                plt.plot(front_sorted[:, 1], front_sorted[:, 0], "-", c="#ff7f0e", label="Pareto prev (real)")
+        if new_time_arr.size > 0:
+            if np.any(cat_real):
+                plt.scatter(new_time_arr[cat_real], new_real_arr[cat_real], marker="+", c="#1f77b4", s=60, label="Exploit real")
+            if np.any(cat_time_arr):
+                plt.scatter(new_time_arr[cat_time_arr], new_real_arr[cat_time_arr], marker="o", facecolors="none", edgecolors="#2ca02c", s=60, label="Time picks")
+            if np.any(cat_explore_arr):
+                plt.scatter(new_time_arr[cat_explore_arr], new_real_arr[cat_explore_arr], marker="s", c="#9467bd", s=40, label="Explore")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Real energy (J)")
+        plt.title(f"Iter {ib+1}: Time vs Real energy (measured)")
+        plt.legend(loc="best")
+        real_path = os.path.join(base_logs_dir, f"iter_{ib+1:02d}_real.png")
+        plt.tight_layout()
+        plt.savefig(real_path)
+        plt.close()
+    except Exception as _exc:
+        print(f"Warning: failed to save real plot for iter {ib+1}: {_exc}")
+
+
+# -----------------------------
 # Main optimization loop
 # -----------------------------
 
@@ -795,7 +935,7 @@ def main() -> None:
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
         # Train separate models for effective and real energy; share time model
         energy_model_eff, time_model = train_xgb_models(X_train_encoded, y_energy_eff, y_time)
-        energy_model_real, _ = train_xgb_models(X_train_encoded, y_energy_real, y_time)
+        energy_model_real = train_xgb_energy_only(X_train_encoded, y_energy_real)
         models_eff = (energy_model_eff, time_model)
         models_real = (energy_model_real, time_model)
         # Train ensemble for uncertainty estimates
@@ -913,6 +1053,8 @@ def main() -> None:
 
         # Indices for exploit: split between effective and real energy objectives
         exploit_idx: List[int] = []
+        exploit_eff_idx: List[int] = []
+        exploit_real_idx: List[int] = []
         if k_exploit > 0:
             k_exploit_eff = k_exploit // 2
             k_exploit_real = k_exploit - k_exploit_eff
@@ -923,6 +1065,7 @@ def main() -> None:
             for idx in top_eff:
                 if idx not in picked:
                     exploit_idx.append(idx)
+                    exploit_eff_idx.append(idx)
                     picked.add(idx)
 
             # Top by EHVI (real energy), excluding already picked
@@ -931,6 +1074,7 @@ def main() -> None:
                 for idx in top_real:
                     if idx not in picked:
                         exploit_idx.append(idx)
+                        exploit_real_idx.append(idx)
                         picked.add(idx)
 
             # Backfill to reach k_exploit using combined EHVI max, if needed
@@ -939,6 +1083,11 @@ def main() -> None:
                 for idx in np.argsort(combined)[::-1].tolist():
                     if idx not in picked:
                         exploit_idx.append(idx)
+                        # Assign backfilled to eff/real based on which EHVI is larger
+                        if ehvi_eff_values[idx] >= ehvi_real_values[idx]:
+                            exploit_eff_idx.append(idx)
+                        else:
+                            exploit_real_idx.append(idx)
                         picked.add(idx)
                     if len(exploit_idx) >= k_exploit:
                         break
@@ -991,7 +1140,23 @@ def main() -> None:
         for i, vec in enumerate(selected):
             cfg = decode_vec(vec)
             print(f"  [{i+1}/{len(selected)}] freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}")
-            e_j, t_s = measure_on_hardware(vec, args)
+            sel_idx = final_idx[i]
+            flags = {
+                "selected_exploit_eff": bool(sel_idx in exploit_eff_idx),
+                "selected_exploit_real": bool(sel_idx in exploit_real_idx),
+                "selected_time": bool(sel_idx in time_idx),
+                "selected_explore": bool(sel_idx in explore_idx),
+            }
+            # Predictions for logging
+            cand_enc = one_hot_encode(vec).reshape(1, -1)
+            pred_eff_e, pred_time = predict_performance(models_eff, cand_enc)
+            pred_real_e, _ = predict_performance(models_real, cand_enc)
+            preds = {
+                "time_s": float(pred_time[0]),
+                "energy_eff_j": float(pred_eff_e[0]),
+                "energy_real_j": float(pred_real_e[0]),
+            }
+            e_j, t_s = measure_on_hardware(vec, args, selection_flags=flags, predicted_values=preds)
             # e_j, t_s = measure_from_profile_results(vec, args)
             eff_e_j = float(e_j) - float(p2p_power_w) * float(t_s)
             new_time.append(float(t_s))
@@ -1025,6 +1190,22 @@ def main() -> None:
         print(f"  Current Pareto points count: {pareto_count}")
         print(
             f"  Best observed -> Energy: {np.min(y_energy_eff):.4f} J | Time: {np.min(y_time):.6f} s"
+        )
+
+        # Save iteration visualization AFTER evaluation with measured values
+        _save_iteration_plots(
+            ib=ib,
+            args=args,
+            prev_energy_eff=y_energy_eff[:-len(new_eff_energy)] if len(new_eff_energy) > 0 else y_energy_eff,
+            prev_energy_real=y_energy_real[:-len(new_avg_energy)] if len(new_avg_energy) > 0 else y_energy_real,
+            prev_time=y_time[:-len(new_time)] if len(new_time) > 0 else y_time,
+            new_time=new_time,
+            new_eff_energy=new_eff_energy,
+            new_real_energy=new_avg_energy,
+            cat_exploit_eff=[(i in exploit_eff_idx) for i in final_idx],
+            cat_exploit_real=[(i in exploit_real_idx) for i in final_idx],
+            cat_time=[(i in time_idx) for i in final_idx],
+            cat_explore=[(i in explore_idx) for i in final_idx],
         )
 
     total_time = time.time() - total_start

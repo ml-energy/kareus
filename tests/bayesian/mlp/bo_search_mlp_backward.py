@@ -49,6 +49,12 @@ except ImportError as exc:
 from botorch.utils.multi_objective.pareto import is_non_dominated
 from botorch.utils.multi_objective.hypervolume import Hypervolume
 
+try:
+    import matplotlib.pyplot as plt  # noqa: F401
+    _MATPLOTLIB_AVAILABLE = True
+except Exception:
+    _MATPLOTLIB_AVAILABLE = False
+
 
 # -----------------------------
 # Search space and encodings
@@ -63,7 +69,7 @@ OVERLAP_WINDOWS: List[Tuple[int, int]] = [
     (-1, -1), (0, 6), (2, 6), (3, 6), # (5, 6),
 ]
 
-SM_VALUES: List[int] = list(range(1, 21))
+SM_VALUES: List[int] = FuserTestConfig.get_comm_sm_values()
 BLOCK_VALUES: List[int] = [512, 1024]
 
 FREQ_VALUES: List[int] = []
@@ -130,9 +136,11 @@ def _dist_eval_worker(
     overlap_window: Tuple[int, int],
     sm_num: int,
     block_size: int,
-    eval_log_path: str,
     master_port: int,
     shared_results: dict,
+    eval_log_path: str,
+    selection_flags: Dict[str, bool] | None = None,
+    predicted_values: Dict[str, float] | None = None,
 ) -> None:
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -230,6 +238,19 @@ def _dist_eval_worker(
             "time_s": avg_time_s,
             "energy_j": avg_energy_j,
         }
+        flags = selection_flags or {}
+        record.update({
+            "selected_exploit_eff": bool(flags.get("selected_exploit_eff", False)),
+            "selected_exploit_real": bool(flags.get("selected_exploit_real", False)),
+            "selected_time": bool(flags.get("selected_time", False)),
+            "selected_explore": bool(flags.get("selected_explore", False)),
+        })
+        preds = predicted_values or {}
+        record.update({
+            "pred_time_s": preds.get("time_s"),
+            "pred_energy_eff_j": preds.get("energy_eff_j"),
+            "pred_energy_real_j": preds.get("energy_real_j"),
+        })
 
         shared_results["energy_j"] = avg_energy_j
         shared_results["time_s"] = avg_time_s
@@ -248,6 +269,8 @@ def _dist_eval_worker(
 def measure_on_hardware(
     x_vec: np.ndarray,
     args: argparse.Namespace,
+    selection_flags: Dict[str, bool] | None = None,
+    predicted_values: Dict[str, float] | None = None,
 ) -> Tuple[float, float]:
     cfg = decode_vec(x_vec)
     overlap_window = cfg["overlap"]
@@ -280,9 +303,11 @@ def measure_on_hardware(
             overlap_window,
             sm_num,
             block_size,
-            eval_log_path,
             master_port,
             shared_results,
+            eval_log_path,
+            selection_flags,
+            predicted_values,
         ),
         nprocs=args.world_size,
         join=True,
@@ -353,6 +378,21 @@ def train_xgb_models(X_encoded: np.ndarray, y_energy: np.ndarray, y_time: np.nda
     energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
     time_model = xgb.train(params, dtrain_time, num_boost_round=100)
     return energy_model, time_model
+
+
+def train_xgb_energy_only(X_encoded: np.ndarray, y_energy: np.ndarray):
+    dtrain_energy = xgb.DMatrix(X_encoded, label=y_energy)
+    params = {
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "max_depth": 6,
+        "eta": 0.3,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_weight": 1,
+    }
+    energy_model = xgb.train(params, dtrain_energy, num_boost_round=100)
+    return energy_model
 
 
 def train_xgb_ensemble(
@@ -496,6 +536,91 @@ def is_config_in_dataset(config: np.ndarray, dataset: np.ndarray) -> bool:
     return any(np.array_equal(config, x) for x in dataset)
 
 
+# -----------------------------
+# Visualization helpers (measured, post-eval)
+# -----------------------------
+
+def _save_iteration_plots(
+    ib: int,
+    args: argparse.Namespace,
+    prev_energy_eff: np.ndarray,
+    prev_energy_real: np.ndarray,
+    prev_time: np.ndarray,
+    new_time: List[float],
+    new_eff_energy: List[float],
+    new_real_energy: List[float],
+    cat_exploit: List[bool],
+    cat_time: List[bool],
+    cat_explore: List[bool],
+) -> None:
+    if not _MATPLOTLIB_AVAILABLE:
+        print("Matplotlib not available; skipping iteration plots.")
+        return
+
+    base_logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/backward/figures"
+    os.makedirs(base_logs_dir, exist_ok=True)
+
+    Y_eff_prev = np.column_stack((prev_energy_eff, prev_time)) if len(prev_time) > 0 else np.empty((0, 2))
+    pareto_mask_eff_prev = is_non_dominated(-torch.tensor(Y_eff_prev, dtype=torch.double)).cpu().numpy().astype(bool) if Y_eff_prev.shape[0] > 0 else np.array([], dtype=bool)
+    Y_real_prev = np.column_stack((prev_energy_real, prev_time)) if len(prev_time) > 0 else np.empty((0, 2))
+    pareto_mask_real_prev = is_non_dominated(-torch.tensor(Y_real_prev, dtype=torch.double)).cpu().numpy().astype(bool) if Y_real_prev.shape[0] > 0 else np.array([], dtype=bool)
+
+    new_time_arr = np.array(new_time, dtype=float)
+    new_eff_arr = np.array(new_eff_energy, dtype=float)
+    new_real_arr = np.array(new_real_energy, dtype=float)
+    cat_exploit_arr = np.array(cat_exploit, dtype=bool)
+    cat_time_arr = np.array(cat_time, dtype=bool)
+    cat_explore_arr = np.array(cat_explore, dtype=bool)
+
+    # Effective (time on x, energy on y)
+    try:
+        plt.figure(figsize=(7, 5))
+        if Y_eff_prev.shape[0] > 0:
+            plt.scatter(Y_eff_prev[:, 1], Y_eff_prev[:, 0], c="#888", s=20, label="Measured prev")
+            if np.any(pareto_mask_eff_prev):
+                front = Y_eff_prev[pareto_mask_eff_prev]
+                front_sorted = front[np.argsort(front[:, 1])]
+                plt.plot(front_sorted[:, 1], front_sorted[:, 0], "-", c="#1f77b4", label="Pareto prev (eff)")
+        if new_time_arr.size > 0:
+            if np.any(cat_exploit_arr):
+                plt.scatter(new_time_arr[cat_exploit_arr], new_eff_arr[cat_exploit_arr], marker="x", c="#d62728", s=50, label="Exploit")
+            if np.any(cat_time_arr):
+                plt.scatter(new_time_arr[cat_time_arr], new_eff_arr[cat_time_arr], marker="o", facecolors="none", edgecolors="#2ca02c", s=60, label="Time picks")
+            if np.any(cat_explore_arr):
+                plt.scatter(new_time_arr[cat_explore_arr], new_eff_arr[cat_explore_arr], marker="s", c="#9467bd", s=40, label="Explore")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Effective energy (J)")
+        plt.title(f"Iter {ib+1}: Time vs Effective energy (measured)")
+        plt.legend(loc="best")
+        eff_path = os.path.join(base_logs_dir, f"iter_{ib+1:02d}_effective.png")
+        plt.tight_layout(); plt.savefig(eff_path); plt.close()
+    except Exception as _exc:
+        print(f"Warning: failed to save MLP backward effective plot for iter {ib+1}: {_exc}")
+
+    # Real
+    try:
+        plt.figure(figsize=(7, 5))
+        if Y_real_prev.shape[0] > 0:
+            plt.scatter(Y_real_prev[:, 1], Y_real_prev[:, 0], c="#888", s=20, label="Measured prev")
+            if np.any(pareto_mask_real_prev):
+                front = Y_real_prev[pareto_mask_real_prev]
+                front_sorted = front[np.argsort(front[:, 1])]
+                plt.plot(front_sorted[:, 1], front_sorted[:, 0], "-", c="#ff7f0e", label="Pareto prev (real)")
+        if new_time_arr.size > 0:
+            if np.any(cat_exploit_arr):
+                plt.scatter(new_time_arr[cat_exploit_arr], new_real_arr[cat_exploit_arr], marker="+", c="#1f77b4", s=60, label="Exploit")
+            if np.any(cat_time_arr):
+                plt.scatter(new_time_arr[cat_time_arr], new_real_arr[cat_time_arr], marker="o", facecolors="none", edgecolors="#2ca02c", s=60, label="Time picks")
+            if np.any(cat_explore_arr):
+                plt.scatter(new_time_arr[cat_explore_arr], new_real_arr[cat_explore_arr], marker="s", c="#9467bd", s=40, label="Explore")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Real energy (J)")
+        plt.title(f"Iter {ib+1}: Time vs Real energy (measured)")
+        plt.legend(loc="best")
+        real_path = os.path.join(base_logs_dir, f"iter_{ib+1:02d}_real.png")
+        plt.tight_layout(); plt.savefig(real_path); plt.close()
+    except Exception as _exc:
+        print(f"Warning: failed to save MLP backward real plot for iter {ib+1}: {_exc}")
 # -----------------------------
 # Cached initial load helper
 # -----------------------------
@@ -661,7 +786,7 @@ def main() -> None:
     for ib in range(int(args.batches)):
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
         energy_model_eff, time_model = train_xgb_models(X_train_encoded, y_energy_eff, y_time)
-        energy_model_real, _ = train_xgb_models(X_train_encoded, y_energy_real, y_time)
+        energy_model_real = train_xgb_energy_only(X_train_encoded, y_energy_real)
         models_eff = (energy_model_eff, time_model)
         models_real = (energy_model_real, time_model)
         ensemble_models = train_xgb_ensemble(
@@ -837,7 +962,23 @@ def main() -> None:
         for i, vec in enumerate(selected):
             cfg = decode_vec(vec)
             print(f"  [{i+1}/{len(selected)}] freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}")
-            e_j, t_s = measure_on_hardware(vec, args)
+            sel_idx = final_idx[i]
+            flags = {
+                "selected_exploit_eff": bool(sel_idx in exploit_idx),
+                "selected_exploit_real": False,
+                "selected_time": bool(sel_idx in time_idx),
+                "selected_explore": bool(sel_idx in explore_idx),
+            }
+            cand_enc = one_hot_encode(vec).reshape(1, -1)
+            # Use effective model for time; real model energy gives alternative energy prediction
+            pred_eff_e, pred_time = predict_performance(models_eff, cand_enc)
+            pred_real_e, _ = predict_performance(models_real, cand_enc)
+            preds = {
+                "time_s": float(pred_time[0]),
+                "energy_eff_j": float(pred_eff_e[0]),
+                "energy_real_j": float(pred_real_e[0]),
+            }
+            e_j, t_s = measure_on_hardware(vec, args, selection_flags=flags, predicted_values=preds)
             eff_e_j = float(e_j) - float(p2p_power_w) * float(t_s)
             new_time.append(float(t_s))
             new_eff_energy.append(float(eff_e_j))
@@ -861,6 +1002,21 @@ def main() -> None:
         print(f"  Current Pareto points count: {pareto_count}")
         print(
             f"  Best observed -> Energy: {np.min(y_energy_eff):.4f} J | Time: {np.min(y_time):.6f} s"
+        )
+
+        # Save iteration visualization AFTER evaluation with measured values
+        _save_iteration_plots(
+            ib=ib,
+            args=args,
+            prev_energy_eff=y_energy_eff[:-len(new_eff_energy)] if len(new_eff_energy) > 0 else y_energy_eff,
+            prev_energy_real=y_energy_real[:-len(new_avg_energy)] if len(new_avg_energy) > 0 else y_energy_real,
+            prev_time=y_time[:-len(new_time)] if len(new_time) > 0 else y_time,
+            new_time=new_time,
+            new_eff_energy=new_eff_energy,
+            new_real_energy=new_avg_energy,
+            cat_exploit=[(i in exploit_idx) for i in final_idx],
+            cat_time=[(i in time_idx) for i in final_idx],
+            cat_explore=[(i in explore_idx) for i in final_idx],
         )
 
     total_time = time.time() - total_start
