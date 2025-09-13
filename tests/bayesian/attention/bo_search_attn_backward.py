@@ -443,8 +443,8 @@ def try_load_initial_from_cache(
       (use_cached_initial, X_train, X_train_encoded, init_time, init_eff_energy, init_avg_energy, all_records)
     If not cached, use_cached_initial is False and X_train fields are None.
     """
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/backward"
-    eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/"
+    eval_log_path = os.path.join(logs_dir, "eval_results_bwd.jsonl")
 
     init_time: List[float] = []
     init_eff_energy: List[float] = []
@@ -834,7 +834,7 @@ def main() -> None:
                         help="Bootstrap fraction for training each ensemble member")
     parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum",
                         help="How to combine energy/time predictive std into a single uncertainty score")
-    parser.add_argument("--time_fraction", type=float, default=0.2,
+    parser.add_argument("--time_fraction", type=float, default=0.25,
                         help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
 
     args = parser.parse_args()
