@@ -82,6 +82,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 pip install botorch
 
+pip install mpi4py
+
 # huggingface-cli login 
 # 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
 

@@ -30,13 +30,16 @@ class FuserTestConfig:
 
     DEFAULT_STAGES = 2
     DEFAULT_NUM_MICROBATCHES = 8
-    # num_layers_in_first_pipeline_stage = 4
-    # num_layers_in_last_pipeline_stage = 2
+    num_layers_in_first_pipeline_stage = 6
+    num_layers_in_last_pipeline_stage = 6
     
     # Default Bayesian Optimization parameters
-    BO_DEFAULT_N_INIT = 96
+    BO_DEFAULT_N_INIT = 48
     BO_DEFAULT_BATCHES = 8
-    BO_DEFAULT_ACQ_BATCH = 32
+    BO_DEFAULT_ACQ_BATCH = 16
+
+    # Default communication SM count candidates for fuser comm kernels
+    COMM_SM_VALUES = list(range(7, 36, 7))
 
     # GPU p2p power (W) configuration
     P2P_POWER_W_BY_GPU = {
@@ -48,6 +51,11 @@ class FuserTestConfig:
     def get_p2p_power(gpu_type: str) -> float:
         """Return default p2p power (W) for given GPU type, with a conservative fallback."""
         return float(FuserTestConfig.P2P_POWER_W_BY_GPU.get(gpu_type, 70.0))
+    
+    @staticmethod
+    def get_comm_sm_values() -> list[int]:
+        """Return candidate SM counts for communication kernels."""
+        return list(FuserTestConfig.COMM_SM_VALUES)
     
     @staticmethod
     def create_transformer_config(
@@ -103,6 +111,8 @@ class FuserTestConfig:
             vocab_size = FuserTestConfig.VOCAB_SIZE
         if drop_rate is None:
             drop_rate = FuserTestConfig.DROP_RATE
+        if num_layers is None:
+            num_layers = FuserTestConfig.NUM_LAYERS
             
         config_params = {
             'num_layers': num_layers,
