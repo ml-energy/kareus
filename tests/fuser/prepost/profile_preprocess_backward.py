@@ -21,7 +21,7 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
     LanguageModelEmbedding,
 )
 from zeus.monitor import ZeusMonitor
-from cfuser.core.utils import nvtx_range
+# from cfuser.core.utils import nvtx_range
 
 
 def init_distributed(rank: int, world_size: int, backend: str = 'nccl'):
@@ -99,18 +99,18 @@ class PreprocessBackwardProfiler:
         self.tp_group = get_tensor_model_parallel_group()
 
         # Build graph once and cache outputs + grad tensor
-        with nvtx_range('embedding_forward_for_backward'):
-            self.cached_embeddings = self.embedding(self.input_ids, self.position_ids)
+        # with nvtx_range('embedding_forward_for_backward'):
+        self.cached_embeddings = self.embedding(self.input_ids, self.position_ids)
         self.cached_embeddings_grad = torch.randn_like(self.cached_embeddings, dtype=self.cached_embeddings.dtype)
 
     def _backward_step(self):
         # Backward only; reuse the same graph
-        with nvtx_range('embedding_backward'):
-            torch.autograd.backward(
-                tensors=[self.cached_embeddings],
-                grad_tensors=[self.cached_embeddings_grad],
-                retain_graph=True,
-            )
+        # with nvtx_range('embedding_backward'):
+        torch.autograd.backward(
+            tensors=[self.cached_embeddings],
+            grad_tensors=[self.cached_embeddings_grad],
+            retain_graph=True,
+        )
 
     def run(self):
         # Logs dir

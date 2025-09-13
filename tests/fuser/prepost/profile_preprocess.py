@@ -22,7 +22,7 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
     LanguageModelEmbedding,
 )
 from zeus.monitor import ZeusMonitor
-from cfuser.core.utils import nvtx_range
+# from cfuser.core.utils import nvtx_range
 
 
 def init_distributed(rank: int, world_size: int, backend: str = 'nccl'):
@@ -105,8 +105,8 @@ class PreprocessProfiler:
         self.tp_group = get_tensor_model_parallel_group()
 
     def _forward_step(self):
-        with nvtx_range('embedding_forward'):
-            embeddings = self.embedding(self.input_ids, self.position_ids)
+        # with nvtx_range('embedding_forward'):
+        embeddings = self.embedding(self.input_ids, self.position_ids)
         return embeddings
 
     def run(self):

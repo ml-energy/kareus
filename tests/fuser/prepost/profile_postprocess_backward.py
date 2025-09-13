@@ -19,7 +19,7 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from zeus.monitor import ZeusMonitor
-from cfuser.core.utils import nvtx_range
+# from cfuser.core.utils import nvtx_range
 
 
 def init_distributed(rank: int, world_size: int, backend: str = 'nccl'):
@@ -95,17 +95,17 @@ class PostprocessBackwardProfiler:
         self.tp_group = get_tensor_model_parallel_group()
 
         # Build graph once and cache outputs + grad tensor
-        with nvtx_range('postprocess_forward_for_backward'):
-            self.cached_logits, _ = self.output_layer(self.hidden_states, runtime_gather_output=None)
+        # with nvtx_range('postprocess_forward_for_backward'):
+        self.cached_logits, _ = self.output_layer(self.hidden_states, runtime_gather_output=None)
         self.cached_logits_grad = torch.randn_like(self.cached_logits, dtype=self.cached_logits.dtype)
 
     def _backward_step(self):
-        with nvtx_range('postprocess_backward'):
-            torch.autograd.backward(
-                tensors=[self.cached_logits],
-                grad_tensors=[self.cached_logits_grad],
-                retain_graph=True,
-            )
+        # with nvtx_range('postprocess_backward'):
+        torch.autograd.backward(
+            tensors=[self.cached_logits],
+            grad_tensors=[self.cached_logits_grad],
+            retain_graph=True,
+        )
 
     def run(self):
         # Logs dir
