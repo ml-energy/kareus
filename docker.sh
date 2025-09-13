@@ -1,5 +1,26 @@
 # docker pull ruofanwu7/kareus-dev
+# docker pull ruofanwu7/kareus-dev
 
+# # ssh-keygen -t ed25519 -C "ruofanw@umich.edu"
+# # sudo usermod -aG docker ubuntu
+# # workspace
+# # git clone git@github.com:SymbioticLab/Kareus.git
+
+# docker run -it \
+#     --gpus=all \
+#     --ipc=host \
+#     --network=host \
+#     --name=ruofan-kareus \
+#     --privileged \
+#     -v /dev/shm:/dev/shm \
+#     -v /dev/infiniband:/dev/infiniband \
+#     -v /sys/class/infiniband:/sys/class/infiniband \
+#     -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+#     -v $HOME/.ssh:/root/.ssh \
+#     -v $HOME/workspace:/workspaces \
+#     ruofanwu7/kareus-dev
+
+git config --global --add safe.directory /workspaces/Kareus
 # # ssh-keygen -t ed25519 -C "ruofanw@umich.edu"
 # # sudo usermod -aG docker ubuntu
 # # workspace
@@ -28,18 +49,26 @@ git config --global --add safe.directory /workspaces/Kareus
 # pip uninstall nemo_toolkit
 rm -r /usr/local/lib/python3.12/dist-packages/megatron*
 rm -r /usr/local/lib/python3.12/dist-packages/nemo*
+rm -r /usr/local/lib/python3.12/dist-packages/megatron*
+rm -r /usr/local/lib/python3.12/dist-packages/nemo*
 
 # Megatron
+cd 3rdparty/Megatron-LM
+pip install -e .
 cd 3rdparty/Megatron-LM
 pip install -e .
 
 # Nemo
 cd ../NeMo
 pip install -e . 
+cd ../NeMo
+pip install -e . 
 
 # /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/layernorm_linear.py
 
 # mscclpp
+cd ../mscclpp
+python3 -m pip install .
 cd ../mscclpp
 python3 -m pip install .
 
