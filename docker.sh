@@ -48,6 +48,11 @@ cd ../zeus
 pip install -e . 
 pip install '.[pfo-server]'
 
+# cargo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+pip install botorch
+
 # huggingface-cli login 
 # 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
 

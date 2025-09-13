@@ -45,9 +45,9 @@ logger = logging.getLogger()
 @dataclass
 class Args:
     # Path to instruction profile results
-    inst_profile: str = "nemo_experiments/megatron_llama_3_2_3b/profiling/profile.csv"
+    inst_profile: str = "nemo_experiments/megatron_llama_3_2_1b/profiling/profile.csv"
     # Directory to output results
-    output_dir: str = "nemo_experiments/megatron_llama_3_2_3b/perseus_results"
+    output_dir: str = "nemo_experiments/megatron_llama_3_2_1b/perseus_results"
     # Number of microbatchs
     num_mbs: int = FuserTestConfig.DEFAULT_NUM_MICROBATCHES
     # Number of stages

@@ -1,6 +1,8 @@
 cd tests/fuser/
 bash test_fwd_latency.sh
 
+cargo run -- data/A100/profiles/llama3.2_profile.csv 
+
 cd tests/perseus
 # /workspaces/Kareus/tests/simple_test/data/my-gpt_text_document
 # droupout?

@@ -19,7 +19,7 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.models.common.language_module.language_module import LanguageModule
 from zeus.monitor import ZeusMonitor
-from cfuser.core.utils import nvtx_range
+# from cfuser.core.utils import nvtx_range
 
 
 def init_distributed(rank: int, world_size: int, backend: str = 'nccl'):
@@ -93,8 +93,8 @@ class LossProfiler:
         self.tp_group = get_tensor_model_parallel_group()
 
     def _forward_step(self):
-        with nvtx_range('loss_forward'):
-            loss = self.loss_mod.compute_language_model_loss(self.labels, self.logits)
+        # with nvtx_range('loss_forward'):
+        loss = self.loss_mod.compute_language_model_loss(self.labels, self.logits)
         return loss
 
     def run(self):

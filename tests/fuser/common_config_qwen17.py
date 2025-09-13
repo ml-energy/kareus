@@ -30,8 +30,8 @@ class FuserTestConfig:
 
     DEFAULT_STAGES = 4
     DEFAULT_NUM_MICROBATCHES = 16
-    # num_layers_in_first_pipeline_stage = 4
-    # num_layers_in_last_pipeline_stage = 2
+    num_layers_in_first_pipeline_stage = 8
+    num_layers_in_last_pipeline_stage = 4
     
     # Default Bayesian Optimization parameters
     BO_DEFAULT_N_INIT = 96
@@ -41,7 +41,7 @@ class FuserTestConfig:
     # GPU p2p power (W) configuration
     P2P_POWER_W_BY_GPU = {
         'A40': 90.0,
-        'A100': 86.35,
+        'A100': 85.0,
     }
 
     @staticmethod

@@ -21,7 +21,7 @@ from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
-from cfuser.core.utils import nvtx_range
+# from cfuser.core.utils import nvtx_range
 import pynvml
 import multiprocessing
 
@@ -359,12 +359,12 @@ class AttentionFuserTest:
                     #     continue
                     sm_configs = (sm_num, block_size)
                     print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
-                    with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
-                        self.test_config(
-                            monitor, 
-                            test_tensors, attention_fuser, 
-                            overlap_window, sm_configs
-                        )
+                    # with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
+                    self.test_config(
+                        monitor, 
+                        test_tensors, attention_fuser, 
+                        overlap_window, sm_configs
+                    )
                     # return
                     time.sleep(30)
 

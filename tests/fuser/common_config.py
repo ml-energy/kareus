@@ -44,7 +44,7 @@ class FuserTestConfig:
     # GPU p2p power (W) configuration
     P2P_POWER_W_BY_GPU = {
         'A40': 90.0,
-        'A100': 86.35,
+        'A100': 85.0,
     }
 
     @staticmethod

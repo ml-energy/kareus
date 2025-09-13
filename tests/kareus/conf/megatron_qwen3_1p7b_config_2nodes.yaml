@@ -53,8 +53,8 @@ model:
   pipeline_model_parallel_size: 4 # inter-layer model parallelism
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
  
-  # num_layers_in_first_pipeline_stage: 7
-  # num_layers_in_last_pipeline_stage: 7
+  num_layers_in_first_pipeline_stage: 8
+  num_layers_in_last_pipeline_stage: 4
 
   # model architecture - Qwen3 ~1.7B
   encoder_seq_length: 4096 # Keep aligned with dataset and LLaMA/Qwen config
@@ -91,11 +91,11 @@ model:
   batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
   num_query_groups: 8 # Grouped-query attention with 8 KV groups
 
-  enable_megatron_timers: true
+  enable_megatron_timers: false
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
-  enable_zeus_monitor: false
+  enable_zeus_monitor: true
   enable_power_monitor: false
   enable_perseus_optimizer: false
   enable_kareus_scheduler: false

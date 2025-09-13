@@ -91,13 +91,13 @@ model:
   batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
   num_query_groups: 8 # LLaMA 3.2 1B uses grouped query attention with 8 key-value heads
 
-  enable_megatron_timers: true
+  enable_megatron_timers: false
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
-  enable_zeus_monitor: false
+  enable_zeus_monitor: true
   enable_power_monitor: false
-  enable_perseus_optimizer: false
+  enable_perseus_optimizer: true
   enable_kareus_scheduler: false
   kareus_scheduler_kwargs:
     solution_path: /workspaces/Kareus/tests/perseus/nemo_experiments/megatron_llama_3_2_1b/scheds_pipeline_01946.py

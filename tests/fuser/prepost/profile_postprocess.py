@@ -19,7 +19,7 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from zeus.monitor import ZeusMonitor
-from cfuser.core.utils import nvtx_range
+# from cfuser.core.utils import nvtx_range
 
 
 def init_distributed(rank: int, world_size: int, backend: str = 'nccl'):
@@ -95,8 +95,8 @@ class PostprocessProfiler:
         self.tp_group = get_tensor_model_parallel_group()
 
     def _forward_step(self):
-        with nvtx_range('postprocess_output_proj'):
-            logits, _ = self.output_layer(self.hidden_states, runtime_gather_output=None)
+        # with nvtx_range('postprocess_output_proj'):
+        logits, _ = self.output_layer(self.hidden_states, runtime_gather_output=None)
         return logits
 
     def run(self):
