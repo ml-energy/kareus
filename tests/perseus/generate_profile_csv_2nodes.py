@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from inspect import ArgInfo
 import warnings
 from glob import glob
 from typing import Literal
@@ -228,7 +229,7 @@ def main(
             for name in inst_name_map.values():
                 stage_key = (stage_idx, name)
                 stage_time = stage_time_max.get(stage_key, 0.0)
-                stage_energy = stage_energy_sums.get(stage_key, 0.0)
+                stage_energy = stage_energy_sums.get(stage_key, 0.0) / tensor_parallel_size
                 profile_csv.write(f"{stage_idx},{name},{frequency},{stage_time},{stage_energy}\n")
     
     profile_csv.close()
