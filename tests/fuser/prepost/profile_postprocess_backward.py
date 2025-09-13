@@ -3,6 +3,7 @@ import sys
 import time
 import random
 import traceback
+import gc
 
 import torch
 import torch.distributed as dist
@@ -89,7 +90,6 @@ class PostprocessBackwardProfiler:
             self.hidden_size,
             dtype=self.dtype,
             device=self.device,
-            requires_grad=True,
         )
 
         self.tp_group = get_tensor_model_parallel_group()
@@ -124,6 +124,7 @@ class PostprocessBackwardProfiler:
                 f.write(title + "\n")
 
         # Warmup + iteration estimate
+        self.output_layer.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
         dist.barrier(group=self.tp_group)
         for i in range(10):
@@ -169,6 +170,14 @@ class PostprocessBackwardProfiler:
                     f"{t_result},{e_total}," + ",".join(map(str, ranks_energy)) + "\n"
                 )
 
+        # Cleanup to release GPU memory for repeated runs in the same process
+        self.output_layer.zero_grad(set_to_none=True)
+        self.cached_logits = self.cached_logits.detach()
+        self.cached_logits_grad = None
+        self.hidden_states = None
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
 
 def _worker(rank: int, world_size: int, args, master_port: int):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -181,6 +190,17 @@ def _worker(rank: int, world_size: int, args, master_port: int):
         print(f"Error on rank {rank}: {e}")
         traceback.print_exc()
     finally:
+        try:
+            # Release large objects and cached memory before tearing down process group
+            try:
+                del profiler
+            except Exception:
+                pass
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception:
+            pass
         try:
             if dist.is_initialized():
                 destroy_model_parallel()

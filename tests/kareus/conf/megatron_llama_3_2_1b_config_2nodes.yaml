@@ -97,10 +97,10 @@ model:
     
   enable_zeus_monitor: true
   enable_power_monitor: false
-  enable_perseus_optimizer: false
-  enable_kareus_scheduler: false
+  enable_perseus_optimizer: true
+  enable_kareus_scheduler: true
   kareus_scheduler_kwargs:
-    solution_path: /workspaces/Kareus/tests/perseus/nemo_experiments/megatron_llama_3_2_1b/scheds_pipeline_01946.py
+    solution_path: nemo_experiments/megatron_llama_3_2_1b/scheds_pipeline_02659.py
 
   tokenizer:
     library: 'huggingface'

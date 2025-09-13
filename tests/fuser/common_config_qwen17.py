@@ -38,6 +38,9 @@ class FuserTestConfig:
     BO_DEFAULT_BATCHES = 8
     BO_DEFAULT_ACQ_BATCH = 32
 
+    # Default communication SM count candidates for fuser comm kernels
+    COMM_SM_VALUES = list(range(3, 31, 3))
+
     # GPU p2p power (W) configuration
     P2P_POWER_W_BY_GPU = {
         'A40': 90.0,
@@ -49,6 +52,11 @@ class FuserTestConfig:
         """Return default p2p power (W) for given GPU type, with a conservative fallback."""
         return float(FuserTestConfig.P2P_POWER_W_BY_GPU.get(gpu_type, 70.0))
     
+    @staticmethod
+    def get_comm_sm_values() -> list[int]:
+        """Return candidate SM counts for communication kernels."""
+        return list(FuserTestConfig.COMM_SM_VALUES)
+
     @staticmethod
     def create_transformer_config(
         world_size: int,

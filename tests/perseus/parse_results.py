@@ -120,7 +120,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Parse baseline time and energy results from zeus monitor files")
     parser.add_argument(
         "--baseline_path", 
-        default="/workspaces/Kareus/tests/perseus/nemo_experiments/megatron_qwen3_1p7b/baseline",
+        default="nemo_experiments/megatron_llama_3_2_1b/baseline",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(
@@ -130,7 +130,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--kareus_path", 
-        default="/workspaces/Kareus/tests/kareus/nemo_experiments/megatron_qwen3_1p7b/2025-09-12_19-20-18",
+        default="/workspaces/Kareus/tests/kareus/nemo_experiments/megatron_llama_3_2_1b/optimized",
         help="Path to directory containing zeus_monitor_localrank-*.txt files"
     )
     parser.add_argument(
@@ -162,13 +162,13 @@ def main() -> None:
     )
     save_csv(baseline_results, "baseline_results.csv")
 
-    # perseus_results = parse_results(
-    #     args.perseus_path, 
-    #     args.num_ranks,
-    #     args.warmup_iters,
-    #     args.profile_iters
-    # )
-    # save_csv(perseus_results, "perseus_results.csv")
+    perseus_results = parse_results(
+        args.perseus_path, 
+        args.num_ranks,
+        args.warmup_iters,
+        args.profile_iters
+    )
+    save_csv(perseus_results, "perseus_results.csv")
     
     kareus_results = parse_results(
         args.kareus_path, 
@@ -185,12 +185,12 @@ def main() -> None:
     baseline_sum_energy = sum([x[1] for x in baseline_results.values()])
     print(f"  Total: {baseline_max_time:.6f}s, {baseline_sum_energy:.6f}J")
 
-    # print("Perseus results:")
-    # for rank, (avg_time, avg_energy) in perseus_results.items():
-    #     print(f"  Rank {rank}: {avg_time:.6f}s, {avg_energy:.6f}J")
-    # perseus_max_time = max([x[0] for x in perseus_results.values()]) if perseus_results else 0.0
-    # perseus_sum_energy = sum([x[1] for x in perseus_results.values()])
-    # print(f"  Total: {perseus_max_time:.6f}s, {perseus_sum_energy:.6f}J")
+    print("Perseus results:")
+    for rank, (avg_time, avg_energy) in perseus_results.items():
+        print(f"  Rank {rank}: {avg_time:.6f}s, {avg_energy:.6f}J")
+    perseus_max_time = max([x[0] for x in perseus_results.values()]) if perseus_results else 0.0
+    perseus_sum_energy = sum([x[1] for x in perseus_results.values()])
+    print(f"  Total: {perseus_max_time:.6f}s, {perseus_sum_energy:.6f}J")
     
     print("Kareus results:")
     for rank, (avg_time, avg_energy) in kareus_results.items():
