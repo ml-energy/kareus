@@ -1,11 +1,11 @@
 #!/bin/bash
 
-GPU1=0
-GPU2=1
-GPU3=2
-GPU4=3
+GPU1=4
+GPU2=5
+GPU3=6
+GPU4=7
 
-for frequency in $(seq 1410 -30 1170); do
+for frequency in $(seq 1140 -30 900); do
     echo "Testing frequency: ${frequency}"
     
     # Lock GPU clocks to current frequency
