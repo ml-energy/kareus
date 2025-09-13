@@ -489,6 +489,35 @@ def try_load_initial_from_cache(
             init_avg_energy.append(e_j)
             init_eff_energy.append(eff_e_j)
             all_records.append((cfg['freq'], cfg['overlap'][0], cfg['overlap'][1], cfg['sm'], cfg['block'], t_s, e_j, eff_e_j))
+        # Top-up missing initial points by generating and evaluating additional configs
+        missing = int(n_init - k)
+        if missing > 0:
+            print(f"Cached initial points {k} < n_init {n_init}; generating and evaluating {missing} additional configs...")
+            all_configs = generate_all_configurations()
+            existing = np.array(X_train_list) if len(X_train_list) > 0 else np.empty((0, 4), dtype=np.int64)
+            remaining: List[np.ndarray] = []
+            for cfg_vec in all_configs:
+                if existing.shape[0] == 0 or not is_config_in_dataset(cfg_vec, existing):
+                    remaining.append(cfg_vec)
+            if len(remaining) == 0:
+                print("Warning: no remaining configurations available to top up initial set.")
+            else:
+                if missing > len(remaining):
+                    missing = len(remaining)
+                picked_indices = random.sample(range(len(remaining)), missing)
+                for j, idx in enumerate(picked_indices):
+                    vec = remaining[idx]
+                    cfg_dec = decode_vec(vec)
+                    print(
+                        f"  [topup {j+1}/{missing}] freq={cfg_dec['freq']} | sm={cfg_dec['sm']} | block={cfg_dec['block']} | overlap={cfg_dec['overlap']}"
+                    )
+                    e_j, t_s = measure_on_hardware(vec, args)
+                    eff_e_j = float(e_j) - float(p2p_power_w) * float(t_s)
+                    init_time.append(float(t_s))
+                    init_eff_energy.append(float(eff_e_j))
+                    init_avg_energy.append(float(e_j))
+                    all_records.append((cfg_dec['freq'], cfg_dec['overlap'][0], cfg_dec['overlap'][1], cfg_dec['sm'], cfg_dec['block'], float(t_s), float(e_j), float(eff_e_j)))
+                    X_train_list.append(vec)
         X_train = np.array(X_train_list)
         X_train_encoded = np.array([one_hot_encode(x) for x in X_train])
         return True, X_train, X_train_encoded, init_time, init_eff_energy, init_avg_energy, all_records
