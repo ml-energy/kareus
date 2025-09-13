@@ -540,6 +540,11 @@ class MegatronBaseModel(NLPModel):
         # Initialize Perseus optimizer here after distributed setup is complete
         if self.cfg.get('enable_perseus_optimizer', False) and HAVE_PERSEUS_OPTIMIZER and self.perseus_optimizer is None:
             print(f"rank: {self.trainer.global_rank}, dp_rank: {parallel_state.get_data_parallel_rank()}, pp_rank: {parallel_state.get_pipeline_model_parallel_rank()}, tp_rank: {parallel_state.get_tensor_model_parallel_rank()}, device_id: {self.trainer.local_rank}, dp_degree: {parallel_state.get_data_parallel_world_size()}, pp_degree: {parallel_state.get_pipeline_model_parallel_world_size()}, tp_degree: {parallel_state.get_tensor_model_parallel_world_size()}, world_size: {self.trainer.world_size}")
+            # Determine Perseus server URL. If MASTER_ADDR is set, prefer it; otherwise use config/default.
+            master_addr = os.environ.get('MASTER_ADDR')
+            perseus_server_url = (
+                f"http://{master_addr}:7787" if master_addr else self.cfg.get('perseus_server_url', 'http://127.0.0.1:7787')
+            )
             self.perseus_optimizer = PipelineFrequencyOptimizer(
                 rank=self.trainer.global_rank,
                 dp_rank=parallel_state.get_data_parallel_rank(),
@@ -550,7 +555,7 @@ class MegatronBaseModel(NLPModel):
                 pp_degree=parallel_state.get_pipeline_model_parallel_world_size(),
                 tp_degree=parallel_state.get_tensor_model_parallel_world_size(),
                 world_size=self.trainer.world_size,
-                server_url=self.cfg.get('perseus_server_url', 'http://127.0.0.1:7787'),
+                server_url=perseus_server_url,
                 job_metadata=self.cfg.get('perseus_job_metadata', None),
             )
             self.model.config.perseus_optimizer = self.perseus_optimizer
