@@ -611,7 +611,7 @@ def try_load_initial_from_cache(
     p2p_power_w: float,
     n_init: int,
 ):
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
+    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/"
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
 
     init_time: List[float] = []
@@ -683,7 +683,7 @@ def main() -> None:
     parser.add_argument("--ensemble_size", type=int, default=5)
     parser.add_argument("--bootstrap_frac", type=float, default=0.8)
     parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum")
-    parser.add_argument("--time_fraction", type=float, default=0.2)
+    parser.add_argument("--time_fraction", type=float, default=0.25)
 
     args = parser.parse_args()
 
