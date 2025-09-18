@@ -316,8 +316,8 @@ def main(
 
     # forward candidates
     for frequency in freqs:
-        attention_fwd_result = pareto_optimal(attention_fwd_map.get(frequency, []), p2p_power)
-        mlp_fwd_result = pareto_optimal(mlp_fwd_map.get(frequency, []), p2p_power)
+        attention_fwd_result = attention_fwd_map.get(frequency, [])
+        mlp_fwd_result = mlp_fwd_map.get(frequency, [])
 
         for attn_config, attn_result in attention_fwd_result:
             for mlp_config, mlp_result in mlp_fwd_result:
@@ -341,10 +341,10 @@ def main(
     if use_activation_checkpointing:
         # backward candidates (activation checkpointing): combine recompute-forward configs with backward configs
         for frequency in freqs:
-            attention_fwd_result = pareto_optimal(attention_fwd_map.get(frequency, []), p2p_power)
-            mlp_fwd_result = pareto_optimal(mlp_fwd_map.get(frequency, []), p2p_power)
-            attention_bwd_result = pareto_optimal(attention_bwd_map.get(frequency, []), p2p_power)
-            mlp_bwd_result = pareto_optimal(mlp_bwd_map.get(frequency, []), p2p_power)
+            attention_fwd_result = attention_fwd_map.get(frequency, [])
+            mlp_fwd_result = mlp_fwd_map.get(frequency, [])
+            attention_bwd_result = attention_bwd_map.get(frequency, [])
+            mlp_bwd_result = mlp_bwd_map.get(frequency, [])
 
             for rec_attn_cfg, rec_attn_res in attention_fwd_result:
                 for rec_mlp_cfg, rec_mlp_res in mlp_fwd_result:
@@ -367,8 +367,8 @@ def main(
     else:
         # backward candidates (original logic): use only backward configs
         for frequency in freqs:
-            attention_bwd_result = pareto_optimal(attention_bwd_map.get(frequency, []), p2p_power)
-            mlp_bwd_result = pareto_optimal(mlp_bwd_map.get(frequency, []), p2p_power)
+            attention_bwd_result = attention_bwd_map.get(frequency, [])
+            mlp_bwd_result = mlp_bwd_map.get(frequency, [])
 
             for attn_config, attn_result in attention_bwd_result:
                 for mlp_config, mlp_result in mlp_bwd_result:
@@ -417,8 +417,8 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bayesian_profile_dir", default="/workspaces/Kareus/tests/bayesian", help="Directory containing BO results.")
-    parser.add_argument("--prepost_profile_dir", default="/workspaces/Kareus/tests/fuser/prepost", help="Directory containing profiling results.")
+    parser.add_argument("--bayesian_profile_dir", default="../bayesian", help="Directory containing BO results.")
+    parser.add_argument("--prepost_profile_dir", default="../fuser/prepost", help="Directory containing profiling results.")
     parser.add_argument("--tensor_parallel_size", default=FuserTestConfig.DEFAULT_WORLD_SIZE, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
     parser.add_argument("--pipeline_parallel_size", default=FuserTestConfig.DEFAULT_STAGES, type=int, help="Number of pipeline-parallel stages.")
     parser.add_argument("--batch_size", default=FuserTestConfig.DEFAULT_BATCH_SIZE, type=int, help="Batch size.")
@@ -426,7 +426,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_layers", default=FuserTestConfig.NUM_LAYERS, type=int, help="Number of layers.")
     parser.add_argument("--num_layers_in_first_pipeline_stage", default=FuserTestConfig.num_layers_in_first_pipeline_stage, type=int, help="Layers in the first pipeline stage when using uneven split.")
     parser.add_argument("--num_layers_in_last_pipeline_stage", default=FuserTestConfig.num_layers_in_last_pipeline_stage, type=int, help="Layers in the last pipeline stage when using uneven split.")
-    parser.add_argument("--gpu_type", default="A100", choices=["A40", "A100"], help="Name of the GPU type.")
+    parser.add_argument("--gpu_type", default=FuserTestConfig.GPU_TYPE, choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--p2p_power", default=None, type=float, help="GPU power while blocking on P2P (W). If omitted, uses FuserTestConfig.")
     parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="When set, generate backward candidates with recompute-forward configs and extended CSV header.")
     args = parser.parse_args()

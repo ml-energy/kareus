@@ -45,10 +45,10 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
     comm_scheduler = config.kareus_scheduler
     if comm_scheduler is None:
         return {
-            "comm_overlap_window": (2, 8),
-            "comm_sm_configs": (12, 1024),
+            "comm_overlap_window": (0, 8),
+            "comm_sm_configs": (None, None),
             "comm_overlap_window_backward": (0, 8),
-            "comm_sm_configs_backward": (12, 1024),
+            "comm_sm_configs_backward": (None, None),
         }
     else:
         item = getattr(comm_scheduler, "current_schedule", None)

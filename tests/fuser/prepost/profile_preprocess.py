@@ -25,6 +25,48 @@ from zeus.monitor import ZeusMonitor
 # from cfuser.core.utils import nvtx_range
 
 
+def _kill_all_subprocesses(timeout: float = 2.0):
+    """Best-effort termination of any child processes spawned by this process.
+
+    Attempts both multiprocessing-aware termination and psutil-based recursive kill.
+    Safe to call from workers and from the main process.
+    """
+    try:
+        # First, terminate Python multiprocessing children
+        for child in mp.active_children():
+            try:
+                child.terminate()
+            except Exception:
+                pass
+        for child in mp.active_children():
+            try:
+                child.join(timeout)
+            except Exception:
+                pass
+
+        # Then, if psutil is available, recursively terminate any remaining children
+        try:
+            import psutil  # type: ignore
+            parent = psutil.Process(os.getpid())
+            children = parent.children(recursive=True)
+            for proc in children:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            _, alive = psutil.wait_procs(children, timeout=timeout)
+            for proc in alive:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        except Exception:
+            # psutil not available or failed; ignore
+            pass
+    except Exception:
+        pass
+
+
 def init_distributed(rank: int, world_size: int, backend: str = 'nccl'):
     os.environ['RANK'] = str(rank)
     os.environ['WORLD_SIZE'] = str(world_size)
@@ -190,6 +232,8 @@ def _worker(rank: int, world_size: int, args, master_port: int):
                 dist.destroy_process_group()
         except Exception:
             pass
+        # Ensure any lingering subprocesses are terminated on this worker
+        _kill_all_subprocesses()
 
 
 if __name__ == '__main__':
@@ -217,5 +261,7 @@ if __name__ == '__main__':
         nprocs=args.world_size,
         join=True,
     )
+    # After all workers have joined, ensure no child processes are left behind
+    _kill_all_subprocesses()
 
 

@@ -53,7 +53,7 @@ class Args:
     # Number of stages
     num_stages: int = FuserTestConfig.DEFAULT_STAGES
     # GPU power consumption while blocking on P2P communication, in Watts
-    p2p_power: float = FuserTestConfig.get_p2p_power('A100')
+    p2p_power: float = FuserTestConfig.get_p2p_power(FuserTestConfig.GPU_TYPE)
     # Interval to draw the state of the pipeline
     plot_interval: int = 100
     # The unit of reduction for each iteration, in seconds

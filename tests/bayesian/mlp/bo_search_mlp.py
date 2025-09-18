@@ -610,6 +610,7 @@ def try_load_initial_from_cache(
     args: argparse.Namespace,
     p2p_power_w: float,
     n_init: int,
+    acq_batch: int,
 ):
     logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/"
     eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
@@ -620,7 +621,7 @@ def try_load_initial_from_cache(
     all_records: List[Tuple[int, int, int, int, int, float, float, float]] = []
 
     if not os.path.exists(eval_log_path):
-        return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records
+        return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records, 0
 
     try:
         with open(eval_log_path, "r") as f:
@@ -634,12 +635,12 @@ def try_load_initial_from_cache(
                 seen.add(key)
                 unique.append(r)
         if len(unique) == 0:
-            return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records
+            return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records, 0
 
-        k = min(n_init, len(unique))
-        print(f"Found cached measurements for {len(unique)} configs; using {k} for initial points from {eval_log_path}")
+        total_cached = len(unique)
+        print(f"Found cached measurements for {total_cached} unique configs at {eval_log_path}")
         X_train_list: List[np.ndarray] = []
-        for i in range(k):
+        for i in range(total_cached):
             r = unique[i]
             cfg = {
                 "freq": int(r["freq"]),
@@ -658,9 +659,9 @@ def try_load_initial_from_cache(
             all_records.append((cfg['freq'], cfg['overlap'][0], cfg['overlap'][1], cfg['sm'], cfg['block'], t_s, e_j, eff_e_j))
 
         # If cached unique points are fewer than requested, generate the rest and evaluate
-        missing = int(n_init - k)
+        missing = int(n_init - total_cached)
         if missing > 0:
-            print(f"Cached initial points {k} < n_init {n_init}; generating and evaluating {missing} additional configs...")
+            print(f"Cached initial points {total_cached} < n_init {n_init}; generating and evaluating {missing} additional configs...")
             all_configs = generate_all_configurations()
             # Filter out already included cached configs
             existing = np.array(X_train_list) if len(X_train_list) > 0 else np.empty((0, 4), dtype=np.int64)
@@ -674,7 +675,6 @@ def try_load_initial_from_cache(
                 if missing > len(remaining):
                     missing = len(remaining)
                 picked_indices = random.sample(range(len(remaining)), missing)
-                start_idx = k
                 for j, idx in enumerate(picked_indices):
                     vec = remaining[idx]
                     cfg_dec = decode_vec(vec)
@@ -690,10 +690,20 @@ def try_load_initial_from_cache(
                     X_train_list.append(vec)
         X_train = np.array(X_train_list)
         X_train_encoded = np.array([one_hot_encode(x) for x in X_train])
-        return True, X_train, X_train_encoded, init_time, init_eff_energy, init_avg_energy, all_records
+        # Determine how many full batches to skip given cached points beyond n_init
+        skipped_batches = 0
+        if total_cached > n_init:
+            extra = int(total_cached - n_init)
+            skipped_batches = int(extra // max(1, int(acq_batch)))
+            leftover = int(extra % max(1, int(acq_batch)))
+            if skipped_batches > 0:
+                print(
+                    f"Cache covers {extra} evaluations beyond initial {n_init} -> skip {skipped_batches} batch(es) (acq_batch={acq_batch}), leftover={leftover}"
+                )
+        return True, X_train, X_train_encoded, init_time, init_eff_energy, init_avg_energy, all_records, skipped_batches
     except Exception as exc:
         print(f"Warning: failed to parse cached evals at {eval_log_path}: {exc}. Falling back to hardware evaluation.")
-        return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records
+        return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records, 0
 
 
 def main() -> None:
@@ -701,7 +711,7 @@ def main() -> None:
     parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
     parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
-    parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default="A100")
+    parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default=FuserTestConfig.GPU_TYPE)
 
     parser.add_argument("--n_init", type=int, default=FuserTestConfig.BO_DEFAULT_N_INIT)
     parser.add_argument("--batches", type=int, default=FuserTestConfig.BO_DEFAULT_BATCHES)
@@ -725,7 +735,7 @@ def main() -> None:
 
     global FREQ_VALUES
     if args.gpu_type == "A40":
-        FREQ_VALUES = list(map(int, np.arange(1740, 1000 - 30, -30)))
+        FREQ_VALUES = list(map(int, np.arange(1740, 900 - 60, -60)))
     else:
         FREQ_VALUES = list(map(int, np.arange(1410, 900 - 30, -30)))
     print(f"Frequency search set has {len(FREQ_VALUES)} values (min={min(FREQ_VALUES)}, max={max(FREQ_VALUES)})")
@@ -736,10 +746,11 @@ def main() -> None:
     total_configs = len(all_configs)
     n_init = min(args.n_init, total_configs)
 
-    use_cached_initial, X_train_cached, X_train_encoded_cached, init_time, init_eff_energy, init_avg_energy, all_records = try_load_initial_from_cache(
+    use_cached_initial, X_train_cached, X_train_encoded_cached, init_time, init_eff_energy, init_avg_energy, all_records, skipped_batches = try_load_initial_from_cache(
         args=args,
         p2p_power_w=p2p_power_w,
         n_init=n_init,
+        acq_batch=int(args.acq_batch),
     )
 
     if not use_cached_initial:
@@ -795,8 +806,12 @@ def main() -> None:
     print(f"Starting optimization loop ({args.batches} batches, {args.acq_batch} evals/batch)")
     print("===============================================")
 
+    # If using cache, skip fully-covered batches beyond initial n_init
+    start_batch_idx = int(skipped_batches) if use_cached_initial else 0
+    if start_batch_idx > 0:
+        print(f"Resuming from batch {start_batch_idx+1} (skipped {start_batch_idx} full batch(es) from cache)")
     total_start = time.time()
-    for ib in range(int(args.batches)):
+    for ib in range(int(start_batch_idx), int(args.batches)):
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
         energy_model_eff, time_model = train_xgb_models(X_train_encoded, y_energy_eff, y_time)
         energy_model_real = train_xgb_energy_only(X_train_encoded, y_energy_real)

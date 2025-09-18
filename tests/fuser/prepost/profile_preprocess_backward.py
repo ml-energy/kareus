@@ -6,6 +6,7 @@ import traceback
 
 import torch
 import torch.distributed as dist
+import multiprocessing as mp
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
@@ -22,6 +23,45 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
 )
 from zeus.monitor import ZeusMonitor
 # from cfuser.core.utils import nvtx_range
+
+
+def _kill_all_subprocesses(timeout: float = 2.0):
+    """Best-effort termination of any child processes spawned by this process.
+
+    Attempts both multiprocessing-aware termination and psutil-based recursive kill.
+    Safe to call from workers and from the main process.
+    """
+    try:
+        for child in mp.active_children():
+            try:
+                child.terminate()
+            except Exception:
+                pass
+        for child in mp.active_children():
+            try:
+                child.join(timeout)
+            except Exception:
+                pass
+
+        try:
+            import psutil  # type: ignore
+            parent = psutil.Process(os.getpid())
+            children = parent.children(recursive=True)
+            for proc in children:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            _, alive = psutil.wait_procs(children, timeout=timeout)
+            for proc in alive:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def init_distributed(rank: int, world_size: int, backend: str = 'nccl'):
@@ -192,6 +232,7 @@ def _worker(rank: int, world_size: int, args, master_port: int):
                 dist.destroy_process_group()
         except Exception:
             pass
+        _kill_all_subprocesses()
 
 
 if __name__ == '__main__':
@@ -219,5 +260,6 @@ if __name__ == '__main__':
         nprocs=args.world_size,
         join=True,
     )
+    _kill_all_subprocesses()
 
 
