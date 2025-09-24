@@ -430,7 +430,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
-        self.cp_comm_type = cp_comm_type
+        self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
 
     @no_torch_dynamo(recursive=False)
     def forward(

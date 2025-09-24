@@ -3543,7 +3543,6 @@ def attn_forward_func_with_cp(
     in Megatron-LM.
 
     """
-
     if cp_comm_type == "a2a+p2p":
         assert isinstance(
             cp_group, list

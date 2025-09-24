@@ -731,7 +731,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         async_op=True,
                     )
                 else:
-                    dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=True)
+                    dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=False)
                 nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
             else:
                 dgrad = gemm_out
