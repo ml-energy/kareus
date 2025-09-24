@@ -1,7 +1,4 @@
 
-[submodule "3rdparty/TransformerEngine"]
-	path = 3rdparty/TransformerEngine
-	url = https://github.com/NVIDIA/TransformerEngine.git
 [submodule "3rdparty/apex"]
 	path = 3rdparty/apex
 	url = https://github.com/NVIDIA/apex.git
