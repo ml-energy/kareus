@@ -113,13 +113,13 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             assert is_te_min_version(
                 "1.0.0"
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
-            if getattr(DotProductAttentionOp, "cp_stream") is None:
-                DotProductAttentionOp.cp_stream = torch.cuda.Stream()
+            if getattr(TEFusibleDotProductAttention, "cp_stream") is None:
+                TEFusibleDotProductAttention.cp_stream = torch.cuda.Stream()
             extra_kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
             extra_kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(
                 check_initialized=False
             )
-            extra_kwargs["cp_stream"] = DotProductAttentionOp.cp_stream
+            extra_kwargs["cp_stream"] = TEFusibleDotProductAttention.cp_stream
             if is_te_min_version("1.10.0"):
                 if cp_comm_type is None:
                     extra_kwargs["cp_comm_type"] = "p2p"
@@ -134,6 +134,7 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
                     )
                 else:
                     extra_kwargs["cp_comm_type"] = cp_comm_type
+            extra_kwargs["cp_size"] = self.config.context_parallel_size
 
         if self.config.deterministic_mode:
             if int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")) != 0:

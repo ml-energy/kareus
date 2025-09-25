@@ -49,6 +49,7 @@ git config --global --add safe.directory /workspaces/Kareus
 # pip uninstall nemo_toolkit
 rm -r /usr/local/lib/python3.12/dist-packages/megatron*
 rm -r /usr/local/lib/python3.12/dist-packages/nemo*
+rm -r /usr/local/lib/python3.12/dist-packages/transformer_engine*
 
 # Megatron
 cd 3rdparty/Megatron-LM
@@ -68,6 +69,11 @@ python3 -m pip install .
 cd ../zeus
 pip install -e . 
 pip install '.[pfo-server]'
+
+# TransformerEngine
+cd ../TransformerEngine
+export NVTE_FRAMEWORK=pytorch 
+pip install --no-build-isolation -e .  
 
 # cargo
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

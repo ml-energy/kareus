@@ -171,6 +171,7 @@ class TEFusibleLinear(Linear):
         else:
             use_persistent_output_fwd = False
             use_persistent_output_bwd = True
+        seq_length = config.max_sequence_length // config.context_parallel_size
 
         # Initialize the FusedOperation-based Linear layer
         super().__init__(
@@ -189,7 +190,7 @@ class TEFusibleLinear(Linear):
             use_persistent_output=(use_persistent_output_fwd, use_persistent_output_bwd),
             num_batches=2,  # 2 nanobatches per microbatch
             batch_size=get_micro_batch_size() // 2, # nanobatch size
-            seq_length=config.max_sequence_length,
+            seq_length=seq_length,
         )
 
         # Handle CPU initialization if needed
