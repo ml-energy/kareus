@@ -58,8 +58,8 @@ except ImportError:
     # flash_attn_varlen_func_v3 = None
     # flash_attn_with_kvcache_v3 = None
 
-from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
-    attn_forward_func_with_cp,
+from kareus.transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    attn_forward_func_with_cp, attn_backward_func_with_cp,
 )
 
 
@@ -295,36 +295,37 @@ def flash_attention_forward(
     if context_parallel and all(
         not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
     ):
-        raise NotImplementedError("Context parallelism is not supported with FlashAttention.")
-        # assert (
-        #     alibi_slopes is None
-        # ), "Alibi slope bias addition is not supported with context parallelism."
-        # with attention_dropout_ctx():
-        #     output = attn_forward_func_with_cp(
-        #         training,
-        #         query_layer,
-        #         key_layer,
-        #         value_layer,
-        #         cu_seqlens_q,
-        #         cu_seqlens_kv,
-        #         max_seqlen_q,
-        #         max_seqlen_kv,
-        #         cu_seqlens_q if qkv_format == "thd" else None,
-        #         cu_seqlens_kv if qkv_format == "thd" else None,
-        #         attention_dropout if training else 0.0,
-        #         cp_group,
-        #         cp_global_ranks,
-        #         cp_stream,
-        #         cp_comm_type,
-        #         softmax_scale=softmax_scale,
-        #         qkv_format="bshd" if qkv_format == "sbhd" else qkv_format,
-        #         attn_mask_type=attn_mask_type,
-        #         deterministic=deterministic,
-        #         window_size=window_size,
-        #         quantizers=quantizers,
-        #         pad_between_seqs=False,
-        #         use_flash_attn_3=use_flash_attn_3,
-        #     )
+        # raise NotImplementedError("Context parallelism is not supported with FlashAttention.")
+        assert (
+            alibi_slopes is None
+        ), "Alibi slope bias addition is not supported with context parallelism."
+        with attention_dropout_ctx():
+            output = attn_forward_func_with_cp(
+                ctx,
+                training,
+                query_layer,
+                key_layer,
+                value_layer,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                max_seqlen_q,
+                max_seqlen_kv,
+                cu_seqlens_q if qkv_format == "thd" else None,
+                cu_seqlens_kv if qkv_format == "thd" else None,
+                attention_dropout if training else 0.0,
+                cp_group,
+                cp_global_ranks,
+                cp_stream,
+                cp_comm_type,
+                softmax_scale=softmax_scale,
+                qkv_format="bshd" if qkv_format == "sbhd" else qkv_format,
+                attn_mask_type=attn_mask_type,
+                deterministic=deterministic,
+                window_size=window_size,
+                quantizers=quantizers,
+                pad_between_seqs=False,
+                use_flash_attn_3=use_flash_attn_3,
+            )
     else:
         from transformer_engine.pytorch.cpu_offload import (
             CPUOffloadEnabled,
@@ -557,7 +558,8 @@ def flash_attention_backward(
 
     # Step 2: Call the appropriate FlashAttention backward function
     if context_parallel:
-        raise NotImplementedError("Context parallelism backward is not supported.")
+        # raise NotImplementedError("Context parallelism backward is not supported.")
+        dq, dk, dv = attn_backward_func_with_cp(ctx, grad_output_transformed)
     else:
         # Determine if FlashAttention 3 is available and should be used
         use_flash_attn_3 = False

@@ -477,7 +477,7 @@ class BasicDotProductAttention(BasicOperation):
             else:
                 pad_between_seqs = False
 
-        ctx.qkv_format = qkv_format
+        ctx.op_qkv_format = qkv_format
         ctx.q_format = q_format
         ctx.context_parallel = context_parallel
 
@@ -507,9 +507,9 @@ class BasicDotProductAttention(BasicOperation):
             attn_mask_type=attn_mask_type,
             window_size=window_size,
             alibi_slopes=alibi_slopes,
-            cp_group=None,  # Disable context parallel for now
-            cp_global_ranks=None,
-            cp_stream=None,
+            cp_group=self.cp_group,
+            cp_global_ranks=self.cp_global_ranks,
+            cp_stream=self.cp_stream,
             cp_comm_type=self.cp_comm_type,
             fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa if hasattr(self, 'fp8') else False,
             fp8_meta=self.fp8_meta if hasattr(self, 'fp8_meta') else None,
@@ -536,7 +536,7 @@ class BasicDotProductAttention(BasicOperation):
         """Backward pass for dot product attention using FlashAttention backward functions."""
         
         # Retrieve saved context information
-        qkv_format = ctx.qkv_format
+        qkv_format = ctx.op_qkv_format
         q_format = ctx.q_format
         context_parallel = ctx.context_parallel
         

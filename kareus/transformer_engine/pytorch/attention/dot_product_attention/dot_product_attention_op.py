@@ -34,27 +34,27 @@ class DotProductAttentionOp(FusedOperation):
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
     ) -> None:
-        if cp_size > 1:
-            pass
-        else:
-            basic_op = BasicDotProductAttention(
-                num_attention_heads=num_attention_heads,
-                kv_channels=kv_channels,
-                num_gqa_groups=num_gqa_groups,
-                attention_dropout=attention_dropout,
-                qkv_format=qkv_format,
-                attn_mask_type=attn_mask_type,
-                window_size=window_size,
-                sequence_parallel=sequence_parallel,
-                tp_size=tp_size,
-                get_rng_state_tracker=get_rng_state_tracker,
-                tp_group=tp_group,
-                layer_number=layer_number,
-                attention_type=attention_type,
-                cp_group=cp_group,
-                cp_global_ranks=cp_global_ranks,
-                cp_stream=cp_stream,
-                cp_comm_type=cp_comm_type,
-                softmax_scale=softmax_scale,
-            )
-            super().__init__([basic_op])
+        # if cp_size > 1:
+        #     pass
+        # else:
+        basic_op = BasicDotProductAttention(
+            num_attention_heads=num_attention_heads,
+            kv_channels=kv_channels,
+            num_gqa_groups=num_gqa_groups,
+            attention_dropout=attention_dropout,
+            qkv_format=qkv_format,
+            attn_mask_type=attn_mask_type,
+            window_size=window_size,
+            sequence_parallel=sequence_parallel,
+            tp_size=tp_size,
+            get_rng_state_tracker=get_rng_state_tracker,
+            tp_group=tp_group,
+            layer_number=layer_number,
+            attention_type=attention_type,
+            cp_group=cp_group,
+            cp_global_ranks=cp_global_ranks,
+            cp_stream=cp_stream,
+            cp_comm_type=cp_comm_type,
+            softmax_scale=softmax_scale,
+        )
+        super().__init__([basic_op])
