@@ -143,10 +143,13 @@ def flash_attention_forward(
                 #         for x in (query_layer, key_layer, value_layer)
                 #     ]
             else:
-                query_layer, key_layer, value_layer = [
-                    x.transpose(0, 1).contiguous()
-                    for x in (query_layer, key_layer, value_layer)
-                ]
+                if context_parallel:
+                    query_layer = query_layer.transpose(0, 1).contiguous()
+                else:
+                    query_layer, key_layer, value_layer = [
+                        x.transpose(0, 1).contiguous()
+                        for x in (query_layer, key_layer, value_layer)
+                    ]
         else:
             raise NotImplementedError(f"qkv_format: {qkv_format} is not supported in FlashAttention.")
         # elif q_format == "sbhd" and kv_format == "bshd":
@@ -573,7 +576,10 @@ def flash_attention_backward(
 
     # Step 3: Reverse the input tensor format transformations
     if qkv_format == "sbhd":
-        dq, dk, dv = [x.transpose(0, 1).contiguous() for x in (dq, dk, dv)]
+        if context_parallel:
+            dq = dq.transpose(0, 1).contiguous()
+        else:
+            dq, dk, dv = [x.transpose(0, 1).contiguous() for x in (dq, dk, dv)]
     else:
         raise NotImplementedError("Simplified FlashAttention only supports qkv_format == 'sbhd'.")
 

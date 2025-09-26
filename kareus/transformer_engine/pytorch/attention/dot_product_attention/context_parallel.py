@@ -209,8 +209,8 @@ def _attn_cp_kv_allgather_preprocess(
 
     # [b, s, np, hn] -> [b, 2, s//2, np, hn] or [s, b, np, hn] -> [2, s//2, b, np, hn]
     q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
-    # [b, s, np, hn] or [s, b, np, hn] -> [s, b, np, hn]
-    k, v = [x.movedim(seq_dim, 0).contiguous() for x in [k, v]]
+    # # [b, s, np, hn] or [s, b, np, hn] -> [s, b, np, hn]
+    # k, v = [x.movedim(seq_dim, 0).contiguous() for x in [k, v]]
 
     return q, k, v
 
@@ -751,8 +751,8 @@ def _attn_cp_kv_allgather_bwd_reduce_scatter(ctx, dk, dv):
 def _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv):
     seq_dim = ctx.qkv_format.index("s")
     dq = dq.view(*dq.shape[:seq_dim], -1, *dq.shape[(seq_dim + 2) :])
-    dk = dk.movedim(0, seq_dim).contiguous()
-    dv = dv.movedim(0, seq_dim).contiguous()
+    # dk = dk.movedim(0, seq_dim).contiguous()
+    # dv = dv.movedim(0, seq_dim).contiguous()
     return dq, dk, dv
 
 
