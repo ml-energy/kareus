@@ -1,13 +1,11 @@
 import os
 from typing import Any, Dict, List, Optional
-import contextlib
-import atexit
 
 import cupy as cp
 import torch
 import torch.distributed as dist
 
-from mscclpp_benchmark.mscclpp_op import MscclppAllReduce1, type_to_str
+from mscclpp_benchmark.mscclpp_op import MscclppAllReduce1, MscclppAllGather
 from mscclpp.utils import is_torch_tensor
 from mscclpp import (
     Transport,
@@ -18,23 +16,39 @@ from mscclpp._mscclpp import (
     Communicator,
     Connection,
     EndpointConfig,
+    Host2DeviceSemaphore,
     RegisteredMemory,
     MemoryChannel,
+    ProxyService,
     TcpBootstrap,
     connect_nvls_collective,
 )
 
 
-# Global state mimicking the user's requested interface
-COMM: Optional[Communicator] = None
-COMM_STREAM: Optional[torch.cuda.Stream] = None
-_COMM_GROUP_RANK: Optional[int] = None
-_COMM_GROUP_SIZE: Optional[int] = None
+# Global state isolated per collective type to allow concurrent groups
+# AllReduce state
+AR_COMM: Optional[Communicator] = None
+AR_COMM_STREAM: Optional[torch.cuda.Stream] = None
+_AR_GROUP_RANK: Optional[int] = None
+_AR_GROUP_SIZE: Optional[int] = None
 
-_ALGO: Optional[MscclppAllReduce1] = None
-_TORCH_OUT_TENSOR: Optional[torch.Tensor] = None
-_TORCH_IN_TENSOR: Optional[torch.Tensor] = None
-_TORCH_SUBGROUP: Optional[dist.ProcessGroup] = None
+_AR_ALGO: Optional[MscclppAllReduce1] = None
+_AR_TORCH_OUT_TENSOR: Optional[torch.Tensor] = None
+_AR_TORCH_IN_TENSOR: Optional[torch.Tensor] = None
+_AR_TORCH_SUBGROUP: Optional[dist.ProcessGroup] = None
+
+# AllGather state
+AG_COMM: Optional[Communicator] = None
+AG_COMM_STREAM: Optional[torch.cuda.Stream] = None
+_AG_GROUP_RANK: Optional[int] = None
+_AG_GROUP_SIZE: Optional[int] = None
+
+_AG_ALGO: Optional[Any] = None
+_AG_TORCH_OUT_TENSOR: Optional[torch.Tensor] = None
+_AG_TORCH_IN_TENSOR: Optional[torch.Tensor] = None
+_AG_TORCH_SUBGROUP: Optional[dist.ProcessGroup] = None
+_AG_PROXY_SERVICE: Optional[ProxyService] = None
+_AG_USE_TORCH_SINGLE_NODE: bool = False
 
 
 def _dlpack_view(t: torch.Tensor) -> cp.ndarray:
@@ -169,16 +183,51 @@ class _ShimGroup:
             channels[rank] = MemoryChannel(semaphores[rank], registered[rank], registered[self.my_rank])
         return channels
 
+    def make_port_channels(self, proxy_service: ProxyService, tensor: Any, connections: Dict[int, Connection]):
+        # Create Host2Device semaphores for each connection
+        h2d_semaphores: Dict[int, Host2DeviceSemaphore] = {}
+        for rank in connections:
+            h2d_semaphores[rank] = Host2DeviceSemaphore(self.communicator, connections[rank])
+
+        # Register local tensor with peers and exchange registered memory handles
+        transport_flags = TransportFlags()
+        for rank in connections:
+            transport_flags |= connections[rank].transport()
+        if isinstance(tensor, cp.ndarray):
+            data_ptr = tensor.data.ptr
+            tensor_size = tensor.size * tensor.itemsize
+        elif is_torch_tensor(tensor):
+            data_ptr = tensor.data_ptr()
+            tensor_size = tensor.numel() * tensor.element_size()
+        else:
+            data_ptr = tensor.ctypes.data
+            tensor_size = tensor.size * tensor.itemsize
+        local_reg = self.communicator.register_memory(data_ptr, tensor_size, transport_flags)
+        registered = self._register_memory_with_connections(local_reg, connections)
+
+        # Add memories and semaphores to proxy service
+        memory_ids: Dict[int, int] = {}
+        semaphore_ids: Dict[int, int] = {}
+        for rank in registered:
+            memory_ids[rank] = proxy_service.add_memory(registered[rank])
+        for rank in h2d_semaphores:
+            semaphore_ids[rank] = proxy_service.add_semaphore(h2d_semaphores[rank])
+
+        # Build PortChannels via proxy service
+        channels = {}
+        for rank in h2d_semaphores:
+            channels[rank] = proxy_service.port_channel(semaphore_ids[rank], memory_ids[rank], memory_ids[self.my_rank])
+        return channels
+
 
 def msccl_AllReduce_init(
     rank: int,
     world_size: int,
     input_tensor: torch.Tensor,
-    # output_tensor: torch.Tensor,
     group: dist.ProcessGroup = None,
 ):
-    global COMM, COMM_STREAM, _COMM_GROUP_RANK, _COMM_GROUP_SIZE
-    global _ALGO, _TORCH_OUT_TENSOR, _TORCH_IN_TENSOR, _TORCH_SUBGROUP
+    global AR_COMM, AR_COMM_STREAM, _AR_GROUP_RANK, _AR_GROUP_SIZE
+    global _AR_ALGO, _AR_TORCH_OUT_TENSOR, _AR_TORCH_IN_TENSOR, _AR_TORCH_SUBGROUP
 
     if group is not None:
         sub_group = group
@@ -189,7 +238,7 @@ def msccl_AllReduce_init(
         sub_rank = rank
         sub_world_size = world_size
 
-    need_reinit = COMM is None or _COMM_GROUP_RANK != sub_rank or _COMM_GROUP_SIZE != sub_world_size
+    need_reinit = AR_COMM is None or _AR_GROUP_RANK != sub_rank or _AR_GROUP_SIZE != sub_world_size
 
     if need_reinit:
         bootstrap = TcpBootstrap.create(sub_rank, sub_world_size)
@@ -206,12 +255,12 @@ def msccl_AllReduce_init(
         unique_id = dist_list[0]
         bootstrap.initialize(unique_id)
 
-        COMM = Communicator(bootstrap)
-        _COMM_GROUP_RANK = sub_rank
-        _COMM_GROUP_SIZE = sub_world_size
+        AR_COMM = Communicator(bootstrap)
+        _AR_GROUP_RANK = sub_rank
+        _AR_GROUP_SIZE = sub_world_size
 
-    if COMM_STREAM is None:
-        COMM_STREAM = torch.cuda.Stream()
+    if AR_COMM_STREAM is None:
+        AR_COMM_STREAM = torch.cuda.Stream()
 
     # dtype handling
     # Primary support: fp16/fp32/int32. If bf16 is provided, cast to fp16 for perf-only runs.
@@ -219,24 +268,12 @@ def msccl_AllReduce_init(
     cast_to_fp16 = False
     if input_tensor.dtype == torch.bfloat16:
         cast_to_fp16 = True
-        cupy_dtype = cp.float16
-    else:
-        try:
-            cupy_dtype = {
-                torch.float16: cp.float16,
-                torch.float32: cp.float32,
-                torch.int32: cp.int32,
-            }[input_tensor.dtype]
-        except KeyError:
-            raise RuntimeError(
-                f"Unsupported dtype {input_tensor.dtype}. Supported: float16, float32, int32 (bf16 is cast to fp16 for perf)."
-            )
 
     # Build ShimGroup and algo
-    _TORCH_SUBGROUP = sub_group
-    group_obj = _ShimGroup(COMM, _COMM_GROUP_RANK, _COMM_GROUP_SIZE, _TORCH_SUBGROUP)
+    _AR_TORCH_SUBGROUP = sub_group
+    group_obj = _ShimGroup(AR_COMM, _AR_GROUP_RANK, _AR_GROUP_SIZE, _AR_TORCH_SUBGROUP)
 
-    # Prepare working buffers
+    # Prepare working buffer
     if cast_to_fp16:
         # Create an fp16 working tensor for in-place allreduce; skip copying back for perf
         input_work = input_tensor.to(torch.float16)
@@ -244,74 +281,172 @@ def msccl_AllReduce_init(
         input_work = input_tensor
 
     cp_in = _dlpack_view(input_work)
-    # cp_out = _dlpack_view(output_tensor)
 
     # MscclppAllReduce1 is in-place; use input buffer as working/output.
-    # We'll still return the provided output_tensor for API parity by copying after launch
-    _ALGO = MscclppAllReduce1(group_obj, cp_in)
-    # _TORCH_OUT_TENSOR = output_tensor
+    _AR_ALGO = MscclppAllReduce1(group_obj, cp_in)
     # TODO: currently return the original tensor if bf16
-    _TORCH_IN_TENSOR = input_tensor  
+    _AR_TORCH_OUT_TENSOR = input_tensor
+    _AR_TORCH_IN_TENSOR = input_tensor
 
 
 def msccl_AllReduce(nblocks: int, block_size: int):
-    if _ALGO is None:
+    if _AR_ALGO is None:
         raise RuntimeError("Call msccl_AllReduce_init(...) first")
     # Update launch configuration
     # read_only=0 avoids potential cache staleness on some GPUs
-    _ALGO.set_params(nblocks=nblocks, block_size=block_size, read_only=0)
+    _AR_ALGO.set_params(nblocks=nblocks, block_size=block_size, read_only=0)
     # Launch on the user-managed torch stream; Kernel launcher supports torch stream with .cuda_stream
-    _ALGO(COMM_STREAM)
-    # Copy result into the user-provided output tensor if different (in-place result in input tensor)
-    # if _TORCH_OUT_TENSOR.data_ptr() != _TORCH_IN_TENSOR.data_ptr():
-    #     _TORCH_OUT_TENSOR.copy_(_TORCH_IN_TENSOR)
-    # return _TORCH_OUT_TENSOR
-    return _TORCH_IN_TENSOR
+    _AR_ALGO(AR_COMM_STREAM)
+    return _AR_TORCH_OUT_TENSOR
 
 
 def msccl_sync():
-    COMM_STREAM.synchronize()
+    if AR_COMM_STREAM is not None:
+        AR_COMM_STREAM.synchronize()
+    if AG_COMM_STREAM is not None:
+        AG_COMM_STREAM.synchronize()
+
+
+def msccl_AllGather_init(
+    rank: int,
+    world_size: int,
+    input_tensor: torch.Tensor,
+    group: dist.ProcessGroup = None,
+    nranks_per_node: int = 0,
+):
+    global AG_COMM, AG_COMM_STREAM, _AG_GROUP_RANK, _AG_GROUP_SIZE
+    global _AG_ALGO, _AG_TORCH_OUT_TENSOR, _AG_TORCH_IN_TENSOR, _AG_TORCH_SUBGROUP, _AG_PROXY_SERVICE
+
+    if group is not None:
+        sub_group = group
+        sub_rank = dist.get_rank(group=sub_group)
+        sub_world_size = dist.get_world_size(group=sub_group)
+    else:
+        sub_group = dist.group.WORLD
+        sub_rank = rank
+        sub_world_size = world_size
+
+    need_reinit = AG_COMM is None or _AG_GROUP_RANK != sub_rank or _AG_GROUP_SIZE != sub_world_size
+
+    if need_reinit:
+        bootstrap = TcpBootstrap.create(sub_rank, sub_world_size)
+        if sub_rank == 0:
+            unique_id = bootstrap.create_unique_id()
+            dist_list: List[Optional[bytes]] = [unique_id]
+        else:
+            dist_list = [None]
+
+        group_ranks = dist.get_process_group_ranks(sub_group)
+        src_rank = group_ranks[0]
+        dist.broadcast_object_list(dist_list, src=src_rank, group=sub_group)
+
+        unique_id = dist_list[0]
+        bootstrap.initialize(unique_id)
+
+        AG_COMM = Communicator(bootstrap)
+        _AG_GROUP_RANK = sub_rank
+        _AG_GROUP_SIZE = sub_world_size
+
+    if AG_COMM_STREAM is None:
+        AG_COMM_STREAM = torch.cuda.Stream()
+
+    # dtype handling
+    cast_to_fp16 = False
+    if input_tensor.dtype == torch.bfloat16:
+        cast_to_fp16 = True
+
+    _AG_TORCH_SUBGROUP = sub_group
+    group_obj = _ShimGroup(AG_COMM, _AG_GROUP_RANK, _AG_GROUP_SIZE, _AG_TORCH_SUBGROUP)
+
+    # Working buffer: operate in-place on the provided buffer tensor
+    if cast_to_fp16:
+        work_buf = input_tensor.to(torch.float16)
+    else:
+        work_buf = input_tensor
+
+    cp_mem = _dlpack_view(work_buf)
+
+    # Determine single-node vs multi-node
+    if nranks_per_node <= 0:
+        nranks_per_node = _AG_GROUP_SIZE
+    _AG_USE_TORCH_SINGLE_NODE = (nranks_per_node == _AG_GROUP_SIZE)
+
+    if _AG_USE_TORCH_SINGLE_NODE:
+        _AG_ALGO = MscclppAllGather(group_obj, cp_mem, nranks_per_node, None)
+        _AG_PROXY_SERVICE = None
+    else:
+        if _AG_PROXY_SERVICE is None:
+            _AG_PROXY_SERVICE = ProxyService()
+        _AG_ALGO = MscclppAllGather(group_obj, cp_mem, nranks_per_node, _AG_PROXY_SERVICE)
+    _AG_TORCH_OUT_TENSOR = input_tensor
+    _AG_TORCH_IN_TENSOR = input_tensor
+
+
+# TODO: pipeline_depth is for multi-node allgather only
+def msccl_AllGather(nblocks: int, block_size: int, pipeline_depth: int = 3):
+    if _AG_ALGO is None:
+        raise RuntimeError("Call msccl_AllGather_init(...) first")
+    # Update launch configuration
+    _AG_ALGO.set_params(nblocks=nblocks, block_size=block_size, pipeline_depth=pipeline_depth)
+    # Ensure proxy service is running
+    global _AG_PROXY_SERVICE
+    # TODO: start_proxy in init?
+    if _AG_PROXY_SERVICE is not None:
+        try:
+            _AG_PROXY_SERVICE.start_proxy()
+        except Exception:
+            pass
+    # Launch
+    _AG_ALGO(AG_COMM_STREAM)
+    return _AG_TORCH_OUT_TENSOR
 
 
 def msccl_cleanup():
     """Release global objects to avoid nanobind leak warnings at exit."""
-    global COMM, COMM_STREAM, _COMM_GROUP_RANK, _COMM_GROUP_SIZE
-    global _ALGO, _TORCH_OUT_TENSOR, _TORCH_IN_TENSOR, _TORCH_SUBGROUP
+    global AR_COMM, AR_COMM_STREAM, _AR_GROUP_RANK, _AR_GROUP_SIZE
+    global _AR_ALGO, _AR_TORCH_OUT_TENSOR, _AR_TORCH_IN_TENSOR, _AR_TORCH_SUBGROUP
+    global AG_COMM, AG_COMM_STREAM, _AG_GROUP_RANK, _AG_GROUP_SIZE
+    global _AG_ALGO, _AG_TORCH_OUT_TENSOR, _AG_TORCH_IN_TENSOR, _AG_TORCH_SUBGROUP, _AG_PROXY_SERVICE
     try:
         # Ensure all work is done before tearing down
         if dist.is_initialized():
             try:
-                dist.barrier(group=_TORCH_SUBGROUP if _TORCH_SUBGROUP is not None else dist.group.WORLD)
+                dist.barrier(group=_AR_TORCH_SUBGROUP if _AR_TORCH_SUBGROUP is not None else dist.group.WORLD)
+            except Exception:
+                pass
+            try:
+                dist.barrier(group=_AG_TORCH_SUBGROUP if _AG_TORCH_SUBGROUP is not None else dist.group.WORLD)
             except Exception:
                 pass
         torch.cuda.synchronize()
     except Exception:
         pass
 
-    # Explicitly release algorithm and its resources
+    _AR_ALGO = None
+    AR_COMM = None
+    AR_COMM_STREAM = None
+    _AR_TORCH_OUT_TENSOR = None
+    _AR_TORCH_IN_TENSOR = None
+    _AR_TORCH_SUBGROUP = None
+    _AR_GROUP_RANK = None
+    _AR_GROUP_SIZE = None
+
+    _AG_ALGO = None
+    AG_COMM = None
+    AG_COMM_STREAM = None
+    _AG_TORCH_OUT_TENSOR = None
+    _AG_TORCH_IN_TENSOR = None
+    _AG_TORCH_SUBGROUP = None
+    _AG_GROUP_RANK = None
+    _AG_GROUP_SIZE = None
+
+    # Stop and clear ProxyService
     try:
-        if _ALGO is not None:
-            # Force cleanup of any internal connections/channels
-            del _ALGO
+        if _AG_PROXY_SERVICE is not None:
+            _AG_PROXY_SERVICE.stop_proxy()
     except Exception:
         pass
-
-    # Clear all global references
-    _ALGO = None
-    COMM = None
-    COMM_STREAM = None
-    _TORCH_OUT_TENSOR = None
-    _TORCH_IN_TENSOR = None
-    _TORCH_SUBGROUP = None
-    _COMM_GROUP_RANK = None
-    _COMM_GROUP_SIZE = None
-
-    # Force garbage collection to help release nanobind objects
-    try:
-        import gc
-        gc.collect()
-    except Exception:
-        pass
+    _AG_PROXY_SERVICE = None
 
     # Free CuPy memory pools to drop device allocations
     try:
@@ -320,22 +455,3 @@ def msccl_cleanup():
     except Exception:
         pass
 
-
-@contextlib.contextmanager
-def msccl_context():
-    """Context manager for proper MSCCL resource management.
-    
-    Usage:
-        with msccl_context():
-            # Use MSCCL operations
-            pass
-        # Resources are automatically cleaned up
-    """
-    try:
-        yield
-    finally:
-        msccl_cleanup()
-
-
-# Register cleanup at module import to ensure it runs at program exit
-atexit.register(msccl_cleanup)
