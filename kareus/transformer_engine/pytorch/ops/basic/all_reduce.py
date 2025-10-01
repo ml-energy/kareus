@@ -91,7 +91,7 @@ class AllReduce(BasicOperation):
                 #         self.input_buffer, self.output_buffer,
                 #         self.process_group
                 #     )
-                self.comm_stream = new_msccl_comm.COMM_STREAM
+                self.comm_stream = new_msccl_comm.AR_COMM_STREAM
             else:
                 msccl_comm.msccl_AllReduce_init_cached(rank, world_size)
                 self.comm_stream = msccl_comm.COMM_STREAM
@@ -169,7 +169,7 @@ class AllReduce(BasicOperation):
         """
         if self.backend == "msccl":
             # if self.new_backend:
-            new_msccl_comm.msccl_sync()
+            new_msccl_comm.msccl_AllReduce_sync()
             # else:
             #     msccl_comm.msccl_sync()
         else:

@@ -43,6 +43,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
 )
 
+from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import K_AG, V_AG
+
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 
@@ -255,6 +257,10 @@ def _attn_cp_kv_allgather_compute(
 
     Returns only the output tensor; recomputes needed metadata locally.
     """
+    # from _attn_cp_kv_allgather_preprocess
+    # [b, s, np, hn] -> [b, 2, s//2, np, hn] or [s, b, np, hn] -> [2, s//2, b, np, hn]
+    q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
+
     qkv_dtype = q.dtype
     cp_size = get_distributed_world_size(cp_group)
     rank = get_distributed_rank(cp_group)
@@ -480,6 +486,8 @@ def AttnFuncWithCPAndKVAllGather_forward(
     q,
     k,
     v,
+    k_ag,
+    v_ag,
     cu_seqlens_q,
     max_seqlen_q,
     max_seqlen_kv,
@@ -499,14 +507,14 @@ def AttnFuncWithCPAndKVAllGather_forward(
 ):
     # pylint: disable=missing-function-docstring
     nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
-    q, k, v = _attn_cp_kv_allgather_preprocess(
-        q,
-        k,
-        v,
-        qkv_format,
-    )
+    # q, k, v = _attn_cp_kv_allgather_preprocess(
+    #     q,
+    #     k,
+    #     v,
+    #     qkv_format,
+    # )
 
-    k_ag, v_ag = _attn_cp_kv_allgather_gather(cp_group, k, v)
+    # k_ag, v_ag = _attn_cp_kv_allgather_gather(cp_group, k, v)
 
     out = _attn_cp_kv_allgather_compute(
         ctx,
@@ -739,6 +747,9 @@ def _attn_cp_kv_allgather_bwd_pre_reduce(
     dk = dk.view(-1, *dk.shape[-3:])
     dv = dv.view(-1, *dv.shape[-3:])
 
+    # from _attn_cp_kv_allgather_bwd_post_reduce
+    dq = dq.view(*dq.shape[:seq_dim], -1, *dq.shape[(seq_dim + 2) :])
+
     return dq, dk, dv
 
 
@@ -760,13 +771,18 @@ def AttnFuncWithCPAndKVAllGather_backward(ctx, dout):
     # pylint: disable=missing-function-docstring
     nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
-    k_ag, v_ag = _attn_cp_kv_allgather_bwd_gather(ctx)
-    dq, dk_pre_rs, dv_pre_rs = _attn_cp_kv_allgather_bwd_pre_reduce(
+    # k_ag, v_ag = _attn_cp_kv_allgather_bwd_gather(ctx)
+    k_ag, v_ag = K_AG, V_AG
+    dq, dk, dv = _attn_cp_kv_allgather_bwd_pre_reduce(
         ctx, dout, k_ag, v_ag, 
     )
 
-    dk, dv = _attn_cp_kv_allgather_bwd_reduce_scatter(ctx, dk_pre_rs, dv_pre_rs)
-    dq, dk, dv = _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv)
+    # dk, dv = _attn_cp_kv_allgather_bwd_reduce_scatter(ctx, dk_pre_rs, dv_pre_rs)
+    # dq, dk, dv = _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv)
+
+    global K_AG, V_AG
+    K_AG = None
+    V_AG = None
     
     nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
@@ -783,6 +799,8 @@ def attn_forward_func_with_cp(
     q,
     k,
     v,
+    k_ag,
+    v_ag,
     cu_seqlens_q,
     cu_seqlens_kv,
     max_seqlen_q,
@@ -915,6 +933,8 @@ def attn_forward_func_with_cp(
         q,
         k,
         v,
+        k_ag,
+        v_ag,
         cu_seqlens_q,
         cu_seqlens_kv,
         max_seqlen_q,
