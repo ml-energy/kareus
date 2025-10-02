@@ -1,0 +1,52 @@
+trigger:
+- main
+- release/*
+
+pr:
+  branches:
+    include:
+    - main
+    - release/*
+  drafts: false
+
+jobs:
+- job: IntegrationTestA100
+  displayName: Integration test A100
+  strategy:
+    matrix:
+      cuda11:
+        containerImage: ghcr.io/microsoft/mscclpp/mscclpp:base-dev-cuda11.8
+      cuda12:
+        containerImage: ghcr.io/microsoft/mscclpp/mscclpp:base-dev-cuda12.4
+
+  pool:
+    name: msccl-ci
+  container:
+    image: $(containerImage)
+
+  steps:
+  - template: templates/integration-test.yaml
+    parameters:
+      subscription:     mscclpp-ci
+      vmssName:         mscclpp-ci
+      sshKeySecureFile: mscclpp.pem
+
+- job: IntegrationTestH100
+  displayName: Integration test H100
+  strategy:
+    matrix:
+      cuda12:
+        containerImage: ghcr.io/microsoft/mscclpp/mscclpp:base-dev-cuda12.4
+
+  pool:
+    name: msccl-ci-h100
+  container:
+    image: $(containerImage)
+
+  steps:
+  - template: templates/integration-test.yaml
+    parameters:
+      subscription:     mscclpp-ci-h100
+      vmssName:         mscclpp-h100-ci
+      sshKeySecureFile: mscclpp.pem
+      perfBaselineFile: test/deploy/perf_ndmv5.jsonl
