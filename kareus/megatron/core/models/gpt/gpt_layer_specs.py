@@ -37,12 +37,12 @@ from megatron.core.utils import is_te_min_version
 
 from kareus.megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from kareus.megatron.core.transformer.mlp import MLP, MLPSubmodules
-from kareus.megatron.core.extensions.te_linear import (
+from kareus.megatron.core.extensions.ops import (
     TEFusibleColumnParallelLinear,
     TEFusibleRowParallelLinear,
 )
-from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
-from kareus.megatron.core.extensions.te_norm import TEFusibleNorm
+from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
+from kareus.megatron.core.extensions.ops import TEFusibleNorm
 from kareus.transformer_engine.pytorch.ops import BiasDropoutAddOp as TEFusibleBiasDropoutAdd
 
 HAVE_TE = True

@@ -22,16 +22,15 @@ from kareus.transformer_engine.pytorch.ops.fused import (
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
 from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
-from kareus.megatron.core.extensions.te_linear import TEFusibleRowParallelLinear, TEFusibleColumnParallelLinear
+from kareus.megatron.core.extensions.ops import TEFusibleRowParallelLinear, TEFusibleColumnParallelLinear
 from kareus.transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from kareus.transformer_engine.pytorch.ops.basic.bias import Bias
-from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp
-from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp
+from kareus.megatron.core.extensions.ops import QKVPostProcessOp
+from kareus.megatron.core.extensions.ops import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttentionOp
-from kareus.transformer_engine.pytorch.attention.dot_product_attention.basic import BasicDotProductAttention
-from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
-from kareus.megatron.core.extensions.bias_gelu_op import BiasGeluOp
-from kareus.megatron.core.extensions.bias_geglu_op import BiasGegluOp
+from kareus.megatron.core.extensions.ops import BiasSwigluOp
+from kareus.megatron.core.extensions.ops import BiasGeluOp
+from kareus.megatron.core.extensions.ops import BiasGegluOp
 
 
 class _PartitionFuserAutogradFunction(torch.autograd.Function):
@@ -107,15 +106,15 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
 
         current_stream = torch.cuda.current_stream()
         if comm_op_fwd:
-            ar_start, ar_end = comm_overlap_window
+            comm_start, comm_end = comm_overlap_window
             if comm_sm_configs:
                 sm_num, block_size = comm_sm_configs
             else:
                 sm_num, block_size = None, None
         else:
-            ar_start, ar_end = -1, -1
+            comm_start, comm_end = -1, -1
 
-        if ar_start == -1 and comm_op_fwd is not None:
+        if comm_start == -1 and comm_op_fwd is not None:
             current_stream.synchronize()
             comm_op_fwd.fuser_forward(
                 [None], comm_input,
@@ -123,7 +122,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             )
             comm_op_fwd.sync()
         
-        if ar_start == 0:
+        if comm_start == 0:
             comm_op_fwd.event_record(current_stream)
 
         # Apply forward ops
@@ -143,7 +142,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 get_residual = True
             elif isinstance(op, RotaryEmbeddingOp):
                 extra_inputs = [(key, rotary_pos_emb)]
-            elif isinstance(op, DotProductAttentionOp) or isinstance(op, BasicDotProductAttention):
+            elif isinstance(op, DotProductAttentionOp):
                 extra_inputs = [(key, value)]
             elif isinstance(op, BiasSwigluOp) or isinstance(op, BiasGeluOp) or isinstance(op, BiasGegluOp):
                 assert get_bias == True
@@ -170,7 +169,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 basic_ops[idx + 1] if (idx < len(basic_ops) - 1) else None for idx in basic_op_idxs
             ]
 
-            if ar_start == fused_idx:
+            if comm_start == fused_idx:
                 # Wait for the event from the previous operation before starting allreduce
                 comm_op_fwd.event_wait()
                 # current_stream.synchronize()
@@ -190,10 +189,10 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             )
 
             # Record event after the operation at fused_idx-1 completes
-            if fused_idx == ar_start - 1:
+            if fused_idx == comm_start - 1:
                 comm_op_fwd.event_record(current_stream)
 
-            # if ar_end == fused_idx:
+            # if comm_end == fused_idx:
             #     comm_op_fwd.sync()
 
             # Get extra outputs
@@ -278,15 +277,15 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
 
         current_stream = torch.cuda.current_stream()
         if comm_op_bwd:
-            ar_start, ar_end = comm_overlap_window
+            comm_start, comm_end = comm_overlap_window
             if comm_sm_configs:
                 sm_num, block_size = comm_sm_configs
             else:
                 sm_num, block_size = None, None
         else:
-            ar_start, ar_end = -1, -1
+            comm_start, comm_end = -1, -1
 
-        if ar_start == -1 and comm_op_bwd is not None:
+        if comm_start == -1 and comm_op_bwd is not None:
             current_stream.synchronize()
             comm_op_bwd.fuser_forward(
                 [None], grad_comm_input,
@@ -294,7 +293,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             )
             comm_op_bwd.sync()
     
-        if ar_start == 0:
+        if comm_start == 0:
             comm_op_bwd.event_record(current_stream)
 
         # Apply backward ops
@@ -320,7 +319,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             elif isinstance(op, Bias) and op.return_bias:
                 grad_extra_outputs = [(grad_bias,)]
 
-            if ar_start == fused_idx:
+            if comm_start == fused_idx:
                 comm_op_bwd.event_wait()
                 # current_stream.synchronize()
                 comm_op_bwd.fuser_forward(
@@ -338,10 +337,10 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 grad_params[idx] = dparams
                 basic_op_ctxs[idx].saved_tensors = None
 
-            if fused_idx == ar_start - 1:
+            if fused_idx == comm_start - 1:
                 comm_op_bwd.event_record(current_stream)
 
-            # if ar_end == fused_idx:
+            # if comm_end == fused_idx:
             #     comm_op_bwd.sync()
 
             if isinstance(op, BiasDropoutAddOp):
@@ -354,7 +353,7 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 grad_residual = None
             elif isinstance(op, RotaryEmbeddingOp):
                 grad_key, grad_rotary_pos_emb = fused_op_grad_extra_inputs[0]
-            elif isinstance(op, DotProductAttentionOp) or isinstance(op, BasicDotProductAttention):
+            elif isinstance(op, DotProductAttentionOp):
                 grad_key, grad_value = fused_op_grad_extra_inputs[0]
             elif isinstance(op, BiasSwigluOp) or isinstance(op, BiasGeluOp) or isinstance(op, BiasGegluOp):
                 grad_bias = fused_op_grad_extra_inputs[0][0]

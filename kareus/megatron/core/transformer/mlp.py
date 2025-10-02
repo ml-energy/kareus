@@ -21,9 +21,9 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
-from kareus.megatron.core.extensions.bias_geglu_op import BiasGegluOp
-from kareus.megatron.core.extensions.bias_gelu_op import BiasGeluOp
+from kareus.megatron.core.extensions.ops import BiasSwigluOp
+from kareus.megatron.core.extensions.ops import BiasGegluOp
+from kareus.megatron.core.extensions.ops import BiasGeluOp
 
 
 # pylint: disable=missing-class-docstring

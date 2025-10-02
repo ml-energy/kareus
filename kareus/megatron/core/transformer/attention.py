@@ -54,8 +54,8 @@ import transformer_engine  # pylint: disable=unused-import
 
 HAVE_TE = True
 from transformer_engine.pytorch.ops.fuser import OperationFuser
-from kareus.megatron.core.extensions.qkv_postprocess_op import QKVPostProcessOp, create_qkv_postprocess_op
-from kareus.megatron.core.extensions.rotary_embedding_op import RotaryEmbeddingOp, create_rotary_embedding_op
+from kareus.megatron.core.extensions.ops import QKVPostProcessOp, create_qkv_postprocess_op
+from kareus.megatron.core.extensions.ops import RotaryEmbeddingOp, create_rotary_embedding_op
 # except ImportError:
 #     HAVE_TE = False
 #     SplitAlongDim = None

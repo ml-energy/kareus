@@ -134,7 +134,6 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
                     )
                 else:
                     extra_kwargs["cp_comm_type"] = cp_comm_type
-            extra_kwargs["cp_size"] = self.config.context_parallel_size
 
         if self.config.deterministic_mode:
             if int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")) != 0:
@@ -297,6 +296,7 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
 
         ctx = basic_op_ctxs[0]
         if value.shape == key.shape and value.shape[1] == 1 and value.stride() != key.stride():
+            print("Modify value stride")
             ctx.modify_value_stride = True
             ctx.value_shape = value.shape
             ctx.value_stride = value.stride()
