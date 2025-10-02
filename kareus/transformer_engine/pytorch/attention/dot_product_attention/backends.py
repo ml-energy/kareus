@@ -67,6 +67,8 @@ def flash_attention_forward(
     query_layer: torch.Tensor,
     key_layer: torch.Tensor,
     value_layer: torch.Tensor,
+    key_layer_gathered: Optional[torch.Tensor] = None,
+    value_layer_gathered: Optional[torch.Tensor] = None,
     attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
     qkv_layout: str = "sbh3d",
     cu_seqlens_q: Optional[torch.Tensor] = None,
@@ -185,7 +187,11 @@ def flash_attention_forward(
     if inference_params is None:
         if qkv_format in ["sbhd", "bshd"]:
             batch_size = query_layer.shape[0]
-            max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
+            max_seqlen_q = query_layer.shape[1]
+            if context_parallel:
+                max_seqlen_kv = key_layer.shape[0]
+            else:
+                max_seqlen_kv = key_layer.shape[1]
             max_seqlen_q *= cp_size
             max_seqlen_kv *= cp_size
 
@@ -309,6 +315,8 @@ def flash_attention_forward(
                 query_layer,
                 key_layer,
                 value_layer,
+                key_layer_gathered,
+                value_layer_gathered,
                 cu_seqlens_q,
                 cu_seqlens_kv,
                 max_seqlen_q,

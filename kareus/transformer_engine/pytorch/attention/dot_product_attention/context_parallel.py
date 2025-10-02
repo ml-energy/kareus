@@ -43,7 +43,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
 )
 
-from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import K_AG, V_AG
+import kareus.transformer_engine.pytorch.ops as ops
 
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
@@ -259,6 +259,7 @@ def _attn_cp_kv_allgather_compute(
     """
     # from _attn_cp_kv_allgather_preprocess
     # [b, s, np, hn] -> [b, 2, s//2, np, hn] or [s, b, np, hn] -> [2, s//2, b, np, hn]
+    seq_dim = qkv_format.index("s")
     q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
 
     qkv_dtype = q.dtype
@@ -275,7 +276,7 @@ def _attn_cp_kv_allgather_compute(
     ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
     assert qkv_format != "thd", f"{qkv_format} format is not supported!"
     qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
-    seq_dim = qkv_format.index("s")
+    # seq_dim = qkv_format.index("s")
 
     # scale seqlen info for CP
     max_seqlen_q = max_seqlen_q // (2 * cp_size)
@@ -772,7 +773,8 @@ def AttnFuncWithCPAndKVAllGather_backward(ctx, dout):
     nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
     # k_ag, v_ag = _attn_cp_kv_allgather_bwd_gather(ctx)
-    k_ag, v_ag = K_AG, V_AG
+    # Use global variables from ops module
+    k_ag, v_ag = ops.K_AG, ops.V_AG
     dq, dk, dv = _attn_cp_kv_allgather_bwd_pre_reduce(
         ctx, dout, k_ag, v_ag, 
     )
@@ -780,9 +782,9 @@ def AttnFuncWithCPAndKVAllGather_backward(ctx, dout):
     # dk, dv = _attn_cp_kv_allgather_bwd_reduce_scatter(ctx, dk_pre_rs, dv_pre_rs)
     # dq, dk, dv = _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv)
 
-    global K_AG, V_AG
-    K_AG = None
-    V_AG = None
+    # Clear global variables after use
+    ops.K_AG = None
+    ops.V_AG = None
     
     nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
@@ -936,11 +938,11 @@ def attn_forward_func_with_cp(
         k_ag,
         v_ag,
         cu_seqlens_q,
-        cu_seqlens_kv,
+        # cu_seqlens_kv,
         max_seqlen_q,
         max_seqlen_kv,
         cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
+        # cu_seqlens_kv_padded,
         dropout_p,
         softmax_scale,
         qkv_format,
@@ -950,6 +952,9 @@ def attn_forward_func_with_cp(
         deterministic,
         use_fused_attention,
     ]
+
+    if k_ag is None or v_ag is None:
+        raise ValueError("k_ag and v_ag should be provided when using context parallelism!")
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:
         raise NotImplementedError(f"Not supported cp_comm_type: {cp_comm_type}")
@@ -965,8 +970,8 @@ def attn_forward_func_with_cp(
         # ]
         # out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
-        args.pop(5)
-        args.pop(8)
+        # args.pop(5)
+        # args.pop(8)
         args += [window_size, cp_group, cp_stream, use_flash_attn_3]
         out = AttnFuncWithCPAndKVAllGather_forward(*args)
     elif cp_comm_type == "a2a":

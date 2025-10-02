@@ -134,8 +134,10 @@ class ReduceScatterKV(BasicOperation):
         chunk_len = k.size(0) // self.world_size
         start = int(self.rank) * chunk_len
         end = start + chunk_len
-        self.input_buffer_k[start:end].copy_(k[start:end])
-        self.input_buffer_v[start:end].copy_(v[start:end])
+        # self.input_buffer_k[start:end].copy_(k[start:end])
+        # self.input_buffer_v[start:end].copy_(v[start:end])
+        self.input_buffer_k.copy_(k)
+        self.input_buffer_v.copy_(v)
         new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
         new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
         return self.output_buffer_k[start:end], self.output_buffer_v[start:end]

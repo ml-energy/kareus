@@ -105,12 +105,14 @@ class AllGatherKV(BasicOperation):
         sm_num: Optional[int] = None,
         block_size: Optional[int] = None,
         backward: bool = False,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        if torch.distributed.get_world_size(self.process_group) == 1:
-            return input_
+        global K_AG, V_AG
 
         k = input_
+        if torch.distributed.get_world_size(self.process_group) == 1:
+            return k, v
+        
         if isinstance(k, QuantizedTensor):
             k = k.dequantize()
         k = k.contiguous()
@@ -124,14 +126,12 @@ class AllGatherKV(BasicOperation):
                 k_out, v_out = self._nccl_all_gather_kv(k, v)
                 self.backend = "nccl"
                 if backward:
-                    global K_AG, V_AG
                     K_AG = k_out
                     V_AG = v_out
                 return k_out, v_out
             if self.use_persistent_output:
                 k_out, v_out = self._msccl_all_gather_kv(k, v, sm_num, block_size)
                 if backward:
-                    global K_AG, V_AG
                     K_AG = k_out
                     V_AG = v_out
                 return k_out, v_out
