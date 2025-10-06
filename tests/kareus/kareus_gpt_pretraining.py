@@ -21,7 +21,8 @@ import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf, open_dict
 
 import sys
-sys.path.append("/workspaces/Kareus")
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
 from nemo.collections.nlp.parts.megatron_trainer_builder import MegatronTrainerBuilder
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
