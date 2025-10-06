@@ -146,16 +146,18 @@ def flash_attention_forward(
                 #     ]
             else:
                 if context_parallel:
+                    # Only transpose Q because KV will be allgathered along seq dim
                     query_layer = query_layer.transpose(0, 1).contiguous()
                 else:
                     query_layer, key_layer, value_layer = [
                         x.transpose(0, 1).contiguous()
                         for x in (query_layer, key_layer, value_layer)
                     ]
-        else:
-            raise NotImplementedError(f"qkv_format: {qkv_format} is not supported in FlashAttention.")
-        # elif q_format == "sbhd" and kv_format == "bshd":
-        #     query_layer = query_layer.transpose(0, 1).contiguous()
+        # else:
+        #     raise NotImplementedError(f"qkv_format: {qkv_format} is not supported in FlashAttention.")
+        elif q_format == "sbhd" and kv_format == "bshd":
+            raise NotImplementedError("FlashAttention does not support q_format == sbhd and kv_format == bshd.")
+            # query_layer = query_layer.transpose(0, 1).contiguous()
         # if context_parallel:
         #     query_layer, key_layer, value_layer = [
         #         x.contiguous() for x in (query_layer, key_layer, value_layer)
@@ -539,14 +541,16 @@ def flash_attention_forward(
         else:
             ctx.original_output_shape = output.shape
             output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
-    else:
-        raise NotImplementedError("FlashAttention does not support q_format != sbhd.")
-    # elif q_format == "bshd":
-    #     # (bs)hd -> bs(hd)
-    #     output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
-    # elif q_format == "thd":
-    #     # thd -> t(hd)
-    #     output = output.reshape(output.shape[0], -1)
+    # else:
+    #     raise NotImplementedError("FlashAttention does not support q_format != sbhd.")
+    elif q_format == "bshd":
+        # (bs)hd -> bs(hd)
+        ctx.original_output_shape = tuple(output.shape)
+        output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
+    elif q_format == "thd":
+        raise NotImplementedError("FlashAttention does not support q_format == thd.")
+        # # thd -> t(hd)
+        # output = output.reshape(output.shape[0], -1)
 
     return output.contiguous() 
 
@@ -564,8 +568,11 @@ def flash_attention_backward(
         grad_output_transformed = grad_output.transpose(0, 1).contiguous()
         original_shape = ctx.original_output_shape
         grad_output_transformed = grad_output_transformed.view(original_shape)
+    elif q_format == "bshd":
+        original_shape = ctx.original_output_shape
+        grad_output_transformed = grad_output_transformed.reshape(original_shape)
     else:
-        raise NotImplementedError("FlashAttention only supports q_format == 'sbhd'.")
+        raise NotImplementedError("FlashAttention only supports q_format == 'sbhd' or 'bshd'.")
 
     # Step 2: Call the appropriate FlashAttention backward function
     if context_parallel:

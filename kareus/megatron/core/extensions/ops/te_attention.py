@@ -295,16 +295,23 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         key, value= basic_op_extra_inputs[0]
 
         ctx = basic_op_ctxs[0]
-        if value.shape == key.shape and value.shape[1] == 1 and value.stride() != key.stride():
-            print("Modify value stride")
-            ctx.modify_value_stride = True
-            ctx.value_shape = value.shape
-            ctx.value_stride = value.stride()
-            ctx.value_offset = value.storage_offset()
-            value = value.as_strided(value.shape, key.stride())
+        ctx.modify_value_stride = False
+        if self.config.apply_rope_fusion:
+            self.qkv_format = 'bshd'
+            if self.config.context_parallel_size > 1:
+                # Only transpose Q because KV will be allgathered along seq dim
+                input_ = input_.transpose(0, 1).contiguous()
+            else:
+                input_, key, value = [x.transpose(0, 1).contiguous() for x in (input_, key, value)]
+
+            if value.shape == key.shape and value.shape[1] == 1 and value.stride() != key.stride():
+                ctx.modify_value_stride = True
+                ctx.value_shape = value.shape
+                ctx.value_stride = value.stride()
+                ctx.value_offset = value.storage_offset()
+                value = value.as_strided(value.shape, key.stride())
+            
             basic_op_extra_inputs[0] = (key, value)
-        else:
-            ctx.modify_value_stride = False
 
         return super().fuser_forward(
             basic_op_ctxs=basic_op_ctxs,
@@ -336,5 +343,12 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         if ctx.modify_value_stride:
             grad_key, grad_value = grad_extra_inputs[0]
             grad_extra_inputs[0] = (grad_key, grad_value.as_strided(ctx.value_shape, ctx.value_stride, storage_offset=ctx.value_offset))
+        
+        if self.config.apply_rope_fusion:
+            if self.config.context_parallel_size > 1:
+                grad_input = grad_input.transpose(0, 1).contiguous()
+            else:
+                grad_key, grad_value = grad_extra_inputs[0]
+                grad_extra_inputs[0] = (grad_key.transpose(0, 1).contiguous(), grad_value.transpose(0, 1).contiguous())
 
         return grad_input, grad_params, grad_extra_inputs
