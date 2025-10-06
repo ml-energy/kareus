@@ -252,26 +252,27 @@ class AllReduceManager:
             self.group_rank = sub_rank
             self.group_size = sub_world_size
 
-        if self.stream is None:
-            self.stream = torch.cuda.Stream()
+        global SHARED_COMM_STREAM
+        if SHARED_COMM_STREAM is None:
+            SHARED_COMM_STREAM = torch.cuda.Stream()
+        self.stream = SHARED_COMM_STREAM
 
         cast_to_fp16 = False
         if input_tensor.dtype == torch.bfloat16:
             cast_to_fp16 = True
 
         self.subgroup = sub_group
-        group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
+        if need_reinit and self.algo is None:
+            group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
-        if cast_to_fp16:
-            input_work = input_tensor.to(torch.float16)
-        else:
-            input_work = input_tensor
+            new_size = list(input_tensor.size())
+            input_work = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
 
-        cp_in = _dlpack_view(input_work)
+            cp_in = _dlpack_view(input_work)
 
-        self.algo = MscclppAllReduce1(group_obj, cp_in)
-        self.output_tensor = input_tensor
-        self.input_tensor = input_tensor
+            self.algo = MscclppAllReduce1(group_obj, cp_in)
+            self.output_tensor = input_tensor
+            self.input_tensor = input_tensor
 
     def __call__(self, nblocks: int, block_size: int) -> torch.Tensor:
         if self.algo is None or self.stream is None or self.output_tensor is None:
@@ -361,8 +362,10 @@ class AllGatherManager:
             self.group_rank = sub_rank
             self.group_size = sub_world_size
 
-        if self.stream is None:
-            self.stream = torch.cuda.Stream()
+        global SHARED_COMM_STREAM
+        if SHARED_COMM_STREAM is None:
+            SHARED_COMM_STREAM = torch.cuda.Stream()
+        self.stream = SHARED_COMM_STREAM
 
         cast_to_fp16 = False
         if input_tensor.dtype == torch.bfloat16:
@@ -493,37 +496,38 @@ class ReduceScatterManager:
             self.group_rank = sub_rank
             self.group_size = sub_world_size
 
-        if self.stream is None:
-            self.stream = torch.cuda.Stream()
+        global SHARED_COMM_STREAM
+        if SHARED_COMM_STREAM is None:
+            SHARED_COMM_STREAM = torch.cuda.Stream()
+        self.stream = SHARED_COMM_STREAM
 
         cast_to_fp16 = False
         if input_tensor.dtype == torch.bfloat16:
             cast_to_fp16 = True
 
         self.subgroup = sub_group
-        group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
+        if need_reinit and self.algo is None:
+            group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
-        if cast_to_fp16:
-            work_buf = input_tensor.to(torch.float16)
-        else:
-            work_buf = input_tensor
+            new_size = list(input_tensor.size())
+            work_buf = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
 
-        cp_mem = _dlpack_view(work_buf)
+            cp_mem = _dlpack_view(work_buf)
 
-        if nranks_per_node <= 0:
-            nranks_per_node = self.group_size if self.group_size is not None else 0
-        self.use_torch_single_node = (nranks_per_node == self.group_size)
+            if nranks_per_node <= 0:
+                nranks_per_node = self.group_size if self.group_size is not None else 0
+            self.use_torch_single_node = (nranks_per_node == self.group_size)
 
-        if self.use_torch_single_node:
-            self.algo = MscclppReduceScatter(group_obj, cp_mem, nranks_per_node, None)
-            self.proxy_service = None
-        else:
-            if self.proxy_service is None:
-                self.proxy_service = ProxyService()
-            self.algo = MscclppReduceScatter(group_obj, cp_mem, nranks_per_node, self.proxy_service)
+            if self.use_torch_single_node:
+                self.algo = MscclppReduceScatter(group_obj, cp_mem, nranks_per_node, None)
+                self.proxy_service = None
+            else:
+                if self.proxy_service is None:
+                    self.proxy_service = ProxyService()
+                self.algo = MscclppReduceScatter(group_obj, cp_mem, nranks_per_node, self.proxy_service)
 
-        self.output_tensor = input_tensor
-        self.input_tensor = input_tensor
+            self.output_tensor = input_tensor
+            self.input_tensor = input_tensor
 
     def __call__(self, nblocks: int, block_size: int, pipeline_depth: int = 3) -> torch.Tensor:
         if self.algo is None or self.stream is None or self.output_tensor is None:
@@ -573,6 +577,9 @@ _AR_MANAGER: AllReduceManager = AllReduceManager()
 _AG_MANAGER: AllGatherManager = AllGatherManager()
 _RS_MANAGER: ReduceScatterManager = ReduceScatterManager()
 
+
+# Shared communication stream for all collectives
+SHARED_COMM_STREAM: Optional[torch.cuda.Stream] = None
 
 # Exposed streams for compatibility with callers expecting module attributes
 AR_COMM_STREAM: Optional[torch.cuda.Stream] = None
@@ -645,10 +652,11 @@ def msccl_cleanup():
     _AG_MANAGER.cleanup()
     _RS_MANAGER.cleanup()
     # Clear exposed streams
-    global AR_COMM_STREAM, AG_COMM_STREAM, RS_COMM_STREAM
+    global AR_COMM_STREAM, AG_COMM_STREAM, RS_COMM_STREAM, SHARED_COMM_STREAM
     AR_COMM_STREAM = None
     AG_COMM_STREAM = None
     RS_COMM_STREAM = None
+    SHARED_COMM_STREAM = None
     # Free CuPy memory pools to drop device allocations
     try:
         cp.get_default_memory_pool().free_all_blocks()
