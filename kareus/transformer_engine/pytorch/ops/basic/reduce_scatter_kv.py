@@ -10,14 +10,14 @@ from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 
 import kareus.msccl.msccl_comm as new_msccl_comm
 
+K_RS: list[torch.Tensor | None] = [None, None]
+V_RS: list[torch.Tensor | None] = [None, None]
 
-class ReduceScatterKV(BasicOperation):
+class ReduceScatterKV():
     """Reduce-scatter tensor along outer dimension.
 
     Optionally uses MSCCl persistent buffers via kareus.msccl.msccl_comm.
     """
-    num_extra_inputs: int = 1
-    num_extra_outputs: int = 1
 
     def __init__(
         self,
@@ -26,17 +26,20 @@ class ReduceScatterKV(BasicOperation):
         backend: str = "nccl",
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
-        use_persistent_output: bool = False,
-        input_buffer_k: Optional[torch.Tensor] = None,
-        input_buffer_v: Optional[torch.Tensor] = None,
         nranks_per_node: int = 0,
+        batch_idx: int = 0,
+        tensor_size: Optional[list[int]] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.async_op: bool = async_op
         self.backend: str = backend
-        self.use_persistent_output: bool = use_persistent_output
+        self.batch_idx: int = batch_idx
         self.nranks_per_node: int = nranks_per_node
+        self.batch_idx: int = batch_idx
+
         # Cache rank/world_size for offset computations
         if rank:
             self.rank: Optional[int] = rank
@@ -56,31 +59,35 @@ class ReduceScatterKV(BasicOperation):
         self.wait_event = torch.cuda.Event()
 
         if self.backend == "msccl":
-            if self.use_persistent_output:
-                assert input_buffer_k is not None, "input_buffer_k must be provided when use_persistent_output is True"
-                assert input_buffer_v is not None, "input_buffer_v must be provided when use_persistent_output is True"
-                self.output_buffer_k = input_buffer_k
-                self.output_buffer_v = input_buffer_v
-                self.input_buffer_k = input_buffer_k
-                self.input_buffer_v = input_buffer_v
-                new_msccl_comm.msccl_ReduceScatter_init(
-                    self.rank,
-                    self.world_size,
-                    self.input_buffer_k,
-                    self.process_group,
-                    self.nranks_per_node,
+            global K_RS, V_RS
+            if K_RS[self.batch_idx] is None:
+                K_RS[self.batch_idx] = torch.empty(
+                    *tensor_size, dtype=dtype, device=device,
                 )
-                new_msccl_comm.msccl_ReduceScatter_init(
-                    self.rank,
-                    self.world_size,
-                    self.input_buffer_v,
-                    self.process_group,
-                    self.nranks_per_node,
+            if V_RS[self.batch_idx] is None:
+                V_RS[self.batch_idx] = torch.empty(
+                    *tensor_size, dtype=dtype, device=device,
                 )
-                self.comm_stream = new_msccl_comm.RS_COMM_STREAM
-            else:
-                raise NotImplementedError("use_persistent_output is not supported for msccl backend")
-    
+            self.input_buffer_k = K_RS[self.batch_idx]
+            self.input_buffer_v = V_RS[self.batch_idx]
+            self.output_buffer_k = K_RS[self.batch_idx]
+            self.output_buffer_v = V_RS[self.batch_idx]
+            new_msccl_comm.msccl_ReduceScatter_init(
+                self.rank,
+                self.world_size,
+                self.input_buffer_k,
+                self.process_group,
+                self.nranks_per_node,
+            )
+            new_msccl_comm.msccl_ReduceScatter_init(
+                self.rank,
+                self.world_size,
+                self.input_buffer_v,
+                self.process_group,
+                self.nranks_per_node,
+            )
+            self.comm_stream = new_msccl_comm.RS_COMM_STREAM
+
     def set_stream(self, stream: torch.cuda.Stream):
         self.comm_stream = stream
     
@@ -102,30 +109,27 @@ class ReduceScatterKV(BasicOperation):
         next_op: Optional[BasicOperation] = None,
         sm_num: Optional[int] = None,
         block_size: Optional[int] = None,
-    ) -> torch.Tensor:
+        backward: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        if torch.distributed.get_world_size(self.process_group) == 1:
-            return input_
+        global K_RS, V_RS
 
         k = input_
-        if isinstance(k, QuantizedTensor):
-            k = k.dequantize()
-        k = k.contiguous()
-        if isinstance(v, QuantizedTensor):
-            v = v.dequantize()
-        v = v.contiguous()
+        if self.world_size == 1:
+            return k, v
 
         if self.backend == "msccl":
             if sm_num is None or block_size is None:
                 # Fallback to NCCL reduce_scatter
                 k_out, v_out = self._nccl_reduce_scatter_kv(k, v)
                 self.backend = "nccl"
-                return k_out, v_out
-            if self.use_persistent_output:
-                k_out, v_out = self._msccl_reduce_scatter_kv(k, v, sm_num, block_size)
+                if backward:
+                    K_RS[self.batch_idx] = k_out
+                    V_RS[self.batch_idx] = v_out
                 return k_out, v_out
             else:
-                raise NotImplementedError("use_persistent_output is not supported for msccl backend")
+                k_out, v_out = self._msccl_reduce_scatter_kv(k, v, sm_num, block_size)
+                return k_out, v_out
         else:
             k_out, v_out = self._nccl_reduce_scatter_kv(k, v)
             return k_out, v_out
@@ -134,8 +138,6 @@ class ReduceScatterKV(BasicOperation):
         chunk_len = k.size(0) // self.world_size
         start = int(self.rank) * chunk_len
         end = start + chunk_len
-        # self.input_buffer_k[start:end].copy_(k[start:end])
-        # self.input_buffer_v[start:end].copy_(v[start:end])
         self.input_buffer_k.copy_(k)
         self.input_buffer_v.copy_(v)
         new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
@@ -198,4 +200,3 @@ class ReduceScatterKV(BasicOperation):
         )
 
         return k, [(v,)]
-

@@ -10,16 +10,14 @@ from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 
 import kareus.msccl.msccl_comm as new_msccl_comm
 
-K_AG = None
-V_AG = None
+K_AG: list[torch.Tensor | None] = [None, None]
+V_AG: list[torch.Tensor | None] = [None, None]
 
-class AllGatherKV(BasicOperation):
+class AllGatherKV():
     """All-gather tensor along outer dimension.
 
     Optionally uses MSCCl persistent buffers via kareus.msccl.msccl_comm.
     """
-    num_extra_inputs: int = 1
-    num_extra_outputs: int = 1
 
     def __init__(
         self,
@@ -28,17 +26,19 @@ class AllGatherKV(BasicOperation):
         backend: str = "nccl",
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
-        use_persistent_output: bool = False,
-        input_buffer_k: Optional[torch.Tensor] = None,
-        input_buffer_v: Optional[torch.Tensor] = None,
         nranks_per_node: int = 0,
+        batch_idx: int = 0,
+        tensor_size: Optional[list[int]] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.async_op: bool = async_op
         self.backend: str = backend
-        self.use_persistent_output: bool = use_persistent_output
         self.nranks_per_node: int = nranks_per_node
+        self.batch_idx: int = batch_idx
+
         # Cache rank/world_size for offset computations
         if rank:
             self.rank: Optional[int] = rank
@@ -57,31 +57,35 @@ class AllGatherKV(BasicOperation):
         self._work_handles: List[torch.distributed.Work] = []
         self.wait_event = torch.cuda.Event()
 
+        global K_AG, V_AG
         if self.backend == "msccl":
-            if self.use_persistent_output:
-                assert input_buffer_k is not None, "input_buffer_k must be provided when use_persistent_output is True"
-                assert input_buffer_v is not None, "input_buffer_v must be provided when use_persistent_output is True"
-                self.output_buffer_k = input_buffer_k
-                self.output_buffer_v = input_buffer_v
-                self.input_buffer_k = input_buffer_k
-                self.input_buffer_v = input_buffer_v
-                new_msccl_comm.msccl_AllGather_init(
-                    self.rank,
-                    self.world_size,
-                    self.input_buffer_k,
-                    self.process_group,
-                    self.nranks_per_node,
+            if K_AG[self.batch_idx] is None:
+                K_AG[self.batch_idx] = torch.empty(
+                    *tensor_size, dtype=dtype, device=device,
                 )
-                new_msccl_comm.msccl_AllGather_init(
-                    self.rank,
-                    self.world_size,
-                    self.input_buffer_v,
-                    self.process_group,
-                    self.nranks_per_node,
+            if V_AG[self.batch_idx] is None:
+                V_AG[self.batch_idx] = torch.empty(
+                    *tensor_size, dtype=dtype, device=device,
                 )
-                self.comm_stream = new_msccl_comm.AG_COMM_STREAM
-            else:
-                raise NotImplementedError("use_persistent_output is not supported for msccl backend")
+            self.input_buffer_k = K_AG[self.batch_idx]
+            self.input_buffer_v = V_AG[self.batch_idx]
+            self.output_buffer_k = K_AG[self.batch_idx]
+            self.output_buffer_v = V_AG[self.batch_idx]
+            new_msccl_comm.msccl_AllGather_init(
+                self.rank,
+                self.world_size,
+                self.input_buffer_k,
+                self.process_group,
+                self.nranks_per_node,
+            )
+            new_msccl_comm.msccl_AllGather_init(
+                self.rank,
+                self.world_size,
+                self.input_buffer_v,
+                self.process_group,
+                self.nranks_per_node,
+            )
+            self.comm_stream = new_msccl_comm.AG_COMM_STREAM
     
     def set_stream(self, stream: torch.cuda.Stream):
         self.comm_stream = stream
@@ -110,15 +114,8 @@ class AllGatherKV(BasicOperation):
         global K_AG, V_AG
 
         k = input_
-        if torch.distributed.get_world_size(self.process_group) == 1:
+        if self.world_size == 1:
             return k, v
-        
-        if isinstance(k, QuantizedTensor):
-            k = k.dequantize()
-        k = k.contiguous()
-        if isinstance(v, QuantizedTensor):
-            v = v.dequantize()
-        v = v.contiguous()
 
         if self.backend == "msccl":
             if sm_num is None or block_size is None:
@@ -126,17 +123,15 @@ class AllGatherKV(BasicOperation):
                 k_out, v_out = self._nccl_all_gather_kv(k, v)
                 self.backend = "nccl"
                 if backward:
-                    K_AG = k_out
-                    V_AG = v_out
-                return k_out, v_out
-            if self.use_persistent_output:
-                k_out, v_out = self._msccl_all_gather_kv(k, v, sm_num, block_size)
-                if backward:
-                    K_AG = k_out
-                    V_AG = v_out
+                    K_AG[self.batch_idx] = k_out
+                    V_AG[self.batch_idx] = v_out
                 return k_out, v_out
             else:
-                raise NotImplementedError("use_persistent_output is not supported for msccl backend")
+                k_out, v_out = self._msccl_all_gather_kv(k, v, sm_num, block_size)
+                # if backward:
+                #     K_AG[self.batch_idx] = k_out
+                #     V_AG[self.batch_idx] = v_out
+                return k_out, v_out
         else:
             k_out, v_out = self._nccl_all_gather_kv(k, v)
             return k_out, v_out
@@ -206,6 +201,3 @@ class AllGatherKV(BasicOperation):
         )
 
         return k, [(v,)]
-        
-
-
