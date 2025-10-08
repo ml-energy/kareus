@@ -122,7 +122,7 @@ class AllGatherKV():
                 # Fallback to NCCL all_gather
                 k_out, v_out = self._nccl_all_gather_kv(k, v)
                 self.backend = "nccl"
-                if backward:
+                if not backward:
                     K_AG[self.batch_idx] = k_out
                     V_AG[self.batch_idx] = v_out
                 return k_out, v_out
@@ -140,8 +140,14 @@ class AllGatherKV():
         local_len = k.size(0)
         start = int(self.rank) * local_len
         end = start + local_len
-        self.input_buffer_k[start:end].copy_(k)
-        self.input_buffer_v[start:end].copy_(v)
+        self.input_buffer_k[start:end].copy_(k, non_blocking=False)
+
+        current_stream = torch.cuda.current_stream()
+        self.event_record(current_stream)
+        self.event_wait()
+
+        self.input_buffer_v[start:end].copy_(v, non_blocking=False)
+        
         new_msccl_comm.msccl_AllGather(sm_num, block_size)
         new_msccl_comm.msccl_AllGather(sm_num, block_size)
         return self.output_buffer_k, self.output_buffer_v

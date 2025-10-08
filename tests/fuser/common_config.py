@@ -12,6 +12,8 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 class FuserTestConfig:
     """Configuration factory for fuser test scripts."""
+
+    MODEL_NAME = "llama3.1b"
     
     # Default model dimensions (Llama-like)
     HIDDEN_SIZE = 2048
@@ -25,6 +27,8 @@ class FuserTestConfig:
     
     # Default test parameters
     DEFAULT_WORLD_SIZE = 2
+    DEFAULT_TENSOR_PARALLEL_SIZE = 2
+    DEFAULT_CONTEXT_PARALLEL_SIZE = 2
     DEFAULT_BATCH_SIZE = 16
     DEFAULT_SEQ_LENGTH = 4096
 
@@ -61,12 +65,15 @@ class FuserTestConfig:
     
     @staticmethod
     def create_transformer_config(
-        world_size: int,
+        context_parallel_size: int = None,
+        tensor_parallel_size: int = None,
+        # world_size: int,
         dtype: torch.dtype = torch.bfloat16,
         # Model architecture parameters
         num_layers: int = 1,
         hidden_size: int = None,
         num_attention_heads: int = None,
+        head_dim: int = None,
         num_query_groups: int = None,
         ffn_hidden_size: int = None,
         vocab_size: int = None,
@@ -101,10 +108,16 @@ class FuserTestConfig:
             TransformerConfig instance
         """
         # Use class defaults if not provided
+        if context_parallel_size is None:
+            context_parallel_size = FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE
+        if tensor_parallel_size is None:
+            tensor_parallel_size = FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE
         if hidden_size is None:
             hidden_size = FuserTestConfig.HIDDEN_SIZE
         if num_attention_heads is None:
             num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
+        if head_dim is None:
+            head_dim = FuserTestConfig.HEAD_DIM
         if num_query_groups is None:
             num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
         if ffn_hidden_size is None:
@@ -113,13 +126,12 @@ class FuserTestConfig:
             vocab_size = FuserTestConfig.VOCAB_SIZE
         if drop_rate is None:
             drop_rate = FuserTestConfig.DROP_RATE
-        if num_layers is None:
-            num_layers = FuserTestConfig.NUM_LAYERS
             
         config_params = {
             'num_layers': num_layers,
             'hidden_size': hidden_size,
             'num_attention_heads': num_attention_heads,
+            'kv_channels': head_dim,
             'num_query_groups': num_query_groups,
             'ffn_hidden_size': ffn_hidden_size,
             'layernorm_epsilon': layernorm_epsilon,
@@ -131,7 +143,8 @@ class FuserTestConfig:
             'flash_decode': flash_decode,
             'apply_rope_fusion': apply_rope_fusion,
             'params_dtype': dtype,
-            'tensor_model_parallel_size': world_size,
+            'tensor_model_parallel_size': tensor_parallel_size,
+            'context_parallel_size': context_parallel_size,
             'add_bias_linear': add_bias_linear,
         }
         
@@ -157,19 +170,21 @@ class FuserTestConfig:
         return TransformerConfig(**config_params)
     
     @staticmethod
-    def create_attention_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_attention_config(context_parallel_size: int = None, tensor_parallel_size: int = None, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
         """Create config optimized for attention tests."""
         return FuserTestConfig.create_transformer_config(
-            world_size=world_size,
+            context_parallel_size=context_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             **kwargs
         )
     
     @staticmethod
-    def create_mlp_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_mlp_config(context_parallel_size: int = None, tensor_parallel_size: int = None, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
         """Create config optimized for MLP tests."""
         return FuserTestConfig.create_transformer_config(
-            world_size=world_size,
+            context_parallel_size=context_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             gated_linear_unit=True,
             activation_func=F.silu,
@@ -178,20 +193,22 @@ class FuserTestConfig:
         )
     
     @staticmethod
-    def create_postprocess_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_postprocess_config(context_parallel_size: int = None, tensor_parallel_size: int = None, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
         """Create config optimized for postprocess tests."""
         return FuserTestConfig.create_transformer_config(
-            world_size=world_size,
+            context_parallel_size=context_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             use_cpu_initialization=True,
             **kwargs
         )
     
     @staticmethod
-    def create_loss_config(world_size: int, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
+    def create_loss_config(context_parallel_size: int = None, tensor_parallel_size: int = None, dtype: torch.dtype = torch.bfloat16, **kwargs) -> TransformerConfig:
         """Create config optimized for loss computation tests."""
         return FuserTestConfig.create_transformer_config(
-            world_size=world_size,
+            context_parallel_size=context_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             cross_entropy_loss_fusion=True,
             cross_entropy_fusion_impl='te',

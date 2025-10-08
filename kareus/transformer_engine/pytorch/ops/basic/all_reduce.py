@@ -111,10 +111,12 @@ class AllReduce(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
+        *,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
         sm_num: Optional[int] = None,
         block_size: Optional[int] = None,
+        backward: bool = False,
     ) -> torch.Tensor:
 
         # Trivial case

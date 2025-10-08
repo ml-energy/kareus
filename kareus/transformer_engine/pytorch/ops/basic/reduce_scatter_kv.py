@@ -12,6 +12,8 @@ import kareus.msccl.msccl_comm as new_msccl_comm
 
 K_RS: list[torch.Tensor | None] = [None, None]
 V_RS: list[torch.Tensor | None] = [None, None]
+K_RS_BUFFER: list[torch.Tensor | None] = [None, None]
+V_RS_BUFFER: list[torch.Tensor | None] = [None, None]
 
 class ReduceScatterKV():
     """Reduce-scatter tensor along outer dimension.
@@ -59,19 +61,19 @@ class ReduceScatterKV():
         self.wait_event = torch.cuda.Event()
 
         if self.backend == "msccl":
-            global K_RS, V_RS
-            if K_RS[self.batch_idx] is None:
-                K_RS[self.batch_idx] = torch.empty(
+            global K_RS_BUFFER, V_RS
+            if K_RS_BUFFER[self.batch_idx] is None:
+                K_RS_BUFFER[self.batch_idx] = torch.empty(
                     *tensor_size, dtype=dtype, device=device,
                 )
-            if V_RS[self.batch_idx] is None:
-                V_RS[self.batch_idx] = torch.empty(
+            if V_RS_BUFFER[self.batch_idx] is None:
+                V_RS_BUFFER[self.batch_idx] = torch.empty(
                     *tensor_size, dtype=dtype, device=device,
                 )
-            self.input_buffer_k = K_RS[self.batch_idx]
-            self.input_buffer_v = V_RS[self.batch_idx]
-            self.output_buffer_k = K_RS[self.batch_idx]
-            self.output_buffer_v = V_RS[self.batch_idx]
+            self.input_buffer_k = K_RS_BUFFER[self.batch_idx]
+            self.input_buffer_v = V_RS_BUFFER[self.batch_idx]
+            self.output_buffer_k = K_RS_BUFFER[self.batch_idx]
+            self.output_buffer_v = V_RS_BUFFER[self.batch_idx]
             new_msccl_comm.msccl_ReduceScatter_init(
                 self.rank,
                 self.world_size,
@@ -115,6 +117,10 @@ class ReduceScatterKV():
         global K_RS, V_RS
 
         k = input_
+        if backward:
+            k = K_RS[self.batch_idx]
+            v = V_RS[self.batch_idx]
+
         if self.world_size == 1:
             return k, v
 
@@ -123,9 +129,6 @@ class ReduceScatterKV():
                 # Fallback to NCCL reduce_scatter
                 k_out, v_out = self._nccl_reduce_scatter_kv(k, v)
                 self.backend = "nccl"
-                if backward:
-                    K_RS[self.batch_idx] = k_out
-                    V_RS[self.batch_idx] = v_out
                 return k_out, v_out
             else:
                 k_out, v_out = self._msccl_reduce_scatter_kv(k, v, sm_num, block_size)
@@ -138,8 +141,14 @@ class ReduceScatterKV():
         chunk_len = k.size(0) // self.world_size
         start = int(self.rank) * chunk_len
         end = start + chunk_len
-        self.input_buffer_k.copy_(k)
-        self.input_buffer_v.copy_(v)
+        self.input_buffer_k.copy_(k, non_blocking=False)
+
+        current_stream = torch.cuda.current_stream()
+        self.event_record(current_stream)
+        self.event_wait()
+
+        self.input_buffer_v.copy_(v, non_blocking=False)
+
         new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
         new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
         return self.output_buffer_k[start:end], self.output_buffer_v[start:end]
