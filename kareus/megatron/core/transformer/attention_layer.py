@@ -25,6 +25,9 @@ from megatron.core.parallel_state import (
 from kareus.utils.debug import save_tensors
 from kareus.transformer_engine.pytorch.ops import AllReduce
 from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.attn_oproj_fuser import AttnOprojPartitionFuser
+from kareus.megatron.core.extensions.qkv_fuser import QKVPartitionFuser
+from kareus.megatron.core.extensions.qkv_fuser2 import QKVPartitionFuser2
 
 @dataclass
 class AttentionLayerSubmodules:
@@ -70,6 +73,33 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
         }
 
 
+def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str):
+    comm_scheduler = config.kareus_scheduler
+    if comm_scheduler is None:
+        if not fuser_type == "ao":
+            return {
+                "comm_overlap_window": (0, -1),  # comm_end doesn't matter
+                "comm_sm_configs": (12, 1024),
+                "comm_overlap_window_backward": (0, -1),
+                "comm_sm_configs_backward": (12, 1024),
+            }
+        else:
+            return {
+                "comm_overlap_window_ao_ag": (0, -1),
+                "comm_sm_configs_ao_ag": (12, 1024),
+                "comm_overlap_window_ao_ar": (0, -1),
+                "comm_sm_configs_ao_ar": (12, 1024),
+                "comm_overlap_window_a_rs": (0, -1),
+                "comm_sm_configs_a_rs": (12, 1024),
+                "comm_overlap_window_a_ag": (0, -1),
+                "comm_sm_configs_a_ag": (12, 1024),
+                "comm_overlap_window_o_ag": (0, -1),
+                "comm_sm_configs_o_ag": (12, 1024),
+                "comm_overlap_window_o_ar": (0, -1),
+                "comm_sm_configs_o_ar": (12, 1024),
+            }
+
+
 class AttentionLayer(MegatronModule, BaseTransformerLayer):
     """Attention layer containing self-attention operations."""
 
@@ -91,7 +121,8 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         self.layer_number = layer_number + get_transformer_layer_offset(self.config)
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
 
-        self.tp_comms = []
+        self.tp_comms = [] # [[fwd_comm, bwd_comm], [fwd_comm, bwd_comm]]
+        self.cp_comms = [] # [[allgather, allgather], [reducescatter, reducescatter]]
         self.attention_fusers = []
 
         # [Module 1: Prev MLP BDA] Optional BDA on the previous MLP output
@@ -155,16 +186,45 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         #     comp_ops = [self.post_self_attn_bda, self.input_layernorm]
         comp_ops = [self.post_self_attn_bda, self.input_layernorm] # TODO: first layer
         comp_ops.extend(self.self_attention.get_compute_ops())
-        for i in range(len(self.tp_comms)):
-            self.attention_fusers.append(
-                PartitionFuser(
-                    ops=comp_ops,
-                    comm_op_fwd=self.tp_comms[i][0],
-                    comm_op_bwd=self.tp_comms[i][1],
-                    fuse_ops=False,
-                    is_first_attn=self.is_first_layer and i == 0,
+        context_parallel = self.config.context_parallel_size > 1
+        if not context_parallel:
+            for i in range(len(self.tp_comms)):
+                self.attention_fusers.append(
+                    PartitionFuser(
+                        ops=comp_ops,
+                        comm_op_fwd=self.tp_comms[i][0],
+                        comm_op_bwd=self.tp_comms[i][1],
+                        fuse_ops=False,
+                        is_first_attn=self.is_first_layer and i == 0,
+                    )
                 )
+        else:
+            if len(self.cp_comms) == 0:
+                return
+            qkv_comp_ops = comp_ops[:5]
+            qkv_ar_fuser = QKVPartitionFuser(
+                ops=qkv_comp_ops,
+                comm_op_fwd=self.tp_comms[0][0],
+                comm_op_bwd=self.tp_comms[0][1],
+                fuse_ops=False,
+                is_first_attn=self.is_first_layer,
             )
+            qkv_ag_fuser = QKVPartitionFuser2(
+                ops=qkv_comp_ops,
+                comm_op_fwd=self.cp_comms[0][0],
+                comm_op_bwd=self.cp_comms[1][0],
+                fuse_ops=False,
+            )
+            ao_comp_ops = comp_ops[5:]
+            comm_op_fwd = [self.cp_comms[0][1], self.tp_comms[1][0]]
+            comm_op_bwd = [self.cp_comms[1][1], self.cp_comms[0][0], self.cp_comms[0][1], self.tp_comms[1][1]]
+            ao_fuser = AttnOprojPartitionFuser(
+                ops=ao_comp_ops,
+                comm_ops_fwd=comm_op_fwd,
+                comm_ops_bwd=comm_op_bwd,
+                fuse_ops=False,
+            )
+            self.attention_fusers = [qkv_ar_fuser, qkv_ag_fuser, ao_fuser]
     
     def init_tensor_parallel_comm_fwd(self, batch_idx, comm_tensor):
         if self.is_first_layer and batch_idx == 1: # TODO: first layer
@@ -193,6 +253,9 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             input_buffer=comm_tensor,
         )
         self.tp_comms[batch_idx - 1][1] = bwd_comm
+    
+    def init_context_parallel_comm(self, allgather_comm_ops, reducescatter_comm_ops):
+        self.cp_comms = [allgather_comm_ops, reducescatter_comm_ops]
 
     def get_persistent_outputs_fwd(self, batch_idx: int):
         return self.self_attention.get_persistent_outputs_fwd()[batch_idx - 1]
@@ -231,27 +294,76 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         assert context is None, "context is not supported"
         # attention_fuser = self.build_attention_fuser(batch_idx)
 
-        if self.is_first_layer:
-            hidden_states = hidden_states
-            bias = None
-            # residual = hidden_states
+        context_parallel = self.config.context_parallel_size > 1
+        if not context_parallel:
+
+            if self.is_first_layer:
+                hidden_states = hidden_states
+                bias = None
+                # residual = hidden_states
+            else:
+                hidden_states, bias = hidden_states
+
+            output, output_bias, output_residual, allreduce_output = self.attention_fusers[batch_idx - 1](  # TODO: add dropout_prob and training
+                hidden_states=hidden_states,
+                bias=bias,
+                residual=residual,
+                rotary_pos_emb=rotary_pos_emb,
+                attention_mask=attention_mask,
+                comm_input=comm_hidden_states[0] if comm_hidden_states is not None else None,
+                **get_fuser_comm_kwargs(self.config),
+            )
+            output_hidden_states = (output, output_bias)
+            allreduce_output = (allreduce_output, comm_hidden_states[1]) if comm_hidden_states is not None else None
+            # allreduce_output = (allreduce_output, comm_hidden_states[1])
+            return output_hidden_states, output_residual, allreduce_output, context
+        
         else:
-            hidden_states, bias = hidden_states
 
-        output, output_bias, output_residual, allreduce_output = self.attention_fusers[batch_idx - 1](  # TODO: add dropout_prob and training
-            hidden_states=hidden_states,
-            bias=bias,
-            residual=residual,
-            rotary_pos_emb=rotary_pos_emb,
-            attention_mask=attention_mask,
-            comm_input=comm_hidden_states[0] if comm_hidden_states is not None else None,
-            **get_fuser_comm_kwargs(self.config),
-        )
-        output_hidden_states = (output, output_bias)
-        allreduce_output = (allreduce_output, comm_hidden_states[1]) if comm_hidden_states is not None else None
-        # allreduce_output = (allreduce_output, comm_hidden_states[1])
-        return output_hidden_states, output_residual, allreduce_output, context
+            if self.is_first_layer:
+                hidden_states_1, hidden_states_2 = hidden_states
+                bias_1, bias_2 = None, None
+                comm_input_1 = hidden_states_2
+            else:
+                hidden_states_1, bias_1 = hidden_states
+                comm_input_1, bias_2 = comm_hidden_states
+            residual_1, residual_2 = residual
 
+            qkv_ar_fuser, qkv_ag_fuser, ao_fuser = self.attention_fusers
+
+            query_1, key_1, value_1, residual_1, allreduce_output_1 = qkv_ar_fuser(
+                hidden_states=hidden_states_1,
+                bias=bias_1,
+                residual=residual_1,
+                rotary_pos_emb=rotary_pos_emb,
+                attention_mask=attention_mask,
+                comm_input=comm_input_1,
+                **get_fuser_comm_kwargs_cp(self.config, "qkv_ar")
+            )
+            hidden_states_2 = allreduce_output_1
+            
+            query_2, key_2, value_2, residual_2 = qkv_ag_fuser(
+                hidden_states=hidden_states_2,
+                bias=bias_2,
+                residual=residual_2,
+                rotary_pos_emb=rotary_pos_emb,
+                attention_mask=attention_mask,
+                comm_key=key_1,
+                comm_value=value_1,
+                **get_fuser_comm_kwargs_cp(self.config, "qkv_ag")
+            )
+
+            out_1, out_2, bias_1, bias_2 = ao_fuser(
+                query_1=query_1,
+                query_2=query_2,
+                comm_key=key_2,
+                comm_value=value_2,
+                **get_fuser_comm_kwargs_cp(self.config, "ao")
+            )
+
+            return (out_1, bias_1), (out_2, bias_2), residual_1, residual_2
+
+            
         # inference_context = deprecate_inference_params(inference_context, inference_params)
 
         # # if comm_hidden_states is not None:

@@ -12,6 +12,8 @@ import kareus.msccl.msccl_comm as new_msccl_comm
 
 K_AG: list[torch.Tensor | None] = [None, None]
 V_AG: list[torch.Tensor | None] = [None, None]
+K_TO_SAVE: list[torch.Tensor | None] = [None, None]
+V_TO_SAVE: list[torch.Tensor | None] = [None, None]
 
 class AllGatherKV():
     """All-gather tensor along outer dimension.
@@ -125,12 +127,14 @@ class AllGatherKV():
                 if not backward:
                     K_AG[self.batch_idx] = k_out
                     V_AG[self.batch_idx] = v_out
+                    K_TO_SAVE[self.batch_idx] = k
+                    V_TO_SAVE[self.batch_idx] = v
                 return k_out, v_out
             else:
                 k_out, v_out = self._msccl_all_gather_kv(k, v, sm_num, block_size)
-                # if backward:
-                #     K_AG[self.batch_idx] = k_out
-                #     V_AG[self.batch_idx] = v_out
+                if not backward:
+                    K_TO_SAVE[self.batch_idx] = k
+                    V_TO_SAVE[self.batch_idx] = v
                 return k_out, v_out
         else:
             k_out, v_out = self._nccl_all_gather_kv(k, v)
@@ -147,7 +151,7 @@ class AllGatherKV():
         self.event_wait()
 
         self.input_buffer_v[start:end].copy_(v, non_blocking=False)
-        
+
         new_msccl_comm.msccl_AllGather(sm_num, block_size)
         new_msccl_comm.msccl_AllGather(sm_num, block_size)
         return self.output_buffer_k, self.output_buffer_v

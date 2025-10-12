@@ -32,9 +32,9 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
     if comm_scheduler is None:
         return {
             "comm_overlap_window": (0, 6),
-            "comm_sm_configs": (None, None),
+            "comm_sm_configs": (12, 1024),
             "comm_overlap_window_backward": (0, 6),
-            "comm_sm_configs_backward": (None, None),
+            "comm_sm_configs_backward": (12, 1024),
         }
     else:
         item = getattr(comm_scheduler, "current_schedule", None)

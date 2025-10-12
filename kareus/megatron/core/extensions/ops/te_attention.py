@@ -49,7 +49,7 @@ from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttentionOp
-
+from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import K_TO_SAVE, V_TO_SAVE
 
 class TEFusibleDotProductAttention(DotProductAttentionOp):
     """
@@ -73,7 +73,7 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         softmax_scale: Optional[float] = None,
         k_channels: Optional[int] = None,
         v_channels: Optional[int] = None,
-        cp_comm_type: str = "p2p",
+        cp_comm_type: str = "all_gather",
     ):
         self.config = config
         self.te_forward_mask_type = False
@@ -293,6 +293,12 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         method, which handles the fusing logic appropriately.
         """
         key, value= basic_op_extra_inputs[0]
+        batch_idx = basic_op_kwargs[0]['batch_idx']
+
+        if self.config.context_parallel_size > 1:
+            global K_TO_SAVE, V_TO_SAVE
+            key = K_TO_SAVE[batch_idx]
+            value = V_TO_SAVE[batch_idx]
 
         ctx = basic_op_ctxs[0]
         ctx.modify_value_stride = False
@@ -313,7 +319,7 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             
             basic_op_extra_inputs[0] = (key, value)
 
-        return super().fuser_forward(
+        core_attn_out, _ = super().fuser_forward(
             basic_op_ctxs=basic_op_ctxs,
             input_=input_,
             basic_op_extra_inputs=basic_op_extra_inputs,
@@ -321,6 +327,11 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             basic_op_next_ops=basic_op_next_ops,
             basic_op_kwargs=basic_op_kwargs,
         )
+
+        if self.config.apply_rope_fusion and self.qkv_format == 'bshd':
+            return core_attn_out.transpose(0, 1), _
+        else:
+            return core_attn_out, _
     
     def fuser_backward(
         self,
@@ -333,6 +344,9 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         list[tuple[Optional[torch.Tensor], ...]],
         list[tuple[torch.Tensor, torch.Tensor]],
     ]:
+        if self.config.apply_rope_fusion and self.qkv_format == 'bshd':
+            grad_output = grad_output.transpose(0, 1)
+
         grad_input, grad_params, grad_extra_inputs = super().fuser_backward(
             basic_op_ctxs=basic_op_ctxs,
             grad_output=grad_output,

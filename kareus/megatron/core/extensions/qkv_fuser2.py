@@ -32,6 +32,8 @@ from kareus.megatron.core.extensions.ops import BiasSwigluOp
 from kareus.megatron.core.extensions.ops import BiasGeluOp
 from kareus.megatron.core.extensions.ops import BiasGegluOp
 
+WAIT_EVENT = torch.cuda.Event()
+
 
 class _QKVFuserAutogradFunction(torch.autograd.Function):
     """Autograd function for a pipeline of operations
@@ -58,7 +60,6 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
         comm_sm_configs_backward: Optional[Tuple[int, int]],
         is_first_attn: bool,
         is_last_mlp: bool,
-        profile: bool,
         comm_op_fwd: Optional[FusibleOperation],
         comm_op_bwd: Optional[FusibleOperation],
         forward_ops: list[tuple[FusibleOperation, list[int]]],
@@ -128,7 +129,9 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                     "block_size": block_size
                 }]
             )
-            comm_op_fwd.sync()
+            # comm_op_fwd.sync()
+            WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
         
         # if not profile:
         #     if comm_start == 0:
@@ -244,7 +247,6 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
 
             # Other context
             func_ctx.is_first_attn = is_first_attn
-            func_ctx.profile = profile
             func_ctx.comm_window_backward = comm_overlap_window_backward
             func_ctx.comm_sm_configs_backward = comm_sm_configs_backward
             func_ctx.comm_op_bwd = comm_op_bwd
@@ -253,12 +255,14 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_ctxs = basic_op_ctxs
             func_ctx.basic_op_num_params = [sum(1 for _ in op.parameters()) for op in basic_ops]
 
-        if profile:
-            current_stream.synchronize()
+        # if profile:
+        #     current_stream.synchronize()
         if comm_op_fwd is not None:
             # comm_op_fwd.event_record(current_stream)
             # comm_op_fwd.event_wait()
-            comm_op_fwd.sync()
+            # comm_op_fwd.sync()
+            WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
         
         # if is_last_mlp:
         #     comm_op_fwd.fuser_forward(
@@ -282,7 +286,6 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
 
         # Operations and autograd state
         is_first_attn = func_ctx.is_first_attn
-        profile = func_ctx.profile
         comm_op_bwd = func_ctx.comm_op_bwd
         comm_overlap_window = func_ctx.comm_window_backward
         comm_sm_configs = func_ctx.comm_sm_configs_backward
@@ -306,7 +309,9 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             comm_start, comm_end = -1, -1
 
         if comm_start == -1 and comm_op_bwd is not None:
-            current_stream.synchronize()
+            # current_stream.synchronize()
+            comm_op_bwd.event_record(current_stream)
+            comm_op_bwd.event_wait()
             grad_comm_key, grad_comm_value = comm_op_bwd.fuser_forward(
                 [None], None, # read from global variables
                 basic_op_extra_inputs=[(None,)], 
@@ -319,7 +324,9 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                 }]
             )
             grad_comm_value = grad_comm_value[0][0]
-            comm_op_bwd.sync()
+            # comm_op_bwd.sync()
+            WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
     
         # if not profile:
         #     if comm_start == 0:
@@ -416,12 +423,14 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                 )
             grad_params_flat.extend(dparams)
 
-        if profile:
-            current_stream.synchronize()
+        # if profile:
+        #     current_stream.synchronize()
         if comm_op_bwd is not None:
             # comm_op_bwd.event_record(current_stream)
             # comm_op_bwd.event_wait()
-            comm_op_bwd.sync()
+            # comm_op_bwd.sync()
+            WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
 
         # if is_first_attn:
         #     comm_op_bwd.fuser_forward(
@@ -450,7 +459,6 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             None,  # comm_sm_configs_backward
             None,  # is_first_attn
             None,  # is_last_mlp
-            None,  # profile
             None,  # comm_op_fwd
             None,  # comm_op_bwd
             None,  # forward_ops
@@ -462,7 +470,7 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
         )
 
 
-class QKVPartitionFuser:
+class QKVPartitionFuser2:
     """Manages forward and backward passes for a pipeline of operations
 
     Parameters
@@ -585,7 +593,6 @@ class QKVPartitionFuser:
             comm_sm_configs_backward,
             self._is_first_attn,
             self._is_last_mlp,
-            self._profile,
             self._comm_op_fwd,
             self._comm_op_bwd,
             self._forward_ops,

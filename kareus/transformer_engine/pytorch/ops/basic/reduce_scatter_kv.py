@@ -40,7 +40,6 @@ class ReduceScatterKV():
         self.backend: str = backend
         self.batch_idx: int = batch_idx
         self.nranks_per_node: int = nranks_per_node
-        self.batch_idx: int = batch_idx
 
         # Cache rank/world_size for offset computations
         if rank:

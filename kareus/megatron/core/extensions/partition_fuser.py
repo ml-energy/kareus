@@ -32,6 +32,8 @@ from kareus.megatron.core.extensions.ops import BiasSwigluOp
 from kareus.megatron.core.extensions.ops import BiasGeluOp
 from kareus.megatron.core.extensions.ops import BiasGegluOp
 
+WAIT_EVENT = torch.cuda.Event()
+
 
 class _PartitionFuserAutogradFunction(torch.autograd.Function):
     """Autograd function for a pipeline of operations
@@ -115,12 +117,17 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             comm_start, comm_end = -1, -1
 
         if comm_start == -1 and comm_op_fwd is not None:
-            current_stream.synchronize()
+            # current_stream.synchronize()
+            comm_op_fwd.event_record(current_stream)
+            comm_op_fwd.event_wait()
+            # current_stream.synchronize()
             comm_op_fwd.fuser_forward(
                 [None], comm_input,
                 basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
             )
-            comm_op_fwd.sync()
+            # comm_op_fwd.sync()
+            WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
         
         if comm_start == 0:
             comm_op_fwd.event_record(current_stream)
@@ -239,14 +246,20 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
         if comm_op_fwd is not None:
             # comm_op_fwd.event_record(current_stream)
             # comm_op_fwd.event_wait()
-            comm_op_fwd.sync()
+            # comm_op_fwd.sync()
+            WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
         
         if is_last_mlp:
+            comm_op_fwd.event_record(current_stream)
+            comm_op_fwd.event_wait()
             comm_op_fwd.fuser_forward(
                 [None], comm_input,
                 basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": 30, "block_size": 1024}]
             )
-            comm_op_fwd.sync()
+            # comm_op_fwd.sync()
+            WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
         assert get_bias and get_residual, f"get_bias: {get_bias}, get_residual: {get_residual}"
         return x, bias, residual, comm_input
 
@@ -286,12 +299,23 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             comm_start, comm_end = -1, -1
 
         if comm_start == -1 and comm_op_bwd is not None:
-            current_stream.synchronize()
+            # current_stream.synchronize()
+            comm_op_bwd.event_record(current_stream)
+            comm_op_bwd.event_wait()
             comm_op_bwd.fuser_forward(
                 [None], grad_comm_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
+                basic_op_extra_inputs=[], 
+                basic_op_prev_ops=[None], 
+                basic_op_next_ops=[None], 
+                basic_op_kwargs=[{
+                    "sm_num": sm_num, 
+                    "block_size": block_size, 
+                    "backward": True
+                }]
             )
-            comm_op_bwd.sync()
+            # comm_op_bwd.sync()
+            WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
     
         if comm_start == 0:
             comm_op_bwd.event_record(current_stream)
@@ -324,7 +348,14 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 # current_stream.synchronize()
                 comm_op_bwd.fuser_forward(
                     [None], grad_comm_input,
-                    basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
+                    basic_op_extra_inputs=[], 
+                    basic_op_prev_ops=[None], 
+                    basic_op_next_ops=[None], 
+                    basic_op_kwargs=[{
+                        "sm_num": sm_num, 
+                        "block_size": block_size, 
+                        "backward": True
+                    }]
                 )
 
             # Backward op
@@ -380,14 +411,27 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
         if comm_op_bwd is not None:
             # comm_op_bwd.event_record(current_stream)
             # comm_op_bwd.event_wait()
-            comm_op_bwd.sync()
+            # comm_op_bwd.sync()
+            WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
 
         if is_first_attn:
+            comm_op_bwd.event_record(current_stream)
+            comm_op_bwd.event_wait()
             comm_op_bwd.fuser_forward(
                 [None], grad_comm_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": 30, "block_size": 1024}]
+                basic_op_extra_inputs=[], 
+                basic_op_prev_ops=[None], 
+                basic_op_next_ops=[None], 
+                basic_op_kwargs=[{
+                    "sm_num": sm_num, 
+                    "block_size": block_size, 
+                    "backward": True
+                }]
             )
-            comm_op_bwd.sync()
+            # comm_op_bwd.sync()
+            WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            current_stream.wait_event(WAIT_EVENT)
         return (
             dx,  # hidden_states
             grad_bias,  # bias
@@ -454,14 +498,14 @@ class PartitionFuser:
         self._backward_ops = list(reversed(self._forward_ops))
 
         self._comm_op_fwd = comm_op_fwd
-        self._comm_op_bwd = comm_op_bwd if comm_op_bwd is not None else comm_op_fwd
+        self._comm_op_bwd = comm_op_bwd
 
         # Fuse ops if needed
         if fuse_ops:
             self.fuse_ops()
         
-        self.num_forward_ops = len(self._forward_ops)
-        self.num_backward_ops = len(self._backward_ops)
+        self._is_first_attn = is_first_attn
+        self._is_last_mlp = is_last_mlp
 
     @classmethod
     def _fuse_forward_ops(
@@ -501,8 +545,6 @@ class PartitionFuser:
         comm_sm_configs: Optional[Tuple[int, int]] = None,
         comm_overlap_window_backward: Optional[Tuple[int, int]] = None,
         comm_sm_configs_backward: Optional[Tuple[int, int]] = None,
-        is_first_attn: bool = False,
-        is_last_mlp: bool = False,
     ) -> tuple[torch.Tensor, ...]: # hidden_states, bias, residual
 
         # Initialization before forward pass
@@ -531,8 +573,8 @@ class PartitionFuser:
             comm_sm_configs,
             comm_overlap_window_backward,
             comm_sm_configs_backward,
-            is_first_attn,
-            is_last_mlp,
+            self._is_first_attn,
+            self._is_last_mlp,
             self._comm_op_fwd,
             self._comm_op_bwd,
             self._forward_ops,

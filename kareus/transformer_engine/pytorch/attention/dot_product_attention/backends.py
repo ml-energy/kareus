@@ -560,6 +560,8 @@ def flash_attention_backward(
     qkv_format: str,
     q_format: str,
     context_parallel: bool,
+    k_ag: Optional[torch.Tensor] = None,
+    v_ag: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlashAttention that reverses all forward transformations."""
 
@@ -570,14 +572,14 @@ def flash_attention_backward(
         grad_output_transformed = grad_output_transformed.view(original_shape)
     elif q_format == "bshd":
         original_shape = ctx.original_output_shape
-        grad_output_transformed = grad_output_transformed.reshape(original_shape)
+        grad_output_transformed = grad_output.reshape(original_shape)
     else:
         raise NotImplementedError("FlashAttention only supports q_format == 'sbhd' or 'bshd'.")
 
     # Step 2: Call the appropriate FlashAttention backward function
     if context_parallel:
         # raise NotImplementedError("Context parallelism backward is not supported.")
-        dq, dk, dv = attn_backward_func_with_cp(ctx, grad_output_transformed)
+        dq, dk, dv = attn_backward_func_with_cp(ctx, grad_output_transformed, k_ag, v_ag)
     else:
         # Determine if FlashAttention 3 is available and should be used
         use_flash_attn_3 = False
@@ -595,7 +597,7 @@ def flash_attention_backward(
             dq = dq.transpose(0, 1).contiguous()
         else:
             dq, dk, dv = [x.transpose(0, 1).contiguous() for x in (dq, dk, dv)]
-    else:
-        raise NotImplementedError("Simplified FlashAttention only supports qkv_format == 'sbhd'.")
+    elif qkv_format != "bshd":
+        raise NotImplementedError("Simplified FlashAttention only supports qkv_format == 'sbhd' or 'bshd'.")
 
     return dq, dk, dv 

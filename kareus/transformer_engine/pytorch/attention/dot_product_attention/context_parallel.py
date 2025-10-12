@@ -43,8 +43,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
 )
 
-import kareus.transformer_engine.pytorch.ops as ops
-
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 
@@ -768,13 +766,13 @@ def _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv):
     return dq, dk, dv
 
 
-def AttnFuncWithCPAndKVAllGather_backward(ctx, dout):
+def AttnFuncWithCPAndKVAllGather_backward(ctx, dout, k_ag, v_ag):
     # pylint: disable=missing-function-docstring
     nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
     # k_ag, v_ag = _attn_cp_kv_allgather_bwd_gather(ctx)
     # Use global variables from ops module
-    k_ag, v_ag = ops.K_AG, ops.V_AG
+    # k_ag, v_ag = ops.K_AG, ops.V_AG
     dq, dk, dv = _attn_cp_kv_allgather_bwd_pre_reduce(
         ctx, dout, k_ag, v_ag, 
     )
@@ -782,9 +780,9 @@ def AttnFuncWithCPAndKVAllGather_backward(ctx, dout):
     # dk, dv = _attn_cp_kv_allgather_bwd_reduce_scatter(ctx, dk_pre_rs, dv_pre_rs)
     # dq, dk, dv = _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv)
 
-    # Clear global variables after use
-    ops.K_AG = None
-    ops.V_AG = None
+    # # Clear global variables after use
+    # ops.K_AG = None
+    # ops.V_AG = None
     
     nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
@@ -987,5 +985,7 @@ def attn_forward_func_with_cp(
 def attn_backward_func_with_cp(
     ctx,
     dout,
+    k_ag,
+    v_ag,
 ):
-    return AttnFuncWithCPAndKVAllGather_backward(ctx, dout)
+    return AttnFuncWithCPAndKVAllGather_backward(ctx, dout, k_ag, v_ag)

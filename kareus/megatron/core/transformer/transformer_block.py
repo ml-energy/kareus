@@ -33,6 +33,13 @@ from megatron.core.transformer.transformer_block import (
     _get_block_submodules,
 )
 
+from megatron.core.parallel_state import (
+    get_context_parallel_group,
+    get_context_parallel_world_size,
+    get_context_parallel_rank,
+)
+from megatron.core.num_microbatches_calculator import get_micro_batch_size
+
 # Import the attention and MLP layers
 from kareus.megatron.core.transformer.attention_layer import AttentionLayer
 from kareus.megatron.core.transformer.mlp_layer import MLPLayer
@@ -45,6 +52,8 @@ from kareus.megatron.core.transformer.partition_transformer_layer import (
 )
 
 from kareus.utils.debug import save_tensors
+from kareus.transformer_engine.pytorch.ops import AllGatherKV
+from kareus.transformer_engine.pytorch.ops import ReduceScatterKV
 
 
 try:
@@ -156,6 +165,9 @@ class TransformerBlock(MegatronModule):
     
     def set_tensor_parallel_group(self, tp_group: Optional[torch.distributed.ProcessGroup]=None) -> None:
         self._init_layer_tensor_parallel_comm()
+
+    def set_context_parallel_group(self, cp_group, cp_global_ranks, cp_stream) -> None:
+        self._init_context_parallel_comm()
 
     def _build_layers(self):
         # Build separate attention and MLP layers instead of combined transformer layers
@@ -279,7 +291,56 @@ class TransformerBlock(MegatronModule):
 
             attention_layer.build_attention_fuser()
             mlp_layer.build_mlp_fuser()
-     
+    
+    def _init_context_parallel_comm(self):
+        nano_batch_size = get_micro_batch_size() // 2
+        local_seq_length = self.config.max_sequence_length // self.config.context_parallel_size
+        local_query_groups = self.config.num_query_groups // self.config.tensor_model_parallel_size
+        self.allgather_comm_ops = []
+        self.reducescatter_comm_ops = []
+        # use a common allgather & allreduce for all layers
+        # use a common allgather for forward & backward
+        for i in range(2): # two nano-batches
+            allgather_comm_op = AllGatherKV(
+                process_group=get_context_parallel_group(check_initialized=False),
+                async_op=True,
+                backend="msccl",
+                rank=get_context_parallel_rank(),
+                world_size=get_context_parallel_world_size(),
+                tensor_size=[
+                    self.config.max_sequence_length, 
+                    nano_batch_size, 
+                    local_query_groups, 
+                    self.config.kv_channels
+                ],
+                device=torch.cuda.current_device(),
+                dtype=torch.bfloat16,
+                batch_idx=i,
+            )
+            self.allgather_comm_ops.append(allgather_comm_op)
+        
+        for i in range(2):
+            reducescatter_comm_op = ReduceScatterKV(
+                process_group=get_context_parallel_group(check_initialized=False),
+                async_op=True,
+                backend="msccl",
+                rank=get_context_parallel_rank(),
+                world_size=get_context_parallel_world_size(),
+                tensor_size=[
+                    self.config.max_sequence_length, 
+                    nano_batch_size, 
+                    local_query_groups, 
+                    self.config.kv_channels
+                ],
+                device=torch.cuda.current_device(),
+                dtype=torch.bfloat16,
+                batch_idx=i,
+            )
+            self.reducescatter_comm_ops.append(reducescatter_comm_op)
+        
+        for attention_layer in self.attention_layers:
+            attention_layer.init_context_parallel_comm(self.allgather_comm_ops, self.reducescatter_comm_ops)
+            attention_layer.build_attention_fuser()
 
     def _get_attention_layer(self, layer_number: int):
         return self.attention_layers[layer_number]
@@ -635,7 +696,8 @@ class TransformerBlock(MegatronModule):
                 comm_hidden_1 = (hidden_states_2, None) # TODO: first layer
                 current_context_1 = context_1
                 current_context_2 = context_2
-                
+
+                context_parallel = self.config.context_parallel_size > 1
                 for l_no in range(len(self.attention_layers)):
                     attention_layer = self.attention_layers[l_no]
                     mlp_layer = self.mlp_layers[l_no]
@@ -649,45 +711,63 @@ class TransformerBlock(MegatronModule):
                     with self.offload_context, inner_fp8_context:
                         # Process attention for both nano-batches
                         # Micro-batch 1 attention
-                        current_hidden_1, residual_1, comm_hidden_1, current_context_1 = attention_layer(
-                            batch_idx=1,
-                            hidden_states=current_hidden_1,
-                            residual=residual_1,
-                            comm_hidden_states=comm_hidden_1,
-                            attention_mask=attention_mask_1,
-                            context=current_context_1,
-                            context_mask=context_mask_1,
-                            rotary_pos_emb=rotary_pos_emb,
-                            rotary_pos_cos=rotary_pos_cos,
-                            rotary_pos_sin=rotary_pos_sin,
-                            attention_bias=attention_bias_1,
-                            inference_context=inference_context,
-                            packed_seq_params=packed_seq_params,
-                            sequence_len_offset=sequence_len_offset_1,
-                        )
-                        comm_hidden_2 = current_hidden_1
-                        # current_hidden_2 = comm_hidden_1 if comm_hidden_1 is not None else current_hidden_2
-                        current_hidden_2 = comm_hidden_1 if not l_no == 0 else current_hidden_2
-                        
-                        # Micro-batch 2 attention
-                        current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(
-                            batch_idx=2,
-                            hidden_states=current_hidden_2,
-                            residual=residual_2,
-                            comm_hidden_states=comm_hidden_2,
-                            attention_mask=attention_mask_2,
-                            context=current_context_2,
-                            context_mask=context_mask_2,
-                            rotary_pos_emb=rotary_pos_emb,
-                            rotary_pos_cos=rotary_pos_cos,
-                            rotary_pos_sin=rotary_pos_sin,
-                            attention_bias=attention_bias_2,
-                            inference_context=inference_context,
-                            packed_seq_params=packed_seq_params,
-                            sequence_len_offset=sequence_len_offset_2,
-                        )
-                        comm_hidden_1 = current_hidden_2
-                        current_hidden_1 = comm_hidden_2
+                        if not context_parallel:
+                            current_hidden_1, residual_1, comm_hidden_1, current_context_1 = attention_layer(
+                                batch_idx=1,
+                                hidden_states=current_hidden_1,
+                                residual=residual_1,
+                                comm_hidden_states=comm_hidden_1,
+                                attention_mask=attention_mask_1,
+                                context=current_context_1,
+                                context_mask=context_mask_1,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                attention_bias=attention_bias_1,
+                                inference_context=inference_context,
+                                packed_seq_params=packed_seq_params,
+                                sequence_len_offset=sequence_len_offset_1,
+                            )
+                            comm_hidden_2 = current_hidden_1
+                            # current_hidden_2 = comm_hidden_1 if comm_hidden_1 is not None else current_hidden_2
+                            current_hidden_2 = comm_hidden_1 if not l_no == 0 else current_hidden_2
+                            
+                            # Micro-batch 2 attention
+                            current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(
+                                batch_idx=2,
+                                hidden_states=current_hidden_2,
+                                residual=residual_2,
+                                comm_hidden_states=comm_hidden_2,
+                                attention_mask=attention_mask_2,
+                                context=current_context_2,
+                                context_mask=context_mask_2,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                attention_bias=attention_bias_2,
+                                inference_context=inference_context,
+                                packed_seq_params=packed_seq_params,
+                                sequence_len_offset=sequence_len_offset_2,
+                            )
+                            comm_hidden_1 = current_hidden_2
+                            current_hidden_1 = comm_hidden_2
+                        else:
+                            current_hidden_1, comm_hidden_1, residual_1, residual_2 = attention_layer(
+                                batch_idx=1,
+                                hidden_states=current_hidden_1 if not l_no == 0 else (current_hidden_1, current_hidden_2),
+                                residual=(residual_1, residual_2),
+                                comm_hidden_states=comm_hidden_1,
+                                attention_mask=attention_mask_1,
+                                context=current_context_1,
+                                context_mask=context_mask_1,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                attention_bias=attention_bias_1,
+                                inference_context=inference_context,
+                                packed_seq_params=packed_seq_params,
+                                sequence_len_offset=sequence_len_offset_1,
+                            )
                         
                         # Process MLP for both nano-batches
                         # Micro-batch 1 MLP

@@ -42,6 +42,8 @@ from kareus.transformer_engine.pytorch.attention.dot_product_attention.backends 
     flash_attention_forward, 
     flash_attention_backward,
 )
+from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import K_AG, V_AG
+from kareus.transformer_engine.pytorch.ops.basic.reduce_scatter_kv import K_RS, V_RS
 
 # Setup Attention Logging
 attn_log.setup_logging()
@@ -216,7 +218,8 @@ class DotProductAttentionOp(BasicOperation):
         """Set the context parallel attributes for the given module."""
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
-        self.cp_stream = cp_stream
+        # self.cp_stream = cp_stream
+        self.cp_stream = torch.cuda.current_stream()
         self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
 
     def op_forward(
@@ -226,10 +229,9 @@ class DotProductAttentionOp(BasicOperation):
         *,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
-        key_layer_gathered: Optional[torch.Tensor] = None,
-        value_layer_gathered: Optional[torch.Tensor] = None,
+        key_layer: torch.Tensor = None,
+        value_layer: torch.Tensor = None,
+        batch_idx: int = 0,
         attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
         qkv_format: str = None,
         cu_seqlens_q: torch.Tensor = None,
@@ -482,6 +484,7 @@ class DotProductAttentionOp(BasicOperation):
         ctx.op_qkv_format = qkv_format
         ctx.q_format = q_format
         ctx.context_parallel = context_parallel
+        ctx.batch_idx = batch_idx
 
         # Handle ALiBi
         if core_attention_bias_type == "alibi":
@@ -492,6 +495,11 @@ class DotProductAttentionOp(BasicOperation):
                 max_seqlen_kv,
                 alibi_slopes=alibi_slopes,
             )
+        
+        if context_parallel:
+            global K_AG, V_AG
+            key_layer_gathered = K_AG[batch_idx]
+            value_layer_gathered = V_AG[batch_idx]
 
         # Run FlashAttention
         # self.logger.info("Running with FlashAttention backend")
@@ -542,6 +550,11 @@ class DotProductAttentionOp(BasicOperation):
         qkv_format = ctx.op_qkv_format
         q_format = ctx.q_format
         context_parallel = ctx.context_parallel
+        batch_idx = ctx.batch_idx
+
+        if context_parallel:
+            k_ag = K_AG[batch_idx]
+            v_ag = V_AG[batch_idx]
         
         # Call the comprehensive backward function that handles all transformations
         dq, dk, dv = flash_attention_backward(
@@ -550,7 +563,13 @@ class DotProductAttentionOp(BasicOperation):
             qkv_format=qkv_format,
             q_format=q_format,
             context_parallel=context_parallel,
+            k_ag=k_ag,
+            v_ag=v_ag,
         )
+
+        if context_parallel:
+            global K_RS, V_RS
+            K_RS[batch_idx], V_RS[batch_idx] = dk, dv
         
         return dq, (dk, dv)
 
@@ -572,12 +591,12 @@ class DotProductAttentionOp(BasicOperation):
             key_layer, value_layer = basic_op_extra_inputs[0]
             kwargs['key_layer'] = key_layer
             kwargs['value_layer'] = value_layer
-        elif len(basic_op_extra_inputs[0]) == 4:
-            key_layer, value_layer, key_layer_gathered, value_layer_gathered = basic_op_extra_inputs[0]
-            kwargs['key_layer'] = key_layer
-            kwargs['value_layer'] = value_layer
-            kwargs['key_layer_gathered'] = key_layer_gathered
-            kwargs['value_layer_gathered'] = value_layer_gathered
+        # elif len(basic_op_extra_inputs[0]) == 4:
+        #     key_layer, value_layer, key_layer_gathered, value_layer_gathered = basic_op_extra_inputs[0]
+        #     kwargs['key_layer'] = key_layer
+        #     kwargs['value_layer'] = value_layer
+        #     kwargs['key_layer_gathered'] = key_layer_gathered
+        #     kwargs['value_layer_gathered'] = value_layer_gathered
         else:
             raise ValueError(f"Invalid number of extra inputs: {len(basic_op_extra_inputs[0])}")
         

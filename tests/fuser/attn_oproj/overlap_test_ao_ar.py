@@ -16,9 +16,10 @@ from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.megatron.core.extensions.ops import QKVPostProcessOp
 from kareus.megatron.core.extensions.ops import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
+from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import AllGatherKV, K_TO_SAVE, V_TO_SAVE, K_AG, V_AG
 from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.qkv_fuser import QKVPartitionFuser as PartitionFuser
+from kareus.megatron.core.extensions.attn_oproj_fuser import AttnOprojPartitionFuser as PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from kareus.utils.debug import nvtx_range
@@ -42,9 +43,9 @@ def init_distributed(rank, world_size, backend: str = 'nccl'):
         print(f"Initialized distributed: rank={rank}, world_size={world_size}")
     
     ranks = list(range(world_size))
-    tp_group = dist.new_group(ranks)
-    print(f"Created tensor parallel group with ranks: {ranks}")
-    return tp_group
+    group = dist.new_group(ranks)
+    print(f"Created context parallel group with ranks: {ranks}")
+    return group
 
 class AttentionFuserTest:
     """Test suite for attention fuser operations."""
@@ -83,122 +84,86 @@ class AttentionFuserTest:
         """Create test tensors for the attention operations."""
         nano_batch_size = self.batch_size // 2
         local_seq_length = self.seq_length // self.context_parallel_size
+        local_num_attention_heads = self.num_attention_heads // self.tensor_parallel_size
+        local_query_groups = self.num_query_groups // self.tensor_parallel_size
 
-        hidden_states = torch.randn(
-            local_seq_length, nano_batch_size, self.hidden_size,
+        query_1 = torch.randn(
+            local_seq_length, nano_batch_size, local_num_attention_heads, self.head_dim,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
-        # bias = torch.randn(
-        #     self.hidden_size,
-        #     dtype=self.dtype, device=self.device, requires_grad=True
-        # )
-        bias = None
-        residual = torch.randn(
-            local_seq_length, nano_batch_size, self.hidden_size,
+        query_2 = torch.randn(
+            local_seq_length, nano_batch_size, local_num_attention_heads, self.head_dim,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
-        
-        seq = (
-            torch.arange(local_seq_length, device=self.device, dtype=torch.float32)
-            + 0
+
+        key_to_save = torch.randn(
+            local_seq_length, nano_batch_size, local_query_groups, self.head_dim,
+            dtype=self.dtype, device=self.device, requires_grad=True
         )
-        rotary_base = 10000
-        inv_freq = 1.0 / (
-            rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim)
+        value_to_save = torch.randn(
+            local_seq_length, nano_batch_size, local_query_groups, self.head_dim,
+            dtype=self.dtype, device=self.device, requires_grad=True
         )
-        freqs = torch.outer(seq, inv_freq)
-        rotary_pos_emb = torch.cat((freqs, freqs), dim=-1)
-        rotary_pos_emb = rotary_pos_emb[:, None, None, :]
-        
-        attention_mask = None
+        global K_TO_SAVE, V_TO_SAVE
+        K_TO_SAVE[0] = key_to_save
+        V_TO_SAVE[0] = value_to_save
+
+        k_ag = torch.randn(
+            self.seq_length, nano_batch_size, local_query_groups, self.head_dim,
+            dtype=self.dtype, device=self.device, requires_grad=True
+        )
+        v_ag = torch.randn(
+            self.seq_length, nano_batch_size, local_query_groups, self.head_dim,
+            dtype=self.dtype, device=self.device, requires_grad=True
+        )
+        global K_AG, V_AG
+        K_AG[0] = k_ag
+        V_AG[0] = v_ag
 
         allreduce_inputs = torch.randn(
             local_seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
-        return hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs
+        return query_1, query_2, allreduce_inputs
     
     def create_operations(self, allreduce_inputs):
         """Create all the required operations for the attention fuser."""
         
-        # 1. BDA Operation (Bias Dropout Add)
-        bda_op = BiasDropoutAddOp(
-            dropout_prob=self.config.hidden_dropout,
-            training=True
+        # 6. Dot Product Attention Operation
+        attention_op = TEFusibleDotProductAttention(
+            config=self.config,
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            cp_comm_type="all_gather",
+            batch_idx=0,
         )
-        
-        # 2. LayerNorm Operation
-        layernorm_op = RMSNorm(
-            normalized_shape=self.hidden_size,
-            eps=self.config.layernorm_epsilon,
-            device=self.device,
-            dtype=self.dtype
+        # TODO: remove cp_group in attention_op
+        attention_op.set_context_parallel_group(
+            cp_group=self.tp_group,
+            cp_global_ranks=list(range(self.world_size)),
+            cp_stream=torch.cuda.current_stream(),
         )
-        
-        # 3. Linear QKV Operation (transforms input to queries, keys, values)
-        qkv_hidden_size = (
-            self.num_attention_heads * self.head_dim +  # Query heads
-            self.num_query_groups * self.head_dim +     # Key heads
-            self.num_query_groups * self.head_dim       # Value heads
-        )
-        qkv_hidden_size = qkv_hidden_size // self.tensor_parallel_size
-        linear_qkv_op = Linear(
-            in_features=self.hidden_size,
-            out_features=qkv_hidden_size,
+
+        # 7. Linear Projection Operation
+        hidden_size_in = (self.head_dim * self.num_attention_heads) // self.tensor_parallel_size
+        linear_proj_op = Linear(
+            in_features=hidden_size_in,
+            out_features=self.hidden_size,
             device=self.device,
             dtype=self.dtype,
             bias=False,
-            return_bias=False,
+            return_bias=True,
             tensor_parallel_mode=None,
             tensor_parallel_group=None,
             tensor_parallel_size=None,
         )
         
-        # 4. QKV Post-process Operation
-        num_query_groups_per_partition = self.num_query_groups // self.tensor_parallel_size
-        num_attention_heads_per_partition = self.num_attention_heads // self.tensor_parallel_size
-        qkv_postprocess_op = QKVPostProcessOp(
-            num_query_groups_per_partition=num_query_groups_per_partition,
-            num_attention_heads_per_partition=num_attention_heads_per_partition,
-            hidden_size_per_attention_head=self.head_dim,
-            q_layernorm=None,
-            k_layernorm=None,
-            run_tests_fn=None,
-            test_mode=False,
-        ) 
-        
-        # 5. Rotary Embedding Operation
-        rotary_embedding_op = RotaryEmbeddingOp(
-            config=self.config,
-        ) 
-        
-        # # 6. Dot Product Attention Operation
-        # attention_op = TEFusibleDotProductAttention(
-        #     config=self.config,
-        #     layer_number=0,
-        #     attn_mask_type=AttnMaskType.causal,
-        #     attention_type="self",
-        # )
-
-        # # 7. Linear Projection Operation
-        # hidden_size_in = (self.head_dim * self.num_attention_heads) // self.tensor_parallel_size
-        # linear_proj_op = Linear(
-        #     in_features=hidden_size_in,
-        #     out_features=self.hidden_size,
-        #     device=self.device,
-        #     dtype=self.dtype,
-        #     bias=False,
-        #     return_bias=True,
-        #     tensor_parallel_mode=None,
-        #     tensor_parallel_group=None,
-        #     tensor_parallel_size=None,
-        # )
-        
         # 8. AllReduce Communication Operation
         nano_batch_size = self.batch_size // 2
         local_seq_length = self.seq_length // self.context_parallel_size
-        if self.tensor_parallel_size > 1:
+        if self.context_parallel_size > 1:
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
                 async_op=True,
@@ -213,27 +178,22 @@ class AttentionFuserTest:
             )
         
             return [
-                bda_op,
-                layernorm_op,
-                linear_qkv_op,
-                qkv_postprocess_op,
-                rotary_embedding_op,
-                # attention_op,
-                # linear_proj_op,
+                attention_op,
+                linear_proj_op,
                 allreduce_comm_op
             ]
 
         else:
-            raise ValueError("Tensor parallel size must be greater than 1")
+            raise ValueError("Context parallel size must be greater than 1")
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1), (0, 5), (2, 5),
+            (-1, -1), (0, 2), (1, 2),
         ]
         return overlap_windows
     
     def test_config(self, monitor, test_tensors, attention_fuser, overlap_window, sm_configs):
-        hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = test_tensors
+        query_1, query_2, allreduce_inputs = test_tensors
         t_results_list = []
         e_results_list = []
         ranks_energy_list = []
@@ -244,65 +204,63 @@ class AttentionFuserTest:
         for i in range(10):
             if i == 2:
                 time_start = time.time()
-            query, key, value, _, allreduce_output = attention_fuser(
-                hidden_states=hidden_states,
-                bias=bias,
-                residual=residual,
-                rotary_pos_emb=rotary_pos_emb,
-                attention_mask=attention_mask,
-                comm_input=allreduce_inputs,
-                comm_overlap_window=overlap_window,
-                comm_sm_configs=sm_configs,
+                torch.cuda.profiler.start()
+            x, bias, _ = attention_fuser(
+                query_1=query_1,
+                query_2=query_2,
+                comm_key=allreduce_inputs,
+                comm_value=None,
+                comm_overlap_window_ao_ar=overlap_window,
+                comm_sm_configs_ao_ar=sm_configs,
             )
         torch.cuda.synchronize()
         dist.barrier()
         time_end = time.time()
         duration = (time_end - time_start) / 8
+        torch.cuda.profiler.stop()
 
-        if self.rank == 0:
-            iterations = int(8 / duration)
-            dist_list = [iterations]
-        else:
-            dist_list = [None]
-        dist.broadcast_object_list(dist_list, src=0, group=self.tp_group)
-        iterations = dist_list[0]
-        print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
+        # if self.rank == 0:
+        #     iterations = int(8 / duration)
+        #     dist_list = [iterations]
+        # else:
+        #     dist_list = [None]
+        # dist.broadcast_object_list(dist_list, src=0, group=self.tp_group)
+        # iterations = dist_list[0]
+        # print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
 
-        for repeat in range(self.repeat_num):
-            torch.cuda.synchronize()
-            dist.barrier()
-            if self.rank == 0:
-                monitor.begin_window("step")
+        # for repeat in range(self.repeat_num):
+        #     torch.cuda.synchronize()
+        #     dist.barrier()
+        #     if self.rank == 0:
+        #         monitor.begin_window("step")
 
-            for i in range(iterations):
-                query, key, value, _, allreduce_output = attention_fuser(
-                    hidden_states=hidden_states,
-                    bias=bias,
-                    residual=residual,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_mask=attention_mask,
-                    comm_input=allreduce_inputs,
-                    comm_overlap_window=overlap_window,
-                    comm_sm_configs=sm_configs,
-                )
-            torch.cuda.synchronize()
-            dist.barrier()
+        #     for i in range(iterations):
+        #         x, bias, _ = attention_fuser(
+        #             query_1=query_1,
+        #             query_2=query_2,
+        #             comm_key=allreduce_inputs,
+        #             comm_value=None,
+        #             comm_overlap_window_ao_ar=overlap_window,
+        #             comm_sm_configs_ao_ar=sm_configs,
+        #         )
+        #     torch.cuda.synchronize()
+        #     dist.barrier()
 
-            if self.rank == 0:
-                result = monitor.end_window("step")
-                t_result = result.time / iterations
-                e_result = result.total_energy / iterations
-                ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
-                t_results_list.append(t_result)
-                e_results_list.append(e_result)
-                ranks_energy_list.append(ranks_energy)
+        #     if self.rank == 0:
+        #         result = monitor.end_window("step")
+        #         t_result = result.time / iterations
+        #         e_result = result.total_energy / iterations
+        #         ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
+        #         t_results_list.append(t_result)
+        #         e_results_list.append(e_result)
+        #         ranks_energy_list.append(ranks_energy)
         
-        if self.rank == 0:
-            with open(f"logs/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "a") as f:
-                line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
-                for i in range(self.repeat_num):
-                    line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
-                f.write(line_str.rstrip(",") + "\n")
+        # if self.rank == 0:
+        #     with open(f"logs/ao_ar/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "a") as f:
+        #         line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
+        #         for i in range(self.repeat_num):
+        #             line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
+        #         f.write(line_str.rstrip(",") + "\n")
             
     
     def run_overlap_test(self):
@@ -313,25 +271,25 @@ class AttentionFuserTest:
 
         attention_fuser = PartitionFuser(
             ops=comp_ops,
-            comm_op_fwd=comm_op,
+            comm_ops_fwd=[None, comm_op],
             fuse_ops=False,
-            profile=False,
+            profile_ao_ar=True,
         )
         print(f"attention_fuser._forward_ops: {attention_fuser._forward_ops}")
         print(f"attention_fuser._backward_ops: {attention_fuser._backward_ops}")
 
         monitor = None
-        if self.rank == 0:
-            gpu_indices = list(range(self.world_size))
-            monitor = ZeusMonitor(gpu_indices=gpu_indices)
-            os.makedirs(f"logs/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "w") as f:
-                title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
-                for i in range(self.repeat_num):
-                    title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
-                title = title.rstrip(",")
-                title += "\n"
-                f.write(title)
+        # if self.rank == 0:
+        #     gpu_indices = list(range(self.world_size))
+        #     monitor = ZeusMonitor(gpu_indices=gpu_indices)
+        #     os.makedirs(f"logs/ao_ar/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
+        #     with open(f"logs/ao_ar/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "w") as f:
+        #         title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
+        #         for i in range(self.repeat_num):
+        #             title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
+        #         title = title.rstrip(",")
+        #         title += "\n"
+        #         f.write(title)
         
         # skip = True
         overlap_windows = self.get_overlap_windows()
@@ -351,7 +309,7 @@ class AttentionFuserTest:
                             overlap_window, sm_configs
                         )
                     # return
-                    time.sleep(10)
+                    # time.sleep(10)
 
 
 def overlap_test(rank, world_size, args, master_port):
@@ -370,10 +328,10 @@ def overlap_test(rank, world_size, args, master_port):
         print(f"Error: {e}")
         traceback.print_exc()
     finally:
-        if rank == 0:
-            pid = os.getpid()
-            print(f"Killing process group {pid}")
-            os.system(f'pkill -P {pid}')
+        # if rank == 0:
+        #     pid = os.getpid()
+        #     print(f"Killing process group {pid}")
+        #     os.system(f'pkill -P {pid}')
 
         if dist.is_initialized():
             dist.destroy_process_group()
