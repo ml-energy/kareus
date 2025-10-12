@@ -599,6 +599,7 @@ extern "C" __global__ void __launch_bounds__(1024, 1)
   (void)buff;  // unused
   nelems = nelems / (sizeof(int) / sizeof(TYPE));
   allGatherMem(memChans, allGatherPortChans, rank, worldSize, nRanksPerNode, nelems / worldSize, pipelineDepth);
+  allGatherMem(memChans, allGatherPortChans, rank, worldSize, nRanksPerNode, nelems / worldSize, pipelineDepth);
 }
 
 __device__ void reduceScatterMem(mscclpp::MemoryChannelDeviceHandle* memChans,
@@ -702,6 +703,7 @@ extern "C" __global__ void __launch_bounds__(1024, 1)
                    size_t nelems,
                    int pipelineDepth) {
   nelems = nelems / (sizeof(int) / sizeof(TYPE));
+  reduceScatterMem(memChans, reduceScatterPortChans, buff, scratch, rank, nRanksPerNode, worldSize, nelems, pipelineDepth);
   reduceScatterMem(memChans, reduceScatterPortChans, buff, scratch, rank, nRanksPerNode, worldSize, nelems, pipelineDepth);
 }
 

@@ -153,7 +153,7 @@ class AllGatherKV():
         self.input_buffer_v[start:end].copy_(v, non_blocking=False)
 
         new_msccl_comm.msccl_AllGather(sm_num, block_size)
-        new_msccl_comm.msccl_AllGather(sm_num, block_size)
+        # new_msccl_comm.msccl_AllGather(sm_num, block_size)
         return self.output_buffer_k, self.output_buffer_v
 
     def _nccl_all_gather(self, x):

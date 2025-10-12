@@ -1,7 +1,7 @@
 name: megatron_llama_3_2_1b
 trainer:
   devices: 4
-  num_nodes: 1
+  num_nodes: 2
   accelerator: gpu
   precision: bf16
   logger: False # logger provided by exp_manager
@@ -50,18 +50,18 @@ model:
   micro_batch_size: 16 # Increased for smaller model
   global_batch_size: 128 # will use more micro batches to reach global batch size
   tensor_model_parallel_size: 2 # Reduced for smaller model
-  pipeline_model_parallel_size: 1 # inter-layer model parallelism
+  pipeline_model_parallel_size: 2 # inter-layer model parallelism
   context_parallel_size: 2 # context parallelism
   cp_comm_type: "all_gather"
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
 
-  # num_layers_in_first_pipeline_stage: 6
-  # num_layers_in_last_pipeline_stage: 2
+  num_layers_in_first_pipeline_stage: 6
+  num_layers_in_last_pipeline_stage: 2
 
   # model architecture - LLaMA 3.2 1B
   encoder_seq_length: 4096 # Same as 3.1 8B for consistency
   max_position_embeddings: ${.encoder_seq_length}
-  num_layers: 8 # LLaMA 3.2 1B: 16 layers (half of 8B)
+  num_layers: 16 # LLaMA 3.2 1B: 16 layers (half of 8B)
   hidden_size: 2048 # LLaMA 3.2 1B: 2048 (half of 8B)
   ffn_hidden_size: 8192 # LLaMA 3.2 1B: 8192 (4 * hidden_size)
   num_attention_heads: 32 # LLaMA 3.2 1B: 32 (same as 8B for head_dim=64)
@@ -150,7 +150,7 @@ model:
   # These memory intensive activations are also less compute intensive which makes activation checkpointing more efficient for LLMs (20B+).
   # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
   # 'full' will checkpoint the entire transformer layer.
-  activations_checkpoint_granularity: null
+  activations_checkpoint_granularity: "full"
   # activations_checkpoint_granularity: "full" # Checkpoint entire layers for maximum memory savings
   activations_checkpoint_method: 'uniform' # Evenly distribute checkpoints across all layers
   # 'uniform' divides the total number of transformer layers and checkpoints the input activation

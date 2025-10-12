@@ -149,7 +149,7 @@ class ReduceScatterKV():
         self.input_buffer_v.copy_(v, non_blocking=False)
 
         new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
-        new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
+        # new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
         return self.output_buffer_k[start:end], self.output_buffer_v[start:end]
 
     def _nccl_reduce_scatter(self, x):
