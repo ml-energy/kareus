@@ -79,24 +79,24 @@ def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str):
         if not fuser_type == "ao":
             return {
                 "comm_overlap_window": (0, -1),  # comm_end doesn't matter
-                "comm_sm_configs": (12, 1024),
+                "comm_sm_configs": (6, 1024),
                 "comm_overlap_window_backward": (0, -1),
-                "comm_sm_configs_backward": (12, 1024),
+                "comm_sm_configs_backward": (6, 1024),
             }
         else:
             return {
                 "comm_overlap_window_ao_ag": (0, -1),
-                "comm_sm_configs_ao_ag": (12, 1024),
+                "comm_sm_configs_ao_ag": (6, 1024),
                 "comm_overlap_window_ao_ar": (0, -1),
-                "comm_sm_configs_ao_ar": (12, 1024),
+                "comm_sm_configs_ao_ar": (6, 1024),
                 "comm_overlap_window_a_rs": (0, -1),
-                "comm_sm_configs_a_rs": (12, 1024),
+                "comm_sm_configs_a_rs": (6, 1024),
                 "comm_overlap_window_a_ag": (0, -1),
-                "comm_sm_configs_a_ag": (12, 1024),
+                "comm_sm_configs_a_ag": (6, 1024),
                 "comm_overlap_window_o_ag": (0, -1),
-                "comm_sm_configs_o_ag": (12, 1024),
+                "comm_sm_configs_o_ag": (6, 1024),
                 "comm_overlap_window_o_ar": (0, -1),
-                "comm_sm_configs_o_ar": (12, 1024),
+                "comm_sm_configs_o_ar": (6, 1024),
             }
 
 
@@ -121,7 +121,8 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         self.layer_number = layer_number + get_transformer_layer_offset(self.config)
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
 
-        self.tp_comms = [] # [[fwd_comm, bwd_comm], [fwd_comm, bwd_comm]]
+        # self.tp_comms = [] # [[fwd_comm, bwd_comm], [fwd_comm, bwd_comm]]
+        self.tp_comms = [] # [allreduce, allreduce] for two nano-batches
         self.cp_comms = [] # [[allgather, allgather], [reducescatter, reducescatter]]
         self.attention_fusers = []
 
@@ -189,11 +190,24 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
         context_parallel = self.config.context_parallel_size > 1
         if not context_parallel:
             for i in range(len(self.tp_comms)):
+                # self.attention_fusers.append(
+                #     PartitionFuser(
+                #         ops=comp_ops,
+                #         comm_op_fwd=self.tp_comms[i][0],
+                #         comm_op_bwd=self.tp_comms[i][1],
+                #         fuse_ops=False,
+                #         is_first_attn=self.is_first_layer and i == 0,
+                #     )
+                # )
+                fwd_comm = self.tp_comms[i]
+                bwd_comm = self.tp_comms[i]
+                if self.is_first_layer and i == 0:
+                    fwd_comm = None
                 self.attention_fusers.append(
                     PartitionFuser(
                         ops=comp_ops,
-                        comm_op_fwd=self.tp_comms[i][0],
-                        comm_op_bwd=self.tp_comms[i][1],
+                        comm_op_fwd=fwd_comm,
+                        comm_op_bwd=bwd_comm,
                         fuse_ops=False,
                         is_first_attn=self.is_first_layer and i == 0,
                     )
@@ -204,8 +218,8 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
             qkv_comp_ops = comp_ops[:5]
             qkv_ar_fuser = QKVPartitionFuser(
                 ops=qkv_comp_ops,
-                comm_op_fwd=self.tp_comms[0][0],
-                comm_op_bwd=self.tp_comms[0][1],
+                comm_op_fwd=self.tp_comms[0] if not self.is_first_layer else None,
+                comm_op_bwd=self.tp_comms[0],
                 fuse_ops=False,
                 is_first_attn=self.is_first_layer,
             )
@@ -216,8 +230,8 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
                 fuse_ops=False,
             )
             ao_comp_ops = comp_ops[5:]
-            comm_op_fwd = [self.cp_comms[0][1], self.tp_comms[1][0]]
-            comm_op_bwd = [self.cp_comms[1][1], self.cp_comms[0][0], self.cp_comms[0][1], self.tp_comms[1][1]]
+            comm_op_fwd = [self.cp_comms[0][1], self.tp_comms[1]]
+            comm_op_bwd = [self.cp_comms[1][1], self.cp_comms[0][0], self.cp_comms[0][1], self.tp_comms[1]]
             ao_fuser = AttnOprojPartitionFuser(
                 ops=ao_comp_ops,
                 comm_ops_fwd=comm_op_fwd,
@@ -256,6 +270,9 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
     
     def init_context_parallel_comm(self, allgather_comm_ops, reducescatter_comm_ops):
         self.cp_comms = [allgather_comm_ops, reducescatter_comm_ops]
+
+    def init_tensor_parallel_comm(self, allreduce_comm_ops):
+        self.tp_comms = allreduce_comm_ops
 
     def get_persistent_outputs_fwd(self, batch_idx: int):
         return self.self_attention.get_persistent_outputs_fwd()[batch_idx - 1]

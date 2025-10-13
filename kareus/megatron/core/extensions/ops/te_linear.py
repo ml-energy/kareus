@@ -165,12 +165,15 @@ class TEFusibleLinear(Linear):
             if parallel_mode != "duplicated":
                 rng_tracker_fn = _get_cuda_rng_tracker_fn()
         
-        if parallel_mode == "row":
-            use_persistent_output_fwd = True
-            use_persistent_output_bwd = False
-        else:
-            use_persistent_output_fwd = False
-            use_persistent_output_bwd = True
+        # if parallel_mode == "row":
+        #     use_persistent_output_fwd = True
+        #     use_persistent_output_bwd = False
+        # else:
+        #     use_persistent_output_fwd = False
+        #     use_persistent_output_bwd = True
+        # TODO: pass allreduce buffer to Linear
+        use_persistent_output_fwd = False
+        use_persistent_output_bwd = False
         seq_length = config.max_sequence_length // config.context_parallel_size
 
         # Initialize the FusedOperation-based Linear layer

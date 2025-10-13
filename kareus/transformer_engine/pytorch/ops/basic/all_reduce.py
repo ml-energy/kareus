@@ -20,6 +20,7 @@ except ImportError:
     HAVE_CFUSER = False
 import kareus.msccl.msccl_comm as new_msccl_comm
 
+X_AR: list[torch.Tensor | None] = [None, None]
 
 class AllReduce(BasicOperation):
     """All-reduce tensor
@@ -49,6 +50,7 @@ class AllReduce(BasicOperation):
         world_size: Optional[int] = None,
         use_persistent_output: bool = False,
         input_buffer: Optional[torch.Tensor] = None,
+        batch_idx: int = 0,
         tensor_size: Optional[list[int]] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
@@ -57,44 +59,39 @@ class AllReduce(BasicOperation):
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.async_op: bool = async_op
         self.backend: str = backend
-        # self.new_backend: bool = False
+        self.batch_idx: int = batch_idx
+        
+        if rank:
+            self.rank: Optional[int] = rank
+        elif process_group:
+            self.rank: Optional[int] = torch.distributed.get_rank(process_group)
+        else:
+            raise ValueError("rank or process_group must be provided")
+        if world_size:
+            self.world_size: Optional[int] = world_size
+        elif process_group:
+            self.world_size: Optional[int] = torch.distributed.get_world_size(process_group)
+        else:
+            raise ValueError("world_size or process_group must be provided")
         
         self.comm_stream: Optional[torch.cuda.Stream] = None
         self._work_handle: Optional[torch.distributed.Work] = None
         self.wait_event = torch.cuda.Event()
 
-        self.use_persistent_output: bool = use_persistent_output
-        if use_persistent_output:
-            assert self.backend == "msccl", "use_persistent_output is only supported for msccl backend"
-            assert input_buffer is not None, "input_buffer must be provided when use_persistent_output is True"
-            # self.output_buffer = torch.empty(
-            #     *input_buffer.shape,
-            #     device=input_buffer.device,
-            #     dtype=input_buffer.dtype,
-            # )
-            self.output_buffer = input_buffer
-            self.input_buffer = input_buffer
-
         if self.backend == "msccl":
-            if use_persistent_output:
-                # if input_buffer.dtype == torch.float16:
-                #     print("Use mscclpp_op for all-reduce")
-                new_msccl_comm.msccl_AllReduce_init(
-                    rank, world_size, 
-                    self.input_buffer,
-                    self.process_group
+            if X_AR[self.batch_idx] is None:
+                X_AR[self.batch_idx] = torch.empty(
+                    *tensor_size, dtype=dtype, device=device,
                 )
-                #     self.new_backend = True
-                # else:
-                #     msccl_comm.msccl_AllReduce_init(
-                #         rank, world_size, 
-                #         self.input_buffer, self.output_buffer,
-                #         self.process_group
-                #     )
-                self.comm_stream = new_msccl_comm.AR_COMM_STREAM
-            else:
-                msccl_comm.msccl_AllReduce_init_cached(rank, world_size)
-                self.comm_stream = msccl_comm.COMM_STREAM
+            self.input_buffer = X_AR[self.batch_idx]
+            self.output_buffer = X_AR[self.batch_idx]
+            new_msccl_comm.msccl_AllReduce_init(
+                self.rank,
+                self.world_size,
+                self.input_buffer,
+                self.process_group,
+            )
+            self.comm_stream = new_msccl_comm.AR_COMM_STREAM
     
     def set_stream(self, stream: torch.cuda.Stream):
         self.comm_stream = stream
@@ -138,15 +135,9 @@ class AllReduce(BasicOperation):
                 )
                 self.backend = "nccl"
                 return x
-            if self.use_persistent_output:
-                # if self.new_backend:
-                new_msccl_comm.msccl_AllReduce(sm_num, block_size)
-                # else:
-                #     msccl_comm.msccl_AllReduce(sm_num, block_size)
-                return self.output_buffer
             else:
-                # output = torch.empty_like(x)
-                msccl_comm.msccl_AllReduce_cached(x, x, sm_num, block_size)
+                assert x.shape == self.input_buffer.shape, "input_buffer shape must match x shape"
+                new_msccl_comm.msccl_AllReduce(sm_num, block_size)
                 return x
         else:
             assert self.process_group is not None, "process_group must be provided for nccl backend"

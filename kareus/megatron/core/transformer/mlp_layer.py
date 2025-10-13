@@ -136,11 +136,24 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
         comp_ops = [self.post_mlp_bda, self.pre_mlp_layernorm]
         comp_ops.extend(self.mlp.get_compute_ops())
         for i in range(len(self.tp_comms)):
+            # self.mlp_fusers.append(
+            #     PartitionFuser(
+            #         ops=comp_ops,
+            #         comm_op_fwd=self.tp_comms[i][0],
+            #         comm_op_bwd=self.tp_comms[i][1],
+            #         fuse_ops=False,
+            #         is_last_mlp=self.is_last_layer and i == 1,
+            #     )
+            # )
+            fwd_comm = self.tp_comms[i]
+            bwd_comm = self.tp_comms[i]
+            if self.is_last_layer and i == 1:
+                bwd_comm = None
             self.mlp_fusers.append(
                 PartitionFuser(
                     ops=comp_ops,
-                    comm_op_fwd=self.tp_comms[i][0],
-                    comm_op_bwd=self.tp_comms[i][1],
+                    comm_op_fwd=fwd_comm,
+                    comm_op_bwd=bwd_comm,
                     fuse_ops=False,
                     is_last_mlp=self.is_last_layer and i == 1,
                 )
@@ -173,6 +186,9 @@ class MLPLayer(MegatronModule, BaseTransformerLayer):
                 input_buffer=comm_tensor,
             )
         self.tp_comms[batch_idx - 1][1] = bwd_comm
+    
+    def init_tensor_parallel_comm(self, allreduce_comm_ops):
+        self.tp_comms = allreduce_comm_ops
 
     def get_persistent_outputs_fwd(self, batch_idx: int):
         return self.mlp.get_persistent_outputs_fwd()[batch_idx - 1]

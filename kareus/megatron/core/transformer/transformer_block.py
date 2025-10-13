@@ -37,6 +37,9 @@ from megatron.core.parallel_state import (
     get_context_parallel_group,
     get_context_parallel_world_size,
     get_context_parallel_rank,
+    get_tensor_model_parallel_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
 )
 from megatron.core.num_microbatches_calculator import get_micro_batch_size
 
@@ -54,6 +57,7 @@ from kareus.megatron.core.transformer.partition_transformer_layer import (
 from kareus.utils.debug import save_tensors
 from kareus.transformer_engine.pytorch.ops import AllGatherKV
 from kareus.transformer_engine.pytorch.ops import ReduceScatterKV
+from kareus.transformer_engine.pytorch.ops import AllReduce
 
 
 try:
@@ -240,57 +244,92 @@ class TransformerBlock(MegatronModule):
             mlp_bda = mlp_layer.post_mlp_bda
     
     def _init_layer_tensor_parallel_comm(self):
-        comm_tensor1 = self.attention_layers[0].get_persistent_outputs_bwd(1) # TODO: first layer
+        nano_batch_size = get_micro_batch_size() // 2
+        local_seq_length = self.config.max_sequence_length // self.config.context_parallel_size
+        hidden_size = self.config.hidden_size
+        self.allreduce_comm_ops = []
+        # use a common allreduce for all layers
+        # use a common allreduce for forward & backward
+        for i in range(2): # two nano-batches
+            allreduce_comm_op = AllReduce(
+                process_group=get_tensor_model_parallel_group(check_initialized=False),
+                async_op=True,
+                backend="msccl",
+                rank=get_tensor_model_parallel_rank(),
+                world_size=get_tensor_model_parallel_world_size(),
+                tensor_size=[
+                    local_seq_length, 
+                    nano_batch_size, 
+                    hidden_size,
+                ],
+                device=torch.cuda.current_device(),
+                dtype=torch.bfloat16,
+                batch_idx=i,
+            )
+            self.allreduce_comm_ops.append(allreduce_comm_op)
+        
         num_layers = len(self.attention_layers)
         for l_no in range(num_layers):
             attention_layer = self.attention_layers[l_no]
             mlp_layer = self.mlp_layers[l_no]
 
-            attention_layer.init_tensor_parallel_comm_fwd(1, comm_tensor1)
-            
-            current_hidden_1 = attention_layer.get_persistent_outputs_fwd(1)
-            comm_tensor2 = current_hidden_1
-            attention_layer.init_tensor_parallel_comm_fwd(2, comm_tensor2)
-
-            current_hidden_2 = attention_layer.get_persistent_outputs_fwd(2)
-            comm_tensor1 = current_hidden_2
-            mlp_layer.init_tensor_parallel_comm_fwd(1, comm_tensor1)
-
-            current_hidden_1 = mlp_layer.get_persistent_outputs_fwd(1)
-            comm_tensor2 = current_hidden_1
-            mlp_layer.init_tensor_parallel_comm_fwd(2, comm_tensor2)
-
-            current_hidden_2 = mlp_layer.get_persistent_outputs_fwd(2)
-            comm_tensor1 = current_hidden_2
-        
-        comm_tensor2 = self.mlp_layers[-1].get_persistent_outputs_fwd(2) # TODO: last layer
-        for l_no in range(num_layers - 1, -1, -1):
-            mlp_layer = self.mlp_layers[l_no]
-            attention_layer = self.attention_layers[l_no]
-            
-            mlp_layer.init_tensor_parallel_comm_bwd(2, comm_tensor2)
-
-            current_grad_2 = mlp_layer.get_persistent_outputs_bwd(2)
-            comm_tensor1 = current_grad_2
-            mlp_layer.init_tensor_parallel_comm_bwd(1, comm_tensor1)
-
-            current_grad_1 = mlp_layer.get_persistent_outputs_bwd(1)
-            comm_tensor2 = current_grad_1
-            attention_layer.init_tensor_parallel_comm_bwd(2, comm_tensor2)
-
-            current_grad_2 = attention_layer.get_persistent_outputs_bwd(2)
-            comm_tensor1 = current_grad_2
-            attention_layer.init_tensor_parallel_comm_bwd(1, comm_tensor1)
-
-            current_grad_1 = attention_layer.get_persistent_outputs_bwd(1)
-            comm_tensor2 = current_grad_1
-        
-        for l_no in range(num_layers):
-            attention_layer = self.attention_layers[l_no]
-            mlp_layer = self.mlp_layers[l_no]
+            attention_layer.init_tensor_parallel_comm(self.allreduce_comm_ops)
+            mlp_layer.init_tensor_parallel_comm(self.allreduce_comm_ops)
 
             attention_layer.build_attention_fuser()
             mlp_layer.build_mlp_fuser()
+
+        # comm_tensor1 = self.attention_layers[0].get_persistent_outputs_bwd(1) # TODO: first layer
+        # num_layers = len(self.attention_layers)
+        # for l_no in range(num_layers):
+        #     attention_layer = self.attention_layers[l_no]
+        #     mlp_layer = self.mlp_layers[l_no]
+
+        #     attention_layer.init_tensor_parallel_comm_fwd(1, comm_tensor1)
+            
+        #     current_hidden_1 = attention_layer.get_persistent_outputs_fwd(1)
+        #     comm_tensor2 = current_hidden_1
+        #     attention_layer.init_tensor_parallel_comm_fwd(2, comm_tensor2)
+
+        #     current_hidden_2 = attention_layer.get_persistent_outputs_fwd(2)
+        #     comm_tensor1 = current_hidden_2
+        #     mlp_layer.init_tensor_parallel_comm_fwd(1, comm_tensor1)
+
+        #     current_hidden_1 = mlp_layer.get_persistent_outputs_fwd(1)
+        #     comm_tensor2 = current_hidden_1
+        #     mlp_layer.init_tensor_parallel_comm_fwd(2, comm_tensor2)
+
+        #     current_hidden_2 = mlp_layer.get_persistent_outputs_fwd(2)
+        #     comm_tensor1 = current_hidden_2
+        
+        # comm_tensor2 = self.mlp_layers[-1].get_persistent_outputs_fwd(2) # TODO: last layer
+        # for l_no in range(num_layers - 1, -1, -1):
+        #     mlp_layer = self.mlp_layers[l_no]
+        #     attention_layer = self.attention_layers[l_no]
+            
+        #     mlp_layer.init_tensor_parallel_comm_bwd(2, comm_tensor2)
+
+        #     current_grad_2 = mlp_layer.get_persistent_outputs_bwd(2)
+        #     comm_tensor1 = current_grad_2
+        #     mlp_layer.init_tensor_parallel_comm_bwd(1, comm_tensor1)
+
+        #     current_grad_1 = mlp_layer.get_persistent_outputs_bwd(1)
+        #     comm_tensor2 = current_grad_1
+        #     attention_layer.init_tensor_parallel_comm_bwd(2, comm_tensor2)
+
+        #     current_grad_2 = attention_layer.get_persistent_outputs_bwd(2)
+        #     comm_tensor1 = current_grad_2
+        #     attention_layer.init_tensor_parallel_comm_bwd(1, comm_tensor1)
+
+        #     current_grad_1 = attention_layer.get_persistent_outputs_bwd(1)
+        #     comm_tensor2 = current_grad_1
+        
+        # for l_no in range(num_layers):
+        #     attention_layer = self.attention_layers[l_no]
+        #     mlp_layer = self.mlp_layers[l_no]
+
+        #     attention_layer.build_attention_fuser()
+        #     mlp_layer.build_mlp_fuser()
     
     def _init_context_parallel_comm(self):
         nano_batch_size = get_micro_batch_size() // 2
@@ -465,43 +504,60 @@ class TransformerBlock(MegatronModule):
             residual_2 = h1
             comm_hidden_1 = (h2, None)
 
+            context_parallel = self.config.context_parallel_size > 1
             for l_no in range(len(self.attention_layers)):
                 attention_layer = self.attention_layers[l_no]
                 mlp_layer = self.mlp_layers[l_no]
 
                 # Attention pass - micro-batch 1
-                current_hidden_1, residual_1, comm_hidden_1, current_context_1 = attention_layer(
-                    batch_idx=1,
-                    hidden_states=current_hidden_1,
-                    residual=residual_1,
-                    comm_hidden_states=comm_hidden_1,
-                    attention_mask=am1,
-                    context=current_context_1,
-                    context_mask=cm1,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_bias=ab1,
-                    inference_context=inference_context,
-                    packed_seq_params=psp,
-                )
-                comm_hidden_2 = current_hidden_1
-                current_hidden_2 = comm_hidden_1 if not l_no == 0 else current_hidden_2
+                if not context_parallel:
+                    current_hidden_1, residual_1, comm_hidden_1, current_context_1 = attention_layer(
+                        batch_idx=1,
+                        hidden_states=current_hidden_1,
+                        residual=residual_1,
+                        comm_hidden_states=comm_hidden_1,
+                        attention_mask=am1,
+                        context=current_context_1,
+                        context_mask=cm1,
+                        rotary_pos_emb=rotary_pos_emb,
+                        attention_bias=ab1,
+                        inference_context=inference_context,
+                        packed_seq_params=psp,
+                    )
+                    comm_hidden_2 = current_hidden_1
+                    current_hidden_2 = comm_hidden_1 if not l_no == 0 else current_hidden_2
 
-                # Attention pass - micro-batch 2
-                current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(
-                    batch_idx=2,
-                    hidden_states=current_hidden_2,
-                    residual=residual_2,
-                    comm_hidden_states=comm_hidden_2,
-                    attention_mask=am2,
-                    context=current_context_2,
-                    context_mask=cm2,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_bias=ab2,
-                    inference_context=inference_context,
-                    packed_seq_params=psp,
-                )
-                comm_hidden_1 = current_hidden_2
-                current_hidden_1 = comm_hidden_2
+                    # Attention pass - micro-batch 2
+                    current_hidden_2, residual_2, comm_hidden_2, current_context_2 = attention_layer(
+                        batch_idx=2,
+                        hidden_states=current_hidden_2,
+                        residual=residual_2,
+                        comm_hidden_states=comm_hidden_2,
+                        attention_mask=am2,
+                        context=current_context_2,
+                        context_mask=cm2,
+                        rotary_pos_emb=rotary_pos_emb,
+                        attention_bias=ab2,
+                        inference_context=inference_context,
+                        packed_seq_params=psp,
+                    )
+                    comm_hidden_1 = current_hidden_2
+                    current_hidden_1 = comm_hidden_2
+                
+                else:
+                    current_hidden_1, comm_hidden_1, residual_1, residual_2 = attention_layer(
+                        batch_idx=1,
+                        hidden_states=current_hidden_1 if not l_no == 0 else (current_hidden_1, current_hidden_2),
+                        residual=(residual_1, residual_2),
+                        comm_hidden_states=comm_hidden_1,
+                        attention_mask=am1,
+                        context=current_context_1,
+                        context_mask=cm1,
+                        rotary_pos_emb=rotary_pos_emb,
+                        attention_bias=ab1,
+                        inference_context=inference_context,
+                        packed_seq_params=psp,
+                    )
 
                 # MLP pass - micro-batch 1
                 current_hidden_1, residual_1, comm_hidden_1 = mlp_layer(
