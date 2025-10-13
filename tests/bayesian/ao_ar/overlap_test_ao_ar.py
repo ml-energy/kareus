@@ -6,7 +6,7 @@ import sys
 import traceback
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
-sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../fuser/'))
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from common_config import FuserTestConfig
@@ -55,13 +55,13 @@ class AttentionFuserTest:
         self.dtype = torch.bfloat16
         self.rank = rank
         self.world_size = world_size
-        self.context_parallel_size = world_size
-        assert self.context_parallel_size == args.context_parallel_size
-        self.tensor_parallel_size = args.tensor_parallel_size
+        self.tensor_parallel_size = world_size
+        assert self.tensor_parallel_size == args.tensor_parallel_size
+        self.context_parallel_size = args.context_parallel_size
         self.model_name = args.model_name
         
         # Initialize distributed processing
-        self.cp_group = init_distributed(rank, world_size)
+        self.tp_group = init_distributed(rank, world_size)
         
         # Test configuration
         self.batch_size = args.batch_size
@@ -77,7 +77,7 @@ class AttentionFuserTest:
         if rank == 0:
             print(f"self.config: {self.config}")
 
-        self.frequency = args.frequency
+        self.frequency = args.frequency if hasattr(args, "frequency") else "default"
         self.repeat_num = 1
     
     def create_test_tensors(self):
@@ -105,8 +105,8 @@ class AttentionFuserTest:
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         global K_TO_SAVE, V_TO_SAVE
-        K_TO_SAVE[0] = key_to_save
-        V_TO_SAVE[0] = value_to_save
+        K_TO_SAVE[1] = key_to_save
+        V_TO_SAVE[1] = value_to_save
 
         k_ag = torch.randn(
             self.seq_length, nano_batch_size, local_query_groups, self.head_dim,
@@ -117,21 +117,17 @@ class AttentionFuserTest:
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         global K_AG, V_AG
-        K_AG[0] = k_ag
-        V_AG[0] = v_ag
+        K_AG[1] = k_ag
+        V_AG[1] = v_ag
 
-        allgather_key = torch.randn(
-            local_seq_length, nano_batch_size, local_query_groups, self.head_dim,
-            dtype=self.dtype, device=self.device, requires_grad=True
-        )
-        allgather_value = torch.randn(
-            local_seq_length, nano_batch_size, local_query_groups, self.head_dim,
+        allreduce_inputs = torch.randn(
+            local_seq_length, nano_batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
         
-        return query_1, query_2, allgather_key, allgather_value
+        return query_1, query_2, allreduce_inputs
     
-    def create_operations(self, allgather_value):
+    def create_operations(self, allreduce_inputs):
         """Create all the required operations for the attention fuser."""
         
         # 6. Dot Product Attention Operation
@@ -142,8 +138,9 @@ class AttentionFuserTest:
             attention_type="self",
             cp_comm_type="all_gather",
         )
+        # TODO: remove cp_group in attention_op
         attention_op.set_context_parallel_group(
-            cp_group=self.cp_group,
+            cp_group=self.tp_group,
             cp_global_ranks=list(range(self.world_size)),
             cp_stream=torch.cuda.current_stream(),
         )
@@ -165,25 +162,24 @@ class AttentionFuserTest:
         # 8. AllReduce Communication Operation
         nano_batch_size = self.batch_size // 2
         local_seq_length = self.seq_length // self.context_parallel_size
-        new_size = list(allgather_value.size())
-        new_size[0] = self.seq_length
         if self.context_parallel_size > 1:
-            allgather_comm_op = AllGatherKV(
-                process_group=self.cp_group,
+            allreduce_comm_op = AllReduce(
+                process_group=self.tp_group,
                 async_op=True,
                 backend="msccl",
                 rank=self.rank,
                 world_size=self.world_size,
-                tensor_size=new_size,
+                use_persistent_output=True,
+                input_buffer=allreduce_inputs,
+                tensor_size=[local_seq_length, nano_batch_size, self.hidden_size],
                 device=self.device,
                 dtype=self.dtype,
-                batch_idx=1,
             )
         
             return [
                 attention_op,
                 linear_proj_op,
-                allgather_comm_op
+                allreduce_comm_op
             ]
 
         else:
@@ -196,7 +192,7 @@ class AttentionFuserTest:
         return overlap_windows
     
     def test_config(self, monitor, test_tensors, attention_fuser, overlap_window, sm_configs):
-        query_1, query_2, allgather_key, allgather_value = test_tensors
+        query_1, query_2, allreduce_inputs = test_tensors
         t_results_list = []
         e_results_list = []
         ranks_energy_list = []
@@ -208,13 +204,13 @@ class AttentionFuserTest:
             if i == 2:
                 time_start = time.time()
                 torch.cuda.profiler.start()
-            x, bias = attention_fuser(
+            x, bias, _ = attention_fuser(
                 query_1=query_1,
                 query_2=query_2,
-                comm_key=allgather_key,
-                comm_value=allgather_value,
-                comm_overlap_window_ao_ag=overlap_window,
-                comm_sm_configs_ao_ag=sm_configs,
+                comm_key=allreduce_inputs,
+                comm_value=None,
+                comm_overlap_window_ao_ar=overlap_window,
+                comm_sm_configs_ao_ar=sm_configs,
             )
         torch.cuda.synchronize()
         dist.barrier()
@@ -227,7 +223,7 @@ class AttentionFuserTest:
             dist_list = [iterations]
         else:
             dist_list = [None]
-        dist.broadcast_object_list(dist_list, src=0, group=self.cp_group)
+        dist.broadcast_object_list(dist_list, src=0, group=self.tp_group)
         iterations = dist_list[0]
         print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
 
@@ -238,13 +234,13 @@ class AttentionFuserTest:
                 monitor.begin_window("step")
 
             for i in range(iterations):
-                x, bias = attention_fuser(
+                x, bias, _ = attention_fuser(
                     query_1=query_1,
                     query_2=query_2,
-                    comm_key=allgather_key,
-                    comm_value=allgather_value,
-                    comm_overlap_window_ao_ag=overlap_window,
-                    comm_sm_configs_ao_ag=sm_configs,
+                    comm_key=allreduce_inputs,
+                    comm_value=None,
+                    comm_overlap_window_ao_ar=overlap_window,
+                    comm_sm_configs_ao_ar=sm_configs,
                 )
             torch.cuda.synchronize()
             dist.barrier()
@@ -259,7 +255,7 @@ class AttentionFuserTest:
                 ranks_energy_list.append(ranks_energy)
         
         if self.rank == 0:
-            with open(f"logs/ao_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "a") as f:
+            with open(f"logs/ao_ar/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "a") as f:
                 line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
                 for i in range(self.repeat_num):
                     line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
@@ -274,9 +270,9 @@ class AttentionFuserTest:
 
         attention_fuser = PartitionFuser(
             ops=comp_ops,
-            comm_ops_fwd=[comm_op],
+            comm_ops_fwd=[None, comm_op],
             fuse_ops=False,
-            profile_ao_ag=True,
+            profile_ao_ar=True,
         )
         print(f"attention_fuser._forward_ops: {attention_fuser._forward_ops}")
         print(f"attention_fuser._backward_ops: {attention_fuser._backward_ops}")
@@ -285,8 +281,8 @@ class AttentionFuserTest:
         if self.rank == 0:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
-            os.makedirs(f"logs/ao_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/ao_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "w") as f:
+            os.makedirs(f"logs/ao_ar/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
+            with open(f"logs/ao_ar/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "w") as f:
                 title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
                 for i in range(self.repeat_num):
                     title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
@@ -345,7 +341,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", "-m", type=str, default=FuserTestConfig.MODEL_NAME)
-    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
+    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument("--tensor_parallel_size", "-tp", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument("--context_parallel_size", "-cp", type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
     parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)

@@ -20,6 +20,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import AllGatherK
 from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.attn_oproj_fuser import AttnOprojPartitionFuser as PartitionFuser
+from kareus.megatron.core.extensions.attn_oproj_fuser import _AttnOprojFuserAutogradFunction as AttnOprojAutogradFunction
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from kareus.utils.debug import nvtx_range
@@ -107,6 +108,8 @@ class AttentionFuserTest:
         global K_TO_SAVE, V_TO_SAVE
         K_TO_SAVE[0] = key_to_save
         V_TO_SAVE[0] = value_to_save
+        K_TO_SAVE[1] = key_to_save
+        V_TO_SAVE[1] = value_to_save
 
         k_ag = torch.randn(
             self.seq_length, nano_batch_size, local_query_groups, self.head_dim,
@@ -119,6 +122,8 @@ class AttentionFuserTest:
         global K_AG, V_AG
         K_AG[0] = k_ag
         V_AG[0] = v_ag
+        K_AG[1] = k_ag
+        V_AG[1] = v_ag
 
         allgather_key = torch.randn(
             local_seq_length, nano_batch_size, local_query_groups, self.head_dim,
@@ -128,10 +133,37 @@ class AttentionFuserTest:
             local_seq_length, nano_batch_size, local_query_groups, self.head_dim,
             dtype=self.dtype, device=self.device, requires_grad=True
         )
+
+        allreduce_inputs = torch.randn(
+            local_seq_length, nano_batch_size, self.hidden_size,
+            dtype=self.dtype, device=self.device
+        )
         
-        return query_1, query_2, allgather_key, allgather_value
+        return query_1, query_2, allgather_key, allgather_value, allreduce_inputs
     
-    def create_operations(self, allgather_value):
+    def create_gradient_tensors(self):
+        """Create gradient tensors for backward pass testing."""
+        nano_batch_size = self.batch_size // 2
+        local_seq_length = self.seq_length // self.context_parallel_size
+        local_attention_heads = self.num_attention_heads // self.tensor_parallel_size
+        local_query_groups = self.num_query_groups // self.tensor_parallel_size
+        
+        output_grad_1 = torch.randn(
+            local_seq_length, nano_batch_size, self.hidden_size,
+            dtype=self.dtype, device=self.device
+        )
+
+        output_grad_2 = torch.randn(
+            local_seq_length, nano_batch_size, self.hidden_size,
+            dtype=self.dtype, device=self.device
+        )
+        
+        bias_grad_1 = None
+        bias_grad_2 = None
+        
+        return output_grad_1, output_grad_2, bias_grad_1, bias_grad_2
+    
+    def create_operations(self):
         """Create all the required operations for the attention fuser."""
         
         # 6. Dot Product Attention Operation
@@ -142,6 +174,7 @@ class AttentionFuserTest:
             attention_type="self",
             cp_comm_type="all_gather",
         )
+        # TODO: remove cp_group in attention_op
         attention_op.set_context_parallel_group(
             cp_group=self.cp_group,
             cp_global_ranks=list(range(self.world_size)),
@@ -165,8 +198,7 @@ class AttentionFuserTest:
         # 8. AllReduce Communication Operation
         nano_batch_size = self.batch_size // 2
         local_seq_length = self.seq_length // self.context_parallel_size
-        new_size = list(allgather_value.size())
-        new_size[0] = self.seq_length
+        local_query_groups = self.num_query_groups // self.tensor_parallel_size
         if self.context_parallel_size > 1:
             allgather_comm_op = AllGatherKV(
                 process_group=self.cp_group,
@@ -174,10 +206,10 @@ class AttentionFuserTest:
                 backend="msccl",
                 rank=self.rank,
                 world_size=self.world_size,
-                tensor_size=new_size,
+                tensor_size=[self.seq_length, nano_batch_size, local_query_groups, self.head_dim],
                 device=self.device,
                 dtype=self.dtype,
-                batch_idx=1,
+                batch_idx=0,
             )
         
             return [
@@ -191,12 +223,13 @@ class AttentionFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1), (0, 2), (1, 2),
+            (-1, -1), (0, 0),
         ]
         return overlap_windows
     
-    def test_config(self, monitor, test_tensors, attention_fuser, overlap_window, sm_configs):
-        query_1, query_2, allgather_key, allgather_value = test_tensors
+    def test_config(self, monitor, test_tensors, grad_tensors, attention_fuser, overlap_window, sm_configs):
+        query_1, query_2, allgather_key, allgather_value, allreduce_inputs = test_tensors
+        output_grad_1, output_grad_2, bias_grad_1, bias_grad_2 = grad_tensors
         t_results_list = []
         e_results_list = []
         ranks_energy_list = []
@@ -207,20 +240,28 @@ class AttentionFuserTest:
         for i in range(10):
             if i == 2:
                 time_start = time.time()
-                torch.cuda.profiler.start()
-            x, bias = attention_fuser(
-                query_1=query_1,
-                query_2=query_2,
-                comm_key=allgather_key,
-                comm_value=allgather_value,
-                comm_overlap_window_ao_ag=overlap_window,
-                comm_sm_configs_ao_ag=sm_configs,
+
+            if i == 0:
+                out_1, out_2, bias_1, bias_2, func_ctx = attention_fuser(
+                    query_1=query_1,
+                    query_2=query_2,
+                    comm_key=allgather_key,
+                    comm_value=allgather_value,
+                    comm_overlap_window_a_ag=overlap_window,
+                    comm_sm_configs_a_ag=sm_configs,
+                )
+            
+            AttnOprojAutogradFunction.backward(
+                func_ctx,
+                query_1, # grad_query
+                query_2,
+                bias_grad_1,
+                bias_grad_2,
             )
         torch.cuda.synchronize()
         dist.barrier()
         time_end = time.time()
         duration = (time_end - time_start) / 8
-        torch.cuda.profiler.stop()
 
         if self.rank == 0:
             iterations = int(8 / duration)
@@ -238,13 +279,12 @@ class AttentionFuserTest:
                 monitor.begin_window("step")
 
             for i in range(iterations):
-                x, bias = attention_fuser(
-                    query_1=query_1,
-                    query_2=query_2,
-                    comm_key=allgather_key,
-                    comm_value=allgather_value,
-                    comm_overlap_window_ao_ag=overlap_window,
-                    comm_sm_configs_ao_ag=sm_configs,
+                AttnOprojAutogradFunction.backward(
+                    func_ctx,
+                    query_1,
+                    query_2,
+                    bias_grad_1,
+                    bias_grad_2,
                 )
             torch.cuda.synchronize()
             dist.barrier()
@@ -259,7 +299,7 @@ class AttentionFuserTest:
                 ranks_energy_list.append(ranks_energy)
         
         if self.rank == 0:
-            with open(f"logs/ao_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "a") as f:
+            with open(f"logs/a_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_results.csv", "a") as f:
                 line_str = f"{overlap_window[0]},{overlap_window[1]},{sm_configs[0]},{sm_configs[1]},"
                 for i in range(self.repeat_num):
                     line_str += f"{t_results_list[i]},{e_results_list[i]},{','.join(map(str, ranks_energy_list[i]))},"
@@ -268,15 +308,17 @@ class AttentionFuserTest:
     
     def run_overlap_test(self):
         test_tensors = self.create_test_tensors()
-        operations = self.create_operations(test_tensors[-1])
+        grad_tensors = self.create_gradient_tensors()
+        operations = self.create_operations()
         comp_ops = operations[:-1]
         comm_op = operations[-1]
 
         attention_fuser = PartitionFuser(
             ops=comp_ops,
-            comm_ops_fwd=[comm_op],
+            comm_ops_fwd=[None, None],
+            comm_ops_bwd=[None, comm_op, None, None],
             fuse_ops=False,
-            profile_ao_ag=True,
+            profile_a_ag=True,
         )
         print(f"attention_fuser._forward_ops: {attention_fuser._forward_ops}")
         print(f"attention_fuser._backward_ops: {attention_fuser._backward_ops}")
@@ -285,8 +327,8 @@ class AttentionFuserTest:
         if self.rank == 0:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
-            os.makedirs(f"logs/ao_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/ao_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/forward_results.csv", "w") as f:
+            os.makedirs(f"logs/a_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
+            with open(f"logs/a_ag/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/backward_results.csv", "w") as f:
                 title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
                 for i in range(self.repeat_num):
                     title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
@@ -308,10 +350,10 @@ class AttentionFuserTest:
                     with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
                         self.test_config(
                             monitor, 
-                            test_tensors, attention_fuser, 
+                            test_tensors, grad_tensors, attention_fuser, 
                             overlap_window, sm_configs
                         )
-                    # return
+                    return
                     time.sleep(10)
 
 

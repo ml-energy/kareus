@@ -173,8 +173,9 @@ def run_partition_ao_ag(
     #     current_stream.synchronize()
     # if comm_op_fwd is not None:
     #     comm_op_fwd.sync()
-    WAIT_EVENT.record(comm_op_fwd.comm_stream)
-    current_stream.wait_event(WAIT_EVENT)
+    if comm_op_fwd is not None:
+        WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        current_stream.wait_event(WAIT_EVENT)
 
     assert get_bias == True
     return x, bias
@@ -318,8 +319,9 @@ def run_partition_ao_ar(
     #     current_stream.synchronize()
     # if comm_op_fwd is not None:
     #     comm_op_fwd.sync()
-    WAIT_EVENT.record(comm_op_fwd.comm_stream)
-    current_stream.wait_event(WAIT_EVENT)
+    if comm_op_fwd is not None:
+        WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        current_stream.wait_event(WAIT_EVENT)
 
     assert get_bias == True
     return x, bias, comm_input
@@ -421,8 +423,9 @@ def run_partition_o_ar_backward(
     
     # if comm_op_bwd is not None:
     #     comm_op_bwd.sync()
-    WAIT_EVENT.record(comm_op_bwd.comm_stream)
-    current_stream.wait_event(WAIT_EVENT)
+    if comm_op_bwd is not None:
+        WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        current_stream.wait_event(WAIT_EVENT)
     
     return grad_out_1, dx
 
@@ -621,8 +624,9 @@ def run_partition_a_ag_backward(
     
     # if comm_op_bwd is not None:
     #     comm_op_bwd.sync()
-    WAIT_EVENT.record(comm_op_bwd.comm_stream)
-    current_stream.wait_event(WAIT_EVENT)
+    if comm_op_bwd is not None:
+        WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        current_stream.wait_event(WAIT_EVENT)
     
     return dx
 
@@ -869,7 +873,7 @@ class _AttnOprojFuserAutogradFunction(torch.autograd.Function):
             )
             comm_ops_fwd[1].sync()
 
-        if profile_a_rs and profile_a_ag and profile_o_ag and profile_o_ar:
+        if profile_a_rs or profile_a_ag or profile_o_ag or profile_o_ar:
             return out_1, out_2, bias_1, bias_2, func_ctx
         else:
             return out_1, out_2, bias_1, bias_2
@@ -924,7 +928,7 @@ class _AttnOprojFuserAutogradFunction(torch.autograd.Function):
                 return grad_out_1, grad_out_2
         
         if not profile_a_rs and not profile_a_ag:
-            attn_ctx = basic_op_ctxs[0]
+            attn_ctx = basic_op_ctxs_1[0]
             k_pre, v_pre = attn_ctx.saved_tensors[1], attn_ctx.saved_tensors[2]
             grad_out_1 = run_partition_o_ag_backward(
                 basic_op_ctxs_1,
@@ -942,7 +946,7 @@ class _AttnOprojFuserAutogradFunction(torch.autograd.Function):
                 return grad_out_1
         
         if not profile_a_rs:
-            attn_ctx = basic_op_ctxs[0]
+            attn_ctx = basic_op_ctxs_2[0]
             k_pre, v_pre = attn_ctx.saved_tensors[1], attn_ctx.saved_tensors[2]
             grad_query_2 = run_partition_a_ag_backward(
                 basic_op_ctxs_2,

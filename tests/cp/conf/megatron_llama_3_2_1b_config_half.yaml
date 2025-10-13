@@ -59,7 +59,7 @@ model:
   # num_layers_in_last_pipeline_stage: 2
 
   # model architecture - LLaMA 3.2 1B
-  encoder_seq_length: 4096 # Same as 3.1 8B for consistency
+  encoder_seq_length: 8192 # Same as 3.1 8B for consistency
   max_position_embeddings: ${.encoder_seq_length}
   num_layers: 8 # LLaMA 3.2 1B: 16 layers (half of 8B)
   hidden_size: 2048 # LLaMA 3.2 1B: 2048 (half of 8B)
@@ -97,7 +97,7 @@ model:
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
-  enable_zeus_monitor: false
+  enable_zeus_monitor: true
   enable_power_monitor: false
   enable_perseus_optimizer: false
   enable_kareus_scheduler: false
@@ -150,7 +150,7 @@ model:
   # These memory intensive activations are also less compute intensive which makes activation checkpointing more efficient for LLMs (20B+).
   # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
   # 'full' will checkpoint the entire transformer layer.
-  activations_checkpoint_granularity: null
+  activations_checkpoint_granularity: "full"
   # activations_checkpoint_granularity: "full" # Checkpoint entire layers for maximum memory savings
   activations_checkpoint_method: 'uniform' # Evenly distribute checkpoints across all layers
   # 'uniform' divides the total number of transformer layers and checkpoints the input activation

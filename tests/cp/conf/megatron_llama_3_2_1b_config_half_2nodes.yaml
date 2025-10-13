@@ -8,9 +8,9 @@ trainer:
   enable_checkpointing: False
   use_distributed_sampler: False
   max_epochs: 1 # PTL default. In practice, max_steps will be reached first. 
-  max_steps: 30 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
-  log_every_n_steps: 40
-  val_check_interval: 40
+  max_steps: 15 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
+  log_every_n_steps: 20
+  val_check_interval: 20
   limit_val_batches: 1
   limit_test_batches: 1
   accumulate_grad_batches: 1 # do not modify, grad acc is automatic for training megatron models
@@ -55,11 +55,11 @@ model:
   cp_comm_type: "all_gather"
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
 
-  num_layers_in_first_pipeline_stage: 6
-  num_layers_in_last_pipeline_stage: 2
+  num_layers_in_first_pipeline_stage: 9
+  # num_layers_in_last_pipeline_stage: 2
 
   # model architecture - LLaMA 3.2 1B
-  encoder_seq_length: 4096 # Same as 3.1 8B for consistency
+  encoder_seq_length: 8192 # Same as 3.1 8B for consistency
   max_position_embeddings: ${.encoder_seq_length}
   num_layers: 16 # LLaMA 3.2 1B: 16 layers (half of 8B)
   hidden_size: 2048 # LLaMA 3.2 1B: 2048 (half of 8B)
@@ -93,7 +93,7 @@ model:
   batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
   num_query_groups: 8 # LLaMA 3.2 1B uses grouped query attention with 8 key-value heads
 
-  enable_megatron_timers: false
+  enable_megatron_timers: true
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
