@@ -1,6 +1,6 @@
 name: megatron_llama_3_2_1b
 trainer:
-  devices: 4
+  devices: 8
   num_nodes: 1
   accelerator: gpu
   precision: bf16
@@ -49,7 +49,7 @@ model:
   # gradient accumulation will be done automatically based on data_parallel_size
   micro_batch_size: 16 # Increased for smaller model
   global_batch_size: 128 # will use more micro batches to reach global batch size
-  tensor_model_parallel_size: 2 # Reduced for smaller model
+  tensor_model_parallel_size: 4 # Reduced for smaller model
   pipeline_model_parallel_size: 1 # inter-layer model parallelism
   context_parallel_size: 2 # context parallelism
   cp_comm_type: "all_gather"

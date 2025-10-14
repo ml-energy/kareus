@@ -75,8 +75,8 @@ class AttentionFuserTest:
         
         # Create transformer config
         self.config = FuserTestConfig.create_attention_config()
-        if rank == 0:
-            print(f"self.config: {self.config}")
+        # if rank == 0:
+        #     print(f"self.config: {self.config}")
 
         self.frequency = args.frequency
         self.repeat_num = 1
@@ -223,7 +223,7 @@ class AttentionFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1), (0, 0),
+            (0, 0),
         ]
         return overlap_windows
     
@@ -340,7 +340,7 @@ class AttentionFuserTest:
         overlap_windows = self.get_overlap_windows()
         for overlap_window in overlap_windows:
             for sm_num in range(1, 21):
-                for block_size in [512, 1024]:
+                for block_size in [1024]:
                     # if sm_num == 17 and block_size == 512 and overlap_window[0] == 4 and overlap_window[1] == 5:
                     #     skip = False
                     # if skip:
@@ -353,7 +353,7 @@ class AttentionFuserTest:
                             test_tensors, grad_tensors, attention_fuser, 
                             overlap_window, sm_configs
                         )
-                    return
+                    # return
                     time.sleep(10)
 
 

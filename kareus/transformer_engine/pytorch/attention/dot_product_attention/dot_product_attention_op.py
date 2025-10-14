@@ -218,8 +218,8 @@ class DotProductAttentionOp(BasicOperation):
         """Set the context parallel attributes for the given module."""
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
-        # self.cp_stream = cp_stream
-        self.cp_stream = torch.cuda.current_stream()
+        self.cp_stream = cp_stream
+        # self.cp_stream = torch.cuda.current_stream()
         self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
 
     def op_forward(

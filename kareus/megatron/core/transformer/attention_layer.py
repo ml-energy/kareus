@@ -79,24 +79,24 @@ def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str):
         if not fuser_type == "ao":
             return {
                 "comm_overlap_window": (0, -1),  # comm_end doesn't matter
-                "comm_sm_configs": (6, 1024),
+                "comm_sm_configs": (12, 1024),
                 "comm_overlap_window_backward": (0, -1),
-                "comm_sm_configs_backward": (6, 1024),
+                "comm_sm_configs_backward": (12, 1024),
             }
         else:
             return {
                 "comm_overlap_window_ao_ag": (0, -1),
-                "comm_sm_configs_ao_ag": (6, 1024),
+                "comm_sm_configs_ao_ag": (12, 1024),
                 "comm_overlap_window_ao_ar": (0, -1),
-                "comm_sm_configs_ao_ar": (6, 1024),
+                "comm_sm_configs_ao_ar": (12, 1024),
                 "comm_overlap_window_a_rs": (0, -1),
-                "comm_sm_configs_a_rs": (6, 1024),
+                "comm_sm_configs_a_rs": (12, 1024),
                 "comm_overlap_window_a_ag": (0, -1),
-                "comm_sm_configs_a_ag": (6, 1024),
+                "comm_sm_configs_a_ag": (12, 1024),
                 "comm_overlap_window_o_ag": (0, -1),
-                "comm_sm_configs_o_ag": (6, 1024),
+                "comm_sm_configs_o_ag": (12, 1024),
                 "comm_overlap_window_o_ar": (0, -1),
-                "comm_sm_configs_o_ar": (6, 1024),
+                "comm_sm_configs_o_ar": (24, 1024),
             }
 
 

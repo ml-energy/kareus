@@ -27,7 +27,7 @@ class FuserTestConfig:
     
     # Default test parameters
     DEFAULT_WORLD_SIZE = 2
-    DEFAULT_TENSOR_PARALLEL_SIZE = 2
+    DEFAULT_TENSOR_PARALLEL_SIZE = 4
     DEFAULT_CONTEXT_PARALLEL_SIZE = 2
     DEFAULT_BATCH_SIZE = 16
     DEFAULT_SEQ_LENGTH = 8192
@@ -51,7 +51,7 @@ class FuserTestConfig:
         'A100': 85.0,
     }
 
-    GPU_TYPE = "A40"
+    GPU_TYPE = "A100"
 
     @staticmethod
     def get_p2p_power(gpu_type: str) -> float:
