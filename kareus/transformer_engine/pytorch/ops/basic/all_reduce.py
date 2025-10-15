@@ -149,7 +149,7 @@ class AllReduce(BasicOperation):
                 torch.distributed.all_reduce(x, group=self.process_group)
             return x
 
-    def sync(self) -> None:
+    def sync(self, current_stream: torch.cuda.Stream = None) -> None:
         """Synchronize pending asynchronous all-reduce operation.
         
         This method should be called to wait for completion of asynchronous
@@ -162,9 +162,11 @@ class AllReduce(BasicOperation):
         """
         if self.backend == "msccl":
             # if self.new_backend:
-            new_msccl_comm.msccl_AllReduce_sync()
+            # new_msccl_comm.msccl_AllReduce_sync()
             # else:
             #     msccl_comm.msccl_sync()
+            self.wait_event.record(self.comm_stream)
+            current_stream.wait_event(self.wait_event)
         else:
             if self._work_handle is None:
                 raise Warning("No AllReduce operation to sync")

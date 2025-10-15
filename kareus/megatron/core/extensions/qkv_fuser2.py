@@ -32,7 +32,7 @@ from kareus.megatron.core.extensions.ops import BiasSwigluOp
 from kareus.megatron.core.extensions.ops import BiasGeluOp
 from kareus.megatron.core.extensions.ops import BiasGegluOp
 
-WAIT_EVENT = torch.cuda.Event()
+# WAIT_EVENT = torch.cuda.Event()
 
 
 class _QKVFuserAutogradFunction(torch.autograd.Function):
@@ -130,8 +130,9 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                 }]
             )
             # comm_op_fwd.sync()
-            WAIT_EVENT.record(comm_op_fwd.comm_stream)
-            current_stream.wait_event(WAIT_EVENT)
+            # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            # current_stream.wait_event(WAIT_EVENT)
+            comm_op_fwd.sync(current_stream)
         
         # if not profile:
         #     if comm_start == 0:
@@ -261,8 +262,9 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             # comm_op_fwd.event_record(current_stream)
             # comm_op_fwd.event_wait()
             # comm_op_fwd.sync()
-            WAIT_EVENT.record(comm_op_fwd.comm_stream)
-            current_stream.wait_event(WAIT_EVENT)
+            # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            # current_stream.wait_event(WAIT_EVENT)
+            comm_op_fwd.sync(current_stream)
         
         # if is_last_mlp:
         #     comm_op_fwd.fuser_forward(
@@ -325,8 +327,9 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             )
             grad_comm_value = grad_comm_value[0][0]
             # comm_op_bwd.sync()
-            WAIT_EVENT.record(comm_op_bwd.comm_stream)
-            current_stream.wait_event(WAIT_EVENT)
+            # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            # current_stream.wait_event(WAIT_EVENT)
+            comm_op_bwd.sync(current_stream)
     
         # if not profile:
         #     if comm_start == 0:
@@ -429,8 +432,9 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             # comm_op_bwd.event_record(current_stream)
             # comm_op_bwd.event_wait()
             # comm_op_bwd.sync()
-            WAIT_EVENT.record(comm_op_bwd.comm_stream)
-            current_stream.wait_event(WAIT_EVENT)
+            # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            # current_stream.wait_event(WAIT_EVENT)
+            comm_op_bwd.sync(current_stream)
 
         # if is_first_attn:
         #     comm_op_bwd.fuser_forward(

@@ -32,7 +32,7 @@ from kareus.megatron.core.extensions.ops import BiasSwigluOp
 from kareus.megatron.core.extensions.ops import BiasGeluOp
 from kareus.megatron.core.extensions.ops import BiasGegluOp
 
-WAIT_EVENT = torch.cuda.Event()
+# WAIT_EVENT = torch.cuda.Event()
 
 
 def run_partition_ao_ag(
@@ -70,8 +70,9 @@ def run_partition_ao_ag(
             }]
         )
         # comm_op_fwd.sync()
-        WAIT_EVENT.record(comm_op_fwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_fwd.sync(current_stream)
     
     # if not profile:
     #     if comm_start == 0:
@@ -174,8 +175,9 @@ def run_partition_ao_ag(
     # if comm_op_fwd is not None:
     #     comm_op_fwd.sync()
     if comm_op_fwd is not None:
-        WAIT_EVENT.record(comm_op_fwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_fwd.sync(current_stream)
 
     assert get_bias == True
     return x, bias
@@ -217,8 +219,9 @@ def run_partition_ao_ar(
             }]
         )
         # comm_op_fwd.sync()
-        WAIT_EVENT.record(comm_op_fwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_fwd.sync(current_stream)
     
     # if not profile_ao_ag:
     if comm_start == 0:
@@ -320,8 +323,9 @@ def run_partition_ao_ar(
     # if comm_op_fwd is not None:
     #     comm_op_fwd.sync()
     if comm_op_fwd is not None:
-        WAIT_EVENT.record(comm_op_fwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_fwd.sync(current_stream)
 
     assert get_bias == True
     return x, bias, comm_input
@@ -365,8 +369,9 @@ def run_partition_o_ar_backward(
             }]
         )
         # comm_op_bwd.sync()
-        WAIT_EVENT.record(comm_op_bwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
 
     # if not profile:
     if comm_start == 0:
@@ -424,8 +429,9 @@ def run_partition_o_ar_backward(
     # if comm_op_bwd is not None:
     #     comm_op_bwd.sync()
     if comm_op_bwd is not None:
-        WAIT_EVENT.record(comm_op_bwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
     
     return grad_out_1, dx
 
@@ -466,8 +472,9 @@ def run_partition_o_ag_backward(
             }]
         )
         # comm_op_bwd.sync()
-        WAIT_EVENT.record(comm_op_bwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
 
     # if not profile:
     # if comm_start == 0:
@@ -565,8 +572,9 @@ def run_partition_a_ag_backward(
             }]
         )
         # comm_op_bwd.sync()
-        WAIT_EVENT.record(comm_op_bwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
 
     # if not profile:
     # if comm_start == 0:
@@ -625,8 +633,9 @@ def run_partition_a_ag_backward(
     # if comm_op_bwd is not None:
     #     comm_op_bwd.sync()
     if comm_op_bwd is not None:
-        WAIT_EVENT.record(comm_op_bwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
     
     return dx
 
@@ -665,8 +674,9 @@ def run_partition_a_rs_backward(
         )
         grad_comm_value = grad_comm_value[0][0]
         # comm_op_bwd.sync()
-        WAIT_EVENT.record(comm_op_bwd.comm_stream)
-        current_stream.wait_event(WAIT_EVENT)
+        # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
 
     # if not profile:
     # if comm_start == 0:
@@ -723,10 +733,11 @@ def run_partition_a_rs_backward(
         if isinstance(op, DotProductAttentionOp):
             grad_key, grad_value = fused_op_grad_extra_inputs[0]  # read from global variables
     
-    # if comm_op_bwd is not None:
+    if comm_op_bwd is not None:
     #     comm_op_bwd.sync()
-    WAIT_EVENT.record(comm_op_bwd.comm_stream)
-    current_stream.wait_event(WAIT_EVENT)
+    # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+    # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
     
     return dx, grad_comm_key, grad_comm_value
 

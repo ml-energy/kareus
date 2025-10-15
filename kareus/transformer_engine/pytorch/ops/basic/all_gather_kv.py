@@ -177,9 +177,11 @@ class AllGatherKV():
         self._work_handles.append(v_handle)
         return k_out, v_out
 
-    def sync(self) -> None:
+    def sync(self, current_stream: torch.cuda.Stream = None) -> None:
         if self.backend == "msccl":
-            new_msccl_comm.msccl_AllGather_sync()
+            # new_msccl_comm.msccl_AllGather_sync()
+            self.wait_event.record(self.comm_stream)
+            current_stream.wait_event(self.wait_event)
         else:
             for handle in self._work_handles:
                 handle.wait()
