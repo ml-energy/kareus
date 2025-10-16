@@ -14,8 +14,10 @@
 
 import gc
 import itertools
+import multiprocessing
 import os
 import re
+import time
 from dataclasses import fields
 from datetime import datetime
 from typing import Any, Dict, Optional, Union
@@ -91,6 +93,12 @@ except (ImportError, ModuleNotFoundError):
     HAVE_POWER_MONITOR = False
 
 try:
+    import pynvml
+    HAVE_PYNVML = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_PYNVML = False
+
+try:
     from zeus.optimizer.pipeline_frequency import PipelineFrequencyOptimizer
     HAVE_PERSEUS_OPTIMIZER = True
 except (ImportError, ModuleNotFoundError):
@@ -106,6 +114,112 @@ from pathlib import Path
 from nemo.utils.env_var_parsing import get_envint
 
 __all__ = ["MegatronBaseModel"]
+
+
+def gpu_stats_monitor(shared_dict, gpu_idx, interval=0.02):
+    """
+    Child process function that continuously collects GPU frequency and throttle data for a single GPU.
+    The data is stored in shared_dict with keys 'frequency' and 'throttle'.
+    Data format: [timestamp, sm_clock] for frequency, [timestamp, throttle_reasons] for throttle.
+    """
+    if not HAVE_PYNVML:
+        return
+    
+    try:
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+        
+        while True:
+            ts = time.time()
+            try:
+                # Get frequency
+                sm_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
+                shared_dict['frequency'].append([ts, sm_clock])
+            except Exception:
+                pass
+            
+            try:
+                # Get throttle reasons
+                throttle_reasons = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(handle)
+                shared_dict['throttle'].append([ts, throttle_reasons])
+            except Exception:
+                pass
+            
+            # time.sleep(interval)
+    except Exception:
+        pass
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+
+
+def gpu_stats_monitor_start(gpu_indices):
+    """
+    Start a background process for each GPU to monitor frequency and throttle reasons.
+    Returns a dict mapping gpu_idx to (process, shared_dict).
+    """
+    if not HAVE_PYNVML:
+        return {}
+    
+    manager = multiprocessing.Manager()
+    monitors = {}
+    
+    for gpu_idx in gpu_indices:
+        # Create shared dict for this GPU with separate lists for frequency and throttle
+        shared_dict = manager.dict()
+        shared_dict['frequency'] = manager.list()
+        shared_dict['throttle'] = manager.list()
+        
+        # Start process for this GPU
+        p = multiprocessing.Process(
+            target=gpu_stats_monitor,
+            args=(shared_dict, gpu_idx)
+        )
+        p.start()
+        monitors[gpu_idx] = (p, shared_dict)
+    
+    return monitors
+
+
+def gpu_stats_monitor_end(monitors):
+    """
+    Stop all GPU monitoring processes and return filtered data.
+    Returns two dicts: frequency_data and throttle_data, each mapping gpu_idx to list of [timestamp, value].
+    """
+    if not monitors:
+        return {}, {}
+    
+    frequency_data = {}
+    throttle_data = {}
+    
+    for gpu_idx, (process, shared_dict) in monitors.items():
+        # Stop the process
+        process.terminate()
+        process.join()
+        
+        # Collect and filter frequency data
+        freq_list = list(shared_dict['frequency'])
+        filtered_freq = []
+        previous_clock = None
+        for ts, sm_clock in freq_list:
+            if sm_clock != previous_clock:
+                filtered_freq.append([ts, sm_clock])
+                previous_clock = sm_clock
+        frequency_data[gpu_idx] = filtered_freq
+        
+        # Collect and filter throttle data
+        throttle_list = list(shared_dict['throttle'])
+        filtered_throttle = []
+        previous_reason = None
+        for ts, throttle_reasons in throttle_list:
+            if throttle_reasons != previous_reason:
+                filtered_throttle.append([ts, throttle_reasons])
+                previous_reason = throttle_reasons
+        throttle_data[gpu_idx] = filtered_throttle
+    
+    return frequency_data, throttle_data
 
 
 class MegatronBaseModel(NLPModel):
@@ -205,6 +319,9 @@ class MegatronBaseModel(NLPModel):
             self.zeus_monitor = ZeusMonitor(**zeus_monitor_cfg)
         
         self.power_monitor = None
+        
+        # GPU stats monitors (one process per GPU) will be initialized in on_train_start()
+        self.gpu_stats_monitors = None
         
         # Perseus optimizer will be initialized in on_train_start() after distributed setup
         self.perseus_optimizer = None
@@ -579,8 +696,15 @@ class MegatronBaseModel(NLPModel):
             self.power_monitor_cfg = dict(self.cfg.get('power_monitor_kwargs', dict()))
             if 'gpu_indices' not in self.power_monitor_cfg:
                 self.power_monitor_cfg['gpu_indices'] = [self.trainer.local_rank]
+            self.power_monitor_cfg['update_period'] = 0.05
             self.power_monitor = PowerMonitor(**self.power_monitor_cfg)
             print(f"Power monitor successfully initialized for local rank {self.trainer.local_rank}")
+            
+            # Start GPU stats monitoring (one process per GPU for frequency and throttle)
+            if HAVE_PYNVML:
+                gpu_indices = self.power_monitor_cfg['gpu_indices']
+                self.gpu_stats_monitors = gpu_stats_monitor_start(gpu_indices)
+                print(f"GPU stats monitors successfully initialized for local rank {self.trainer.local_rank}, monitoring GPUs: {gpu_indices} (one process per GPU)")
     
     def on_train_end(self) -> None:
         """
@@ -602,6 +726,34 @@ class MegatronBaseModel(NLPModel):
                         f.write(f"{timestamp},{power}\n")
             else:
                 print(f"No log directory found for local rank {self.trainer.local_rank}")
+        
+        # Stop GPU stats monitoring and write data to log files
+        if self.gpu_stats_monitors is not None:
+            frequency_data, throttle_data = gpu_stats_monitor_end(self.gpu_stats_monitors)
+            app_state = AppState()
+            
+            if app_state.log_dir is not None:
+                log_dir = Path(app_state.log_dir)
+                
+                # Write frequency data
+                frequency_log_file = log_dir / f'frequency_monitor_global_rank-{self.trainer.global_rank}_local_rank-{self.trainer.local_rank}.txt'
+                with open(frequency_log_file, 'w') as f:
+                    f.write("timestamp,gpu_idx,sm_clock_mhz\n")
+                    for gpu_idx, data_list in frequency_data.items():
+                        for timestamp, sm_clock in data_list:
+                            f.write(f"{timestamp},{gpu_idx},{sm_clock}\n")
+                print(f"Frequency data written to {frequency_log_file}")
+                
+                # Write throttle data
+                throttle_log_file = log_dir / f'throttle_monitor_global_rank-{self.trainer.global_rank}_local_rank-{self.trainer.local_rank}.txt'
+                with open(throttle_log_file, 'w') as f:
+                    f.write("timestamp,gpu_idx,throttle_reasons\n")
+                    for gpu_idx, data_list in throttle_data.items():
+                        for timestamp, throttle_reasons in data_list:
+                            f.write(f"{timestamp},{gpu_idx},{throttle_reasons}\n")
+                print(f"Throttle data written to {throttle_log_file}")
+            else:
+                print(f"No log directory found for GPU stats monitor data (local rank {self.trainer.local_rank})")
 
     def on_validation_start(self) -> None:
         """
