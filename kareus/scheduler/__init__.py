@@ -316,7 +316,7 @@ class PipelineCommScheduler:
                     f"Number of microbatches in schedule ({len(self._schedule_items)}) does not match num_microbatches ({num_microbatches})"
                 )
         # Iterator: AC iterates per instruction, non-AC advances on forward only
-        self._iter_items: Iterator[ScheduleItem ｜ ScheduleItemCP] = iter(self._schedule_items)
+        self._iter_items: Iterator[ScheduleItem | ScheduleItemCP] = iter(self._schedule_items)
         self.current_schedule: Optional[ScheduleItem | ScheduleItemCP] = None
 
     def _reset(self) -> None:

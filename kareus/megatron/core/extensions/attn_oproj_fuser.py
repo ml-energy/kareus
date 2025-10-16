@@ -529,10 +529,11 @@ def run_partition_o_ag_backward(
         # if comm_end == fused_idx:
         #     comm_op_bwd.sync()
     
-    # if comm_op_bwd is not None:
+    if comm_op_bwd is not None:
     #     comm_op_bwd.sync()
-    WAIT_EVENT.record(comm_op_bwd.comm_stream)
-    current_stream.wait_event(WAIT_EVENT)
+    # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+    # current_stream.wait_event(WAIT_EVENT)
+        comm_op_bwd.sync(current_stream)
     
     return dx
 

@@ -165,6 +165,7 @@ class AllGatherKV():
             device=x.device,
             memory_format=torch.contiguous_format,
         )
+        x = x.contiguous()
         handle = torch.distributed.all_gather_into_tensor(
             out, x, group=self.process_group, async_op=self.async_op,
         )
