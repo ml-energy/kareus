@@ -375,23 +375,26 @@ class AllGatherManager:
         group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
         if cast_to_fp16:
-            work_buf = input_tensor.to(torch.float16)
+            work_buf1 = input_tensor.to(torch.float16)
+            work_buf2 = input_tensor.to(torch.float16)
         else:
-            work_buf = input_tensor
+            work_buf1 = input_tensor.clone()
+            work_buf2 = input_tensor.clone()
 
-        cp_mem = _dlpack_view(work_buf)
+        cp_mem1 = _dlpack_view(work_buf1)
+        cp_mem2 = _dlpack_view(work_buf2)
 
         if nranks_per_node <= 0:
             nranks_per_node = self.group_size if self.group_size is not None else 0
         self.use_torch_single_node = (nranks_per_node == self.group_size)
 
         if self.use_torch_single_node:
-            self.algo = MscclppAllGather(group_obj, cp_mem, nranks_per_node, None)
+            self.algo = MscclppAllGather(group_obj, cp_mem1, cp_mem2, nranks_per_node, None)
             self.proxy_service = None
         else:
             if self.proxy_service is None:
                 self.proxy_service = ProxyService()
-            self.algo = MscclppAllGather(group_obj, cp_mem, nranks_per_node, self.proxy_service)
+            self.algo = MscclppAllGather(group_obj, cp_mem1, cp_mem2, nranks_per_node, self.proxy_service)
 
         self.output_tensor = input_tensor
         self.input_tensor = input_tensor
@@ -510,21 +513,23 @@ class ReduceScatterManager:
             group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
             new_size = list(input_tensor.size())
-            work_buf = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
+            work_buf1 = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
+            work_buf2 = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
 
-            cp_mem = _dlpack_view(work_buf)
+            cp_mem1 = _dlpack_view(work_buf1)
+            cp_mem2 = _dlpack_view(work_buf2)
 
             if nranks_per_node <= 0:
                 nranks_per_node = self.group_size if self.group_size is not None else 0
             self.use_torch_single_node = (nranks_per_node == self.group_size)
 
             if self.use_torch_single_node:
-                self.algo = MscclppReduceScatter(group_obj, cp_mem, nranks_per_node, None)
+                self.algo = MscclppReduceScatter(group_obj, cp_mem1, cp_mem2, nranks_per_node, None)
                 self.proxy_service = None
             else:
                 if self.proxy_service is None:
                     self.proxy_service = ProxyService()
-                self.algo = MscclppReduceScatter(group_obj, cp_mem, nranks_per_node, self.proxy_service)
+                self.algo = MscclppReduceScatter(group_obj, cp_mem1, cp_mem2, nranks_per_node, self.proxy_service)
 
             self.output_tensor = input_tensor
             self.input_tensor = input_tensor

@@ -588,18 +588,22 @@ __device__ void allGatherMem(mscclpp::MemoryChannelDeviceHandle* memChans, msccl
 // 2-node
 // -------------------------------------------
 extern "C" __global__ void __launch_bounds__(1024, 1)
-    allgather4(mscclpp::MemoryChannelDeviceHandle* memChans,
-               mscclpp::PortChannelDeviceHandle* allGatherPortChans,
-               TYPE* buff,
+    allgather4(mscclpp::MemoryChannelDeviceHandle* memChans1,
+               mscclpp::MemoryChannelDeviceHandle* memChans2,
+               mscclpp::PortChannelDeviceHandle* allGatherPortChans1,
+               mscclpp::PortChannelDeviceHandle* allGatherPortChans2,
+               TYPE* buff1,
+               TYPE* buff2,
                int rank,
                int nRanksPerNode,
                int worldSize,
                size_t nelems,
                int pipelineDepth) {
-  (void)buff;  // unused
+  (void)buff1;  // unused
+  (void)buff2;  // unused
   nelems = nelems / (sizeof(int) / sizeof(TYPE));
-  allGatherMem(memChans, allGatherPortChans, rank, worldSize, nRanksPerNode, nelems / worldSize, pipelineDepth);
-  allGatherMem(memChans, allGatherPortChans, rank, worldSize, nRanksPerNode, nelems / worldSize, pipelineDepth);
+  allGatherMem(memChans1, allGatherPortChans1, rank, worldSize, nRanksPerNode, nelems / worldSize, pipelineDepth);
+  allGatherMem(memChans2, allGatherPortChans2, rank, worldSize, nRanksPerNode, nelems / worldSize, pipelineDepth);
 }
 
 __device__ void reduceScatterMem(mscclpp::MemoryChannelDeviceHandle* memChans,
@@ -693,18 +697,22 @@ __device__ void reduceScatterMem(mscclpp::MemoryChannelDeviceHandle* memChans,
 // 2-node
 // -------------------------------------------
 extern "C" __global__ void __launch_bounds__(1024, 1)
-    reducescatter4(mscclpp::MemoryChannelDeviceHandle* memChans,
-                   mscclpp::PortChannelDeviceHandle* reduceScatterPortChans,
-                   TYPE* buff,
-                   TYPE* scratch,
+    reducescatter4(mscclpp::MemoryChannelDeviceHandle* memChans1,
+                   mscclpp::MemoryChannelDeviceHandle* memChans2,
+                   mscclpp::PortChannelDeviceHandle* reduceScatterPortChans1,
+                   mscclpp::PortChannelDeviceHandle* reduceScatterPortChans2,
+                   TYPE* buff1,
+                   TYPE* buff2,
+                   TYPE* scratch1,
+                   TYPE* scratch2,
                    int rank,
                    int nRanksPerNode,
                    int worldSize,
                    size_t nelems,
                    int pipelineDepth) {
   nelems = nelems / (sizeof(int) / sizeof(TYPE));
-  reduceScatterMem(memChans, reduceScatterPortChans, buff, scratch, rank, nRanksPerNode, worldSize, nelems, pipelineDepth);
-  reduceScatterMem(memChans, reduceScatterPortChans, buff, scratch, rank, nRanksPerNode, worldSize, nelems, pipelineDepth);
+  reduceScatterMem(memChans1, reduceScatterPortChans1, buff1, scratch1, rank, nRanksPerNode, worldSize, nelems, pipelineDepth);
+  reduceScatterMem(memChans2, reduceScatterPortChans2, buff2, scratch2, rank, nRanksPerNode, worldSize, nelems, pipelineDepth);
 }
 
 extern "C" __global__ void __launch_bounds__(1024, 1) __global__

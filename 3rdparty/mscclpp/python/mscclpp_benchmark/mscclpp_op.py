@@ -521,7 +521,8 @@ class MscclppAllGather:
     def __init__(
         self,
         group: mscclpp_comm.CommGroup,
-        memory: cp.ndarray,
+        memory1: cp.ndarray,
+        memory2: cp.ndarray,
         nranks_per_node: int,
         proxy_service: ProxyService,
         nblocks: int = 45,
@@ -529,7 +530,8 @@ class MscclppAllGather:
         pipeline_depth: int = 3,
     ):
         self.group = group
-        self.memory = memory
+        self.memory1 = memory1
+        self.memory2 = memory2
 
         self.nranks_per_node = nranks_per_node
         in_same_node = lambda rank: rank // nranks_per_node == self.group.my_rank // nranks_per_node
@@ -545,48 +547,64 @@ class MscclppAllGather:
         self.group.barrier()
         # create a connection for each remote neighbor
         self.connections = self.group.make_connection(remote_nghrs, transports)
-        type_str = type_to_str(memory.dtype)
+        type_str = type_to_str(memory1.dtype)
 
         self.proxy_service = proxy_service
         same_node_connections = {rank: conn for rank, conn in self.connections.items() if in_same_node(rank)}
         across_node_connections = {rank: conn for rank, conn in self.connections.items() if not in_same_node(rank)}
-        # create a memory_channel for each same-node neighbor
-        self.memory_channels = self.group.make_memory_channels(self.memory, same_node_connections)
+        # create a memory_channel for each same-node neighbor for both memory buffers
+        self.memory_channels1 = self.group.make_memory_channels(self.memory1, same_node_connections)
+        self.memory_channels2 = self.group.make_memory_channels(self.memory2, same_node_connections)
         # If single-node (no across-node neighbors) or proxy not provided, skip creating port channels
         if len(across_node_connections) == 0 or self.proxy_service is None:
-            self.all_gather_port_channels = {}
+            self.all_gather_port_channels1 = {}
+            self.all_gather_port_channels2 = {}
         else:
-            # create a port_channel for each neighbor (both same-node and cross-node)
-            self.all_gather_port_channels = self.group.make_port_channels(
-                self.proxy_service, self.memory, self.connections
+            # create a port_channel for each neighbor (both same-node and cross-node) for both memory buffers
+            self.all_gather_port_channels1 = self.group.make_port_channels(
+                self.proxy_service, self.memory1, self.connections
+            )
+            self.all_gather_port_channels2 = self.group.make_port_channels(
+                self.proxy_service, self.memory2, self.connections
             )
         file_dir = os.path.dirname(os.path.abspath(__file__))
         self.kernel = KernelBuilder(
             file="allreduce.cu", kernel_name="allgather4", file_dir=file_dir, macro_dict={"TYPE": type_str}
         ).get_compiled_kernel()
-        self.mem_device_handles = []
-        self.all_gather_proxy_device_handles = []
+        self.mem_device_handles1 = []
+        self.mem_device_handles2 = []
+        self.all_gather_proxy_device_handles1 = []
+        self.all_gather_proxy_device_handles2 = []
         for rank in range(self.group.nranks):
             if rank != self.group.my_rank and in_same_node(rank):
-                self.mem_device_handles.append(self.memory_channels[rank].device_handle().raw)
-            if rank != self.group.my_rank and len(across_node_connections) > 0 and self.all_gather_port_channels:
-                self.all_gather_proxy_device_handles.append(
-                    self.all_gather_port_channels[rank].device_handle().raw
+                self.mem_device_handles1.append(self.memory_channels1[rank].device_handle().raw)
+                self.mem_device_handles2.append(self.memory_channels2[rank].device_handle().raw)
+            if rank != self.group.my_rank and len(across_node_connections) > 0 and self.all_gather_port_channels1:
+                self.all_gather_proxy_device_handles1.append(
+                    self.all_gather_port_channels1[rank].device_handle().raw
+                )
+                self.all_gather_proxy_device_handles2.append(
+                    self.all_gather_port_channels2[rank].device_handle().raw
                 )
 
-        self.mem_device_handles_cp = cp.asarray(memoryview(b"".join(self.mem_device_handles)), dtype=cp.uint8)
-        if len(across_node_connections) == 0 or not self.all_gather_port_channels:
-            self.all_gather_proxy_device_handles_cp = cp.asarray(memoryview(b""), dtype=cp.uint8)
+        self.mem_device_handles1_cp = cp.asarray(memoryview(b"".join(self.mem_device_handles1)), dtype=cp.uint8)
+        self.mem_device_handles2_cp = cp.asarray(memoryview(b"".join(self.mem_device_handles2)), dtype=cp.uint8)
+        if len(across_node_connections) == 0 or not self.all_gather_port_channels1:
+            self.all_gather_proxy_device_handles1_cp = cp.asarray(memoryview(b""), dtype=cp.uint8)
+            self.all_gather_proxy_device_handles2_cp = cp.asarray(memoryview(b""), dtype=cp.uint8)
         else:
-            self.all_gather_proxy_device_handles_cp = cp.asarray(
-                memoryview(b"".join(self.all_gather_proxy_device_handles)), dtype=cp.uint8
+            self.all_gather_proxy_device_handles1_cp = cp.asarray(
+                memoryview(b"".join(self.all_gather_proxy_device_handles1)), dtype=cp.uint8
+            )
+            self.all_gather_proxy_device_handles2_cp = cp.asarray(
+                memoryview(b"".join(self.all_gather_proxy_device_handles2)), dtype=cp.uint8
             )
 
         self.set_params(nblocks, block_size, pipeline_depth)
 
     def __call__(self, stream):
         self.kernel.launch_kernel(self.params, self.nblocks, self.block_size, 0, stream)
-        return self.memory
+        return self.memory1, self.memory2
 
     def set_params(self, nblocks, block_size, pipeline_depth):
         self.nblocks = nblocks
@@ -595,14 +613,17 @@ class MscclppAllGather:
 
         self.params = b""
         self.params += pack(
-            self.mem_device_handles_cp,
-            self.all_gather_proxy_device_handles_cp,
-            self.memory,
+            self.mem_device_handles1_cp,
+            self.mem_device_handles2_cp,
+            self.all_gather_proxy_device_handles1_cp,
+            self.all_gather_proxy_device_handles2_cp,
+            self.memory1,
+            self.memory2,
             self.group.my_rank,
             self.nranks_per_node,
             self.group.nranks,
             bytes(4),  # padding for memory alignment
-            ctypes.c_size_t(self.memory.size),
+            ctypes.c_size_t(self.memory1.size),
             self.pipeline_depth,
         )
 
@@ -621,7 +642,8 @@ class MscclppReduceScatter:
     def __init__(
         self,
         group: mscclpp_comm.CommGroup,
-        memory: cp.ndarray,
+        memory1: cp.ndarray,
+        memory2: cp.ndarray,
         nranks_per_node: int,
         proxy_service: ProxyService,
         nblocks: int = 45,
@@ -629,7 +651,8 @@ class MscclppReduceScatter:
         pipeline_depth: int = 3,
     ):
         self.group = group
-        self.memory = memory
+        self.memory1 = memory1
+        self.memory2 = memory2
 
         self.nranks_per_node = nranks_per_node
         in_same_node = lambda rank: rank // nranks_per_node == self.group.my_rank // nranks_per_node
@@ -645,74 +668,99 @@ class MscclppReduceScatter:
         self.group.barrier()
         # create a connection for each remote neighbor
         self.connections = self.group.make_connection(remote_nghrs, transports)
-        type_str = type_to_str(memory.dtype)
+        type_str = type_to_str(memory1.dtype)
 
         self.proxy_service = proxy_service
         same_node_connections = {rank: conn for rank, conn in self.connections.items() if in_same_node(rank)}
         across_node_connections = {rank: conn for rank, conn in self.connections.items() if not in_same_node(rank)}
-        # create a memory_channel for each same-node neighbor
-        self.memory_channels = self.group.make_memory_channels(self.memory, same_node_connections)
+        # create a memory_channel for each same-node neighbor for both memory buffers
+        self.memory_channels1 = self.group.make_memory_channels(self.memory1, same_node_connections)
+        self.memory_channels2 = self.group.make_memory_channels(self.memory2, same_node_connections)
         
         # Only allocate scratch buffer and create port channels if we have across-node neighbors
         if len(across_node_connections) == 0 or self.proxy_service is None:
-            self.scratch = None
-            self.registered_scratch = None
-            self.reduce_scatter_port_channels = {}
+            self.scratch1 = None
+            self.scratch2 = None
+            self.registered_scratch1 = None
+            self.registered_scratch2 = None
+            self.reduce_scatter_port_channels1 = {}
+            self.reduce_scatter_port_channels2 = {}
         else:
-            # Allocate scratch buffer for cross-node communication
-            self.scratch = GpuBuffer(self.memory.size, dtype=self.memory.dtype)
-            self.registered_scratch = self.group.register_local_memory(self.scratch, self.connections)
-            # create a port_channel for each neighbor with scratch
-            self.reduce_scatter_port_channels = self.group.make_port_channels_with_scratch(
-                self.proxy_service, self.memory, self.registered_scratch, self.connections
+            # Allocate scratch buffers for cross-node communication
+            self.scratch1 = GpuBuffer(self.memory1.size, dtype=self.memory1.dtype)
+            self.scratch2 = GpuBuffer(self.memory2.size, dtype=self.memory2.dtype)
+            self.registered_scratch1 = self.group.register_local_memory(self.scratch1, self.connections)
+            self.registered_scratch2 = self.group.register_local_memory(self.scratch2, self.connections)
+            # create a port_channel for each neighbor with scratch for both memory buffers
+            self.reduce_scatter_port_channels1 = self.group.make_port_channels_with_scratch(
+                self.proxy_service, self.memory1, self.registered_scratch1, self.connections
+            )
+            self.reduce_scatter_port_channels2 = self.group.make_port_channels_with_scratch(
+                self.proxy_service, self.memory2, self.registered_scratch2, self.connections
             )
         file_dir = os.path.dirname(os.path.abspath(__file__))
         self.kernel = KernelBuilder(
             file="allreduce.cu", kernel_name="reducescatter4", file_dir=file_dir, macro_dict={"TYPE": type_str}
         ).get_compiled_kernel()
-        self.mem_device_handles = []
-        self.reduce_scatter_proxy_device_handles = []
+        self.mem_device_handles1 = []
+        self.mem_device_handles2 = []
+        self.reduce_scatter_proxy_device_handles1 = []
+        self.reduce_scatter_proxy_device_handles2 = []
         for rank in range(self.group.nranks):
             if rank != self.group.my_rank and in_same_node(rank):
-                self.mem_device_handles.append(self.memory_channels[rank].device_handle().raw)
-            if rank != self.group.my_rank and len(across_node_connections) > 0 and self.reduce_scatter_port_channels:
-                self.reduce_scatter_proxy_device_handles.append(
-                    self.reduce_scatter_port_channels[rank].device_handle().raw
+                self.mem_device_handles1.append(self.memory_channels1[rank].device_handle().raw)
+                self.mem_device_handles2.append(self.memory_channels2[rank].device_handle().raw)
+            if rank != self.group.my_rank and len(across_node_connections) > 0 and self.reduce_scatter_port_channels1:
+                self.reduce_scatter_proxy_device_handles1.append(
+                    self.reduce_scatter_port_channels1[rank].device_handle().raw
+                )
+                self.reduce_scatter_proxy_device_handles2.append(
+                    self.reduce_scatter_port_channels2[rank].device_handle().raw
                 )
 
-        self.mem_device_handles_cp = cp.asarray(memoryview(b"".join(self.mem_device_handles)), dtype=cp.uint8)
-        if len(across_node_connections) == 0 or not self.reduce_scatter_port_channels:
-            self.reduce_scatter_proxy_device_handles_cp = cp.asarray(memoryview(b""), dtype=cp.uint8)
+        self.mem_device_handles1_cp = cp.asarray(memoryview(b"".join(self.mem_device_handles1)), dtype=cp.uint8)
+        self.mem_device_handles2_cp = cp.asarray(memoryview(b"".join(self.mem_device_handles2)), dtype=cp.uint8)
+        if len(across_node_connections) == 0 or not self.reduce_scatter_port_channels1:
+            self.reduce_scatter_proxy_device_handles1_cp = cp.asarray(memoryview(b""), dtype=cp.uint8)
+            self.reduce_scatter_proxy_device_handles2_cp = cp.asarray(memoryview(b""), dtype=cp.uint8)
         else:
-            self.reduce_scatter_proxy_device_handles_cp = cp.asarray(
-                memoryview(b"".join(self.reduce_scatter_proxy_device_handles)), dtype=cp.uint8
+            self.reduce_scatter_proxy_device_handles1_cp = cp.asarray(
+                memoryview(b"".join(self.reduce_scatter_proxy_device_handles1)), dtype=cp.uint8
+            )
+            self.reduce_scatter_proxy_device_handles2_cp = cp.asarray(
+                memoryview(b"".join(self.reduce_scatter_proxy_device_handles2)), dtype=cp.uint8
             )
 
         self.set_params(nblocks, block_size, pipeline_depth)
 
     def __call__(self, stream):
         self.kernel.launch_kernel(self.params, self.nblocks, self.block_size, 0, stream)
-        return self.memory
+        return self.memory1, self.memory2
 
     def set_params(self, nblocks, block_size, pipeline_depth):
         self.nblocks = nblocks
         self.block_size = block_size
         self.pipeline_depth = pipeline_depth
 
-        # Use scratch buffer if available, otherwise pass the memory buffer (won't be used in single-node path)
-        scratch_buf = self.scratch if self.scratch is not None else self.memory
+        # Use scratch buffers if available, otherwise pass the memory buffers (won't be used in single-node path)
+        scratch_buf1 = self.scratch1 if self.scratch1 is not None else self.memory1
+        scratch_buf2 = self.scratch2 if self.scratch2 is not None else self.memory2
 
         self.params = b""
         self.params += pack(
-            self.mem_device_handles_cp,
-            self.reduce_scatter_proxy_device_handles_cp,
-            self.memory,
-            scratch_buf,
+            self.mem_device_handles1_cp,
+            self.mem_device_handles2_cp,
+            self.reduce_scatter_proxy_device_handles1_cp,
+            self.reduce_scatter_proxy_device_handles2_cp,
+            self.memory1,
+            self.memory2,
+            scratch_buf1,
+            scratch_buf2,
             self.group.my_rank,
             self.nranks_per_node,
             self.group.nranks,
             bytes(4),  # padding for memory alignment
-            ctypes.c_size_t(self.memory.size),
+            ctypes.c_size_t(self.memory1.size),
             self.pipeline_depth,
         )
 
