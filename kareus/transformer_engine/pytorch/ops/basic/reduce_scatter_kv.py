@@ -62,11 +62,11 @@ class ReduceScatterKV():
         if self.backend == "msccl":
             global K_RS_BUFFER, V_RS
             if K_RS_BUFFER[self.batch_idx] is None:
-                K_RS_BUFFER[self.batch_idx] = torch.empty(
+                K_RS_BUFFER[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
                 )
             if V_RS_BUFFER[self.batch_idx] is None:
-                V_RS_BUFFER[self.batch_idx] = torch.empty(
+                V_RS_BUFFER[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
                 )
             self.input_buffer_k = K_RS_BUFFER[self.batch_idx]

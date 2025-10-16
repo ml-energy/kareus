@@ -80,7 +80,7 @@ class AllReduce(BasicOperation):
 
         if self.backend == "msccl":
             if X_AR[self.batch_idx] is None:
-                X_AR[self.batch_idx] = torch.empty(
+                X_AR[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
                 )
             self.input_buffer = X_AR[self.batch_idx]

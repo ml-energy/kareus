@@ -62,11 +62,11 @@ class AllGatherKV():
         global K_AG, V_AG
         if self.backend == "msccl":
             if K_AG[self.batch_idx] is None:
-                K_AG[self.batch_idx] = torch.empty(
+                K_AG[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
                 )
             if V_AG[self.batch_idx] is None:
-                V_AG[self.batch_idx] = torch.empty(
+                V_AG[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
                 )
             self.input_buffer_k = K_AG[self.batch_idx]
