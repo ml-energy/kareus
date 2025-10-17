@@ -76,9 +76,16 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
 def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str):
     comm_scheduler = config.kareus_scheduler
     if comm_scheduler is None:
-        if not fuser_type == "ao":
+        if fuser_type == "qkv_ar":
             return {
                 "comm_overlap_window": (0, -1),  # comm_end doesn't matter
+                "comm_sm_configs": (12, 1024),
+                "comm_overlap_window_backward": (0, -1),
+                "comm_sm_configs_backward": (12, 1024),
+            }
+        elif fuser_type == "qkv_ag":
+            return {
+                "comm_overlap_window": (0, -1),
                 "comm_sm_configs": (12, 1024),
                 "comm_overlap_window_backward": (0, -1),
                 "comm_sm_configs_backward": (12, 1024),
@@ -96,7 +103,7 @@ def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str):
                 "comm_overlap_window_o_ag": (0, -1),
                 "comm_sm_configs_o_ag": (12, 1024),
                 "comm_overlap_window_o_ar": (0, -1),
-                "comm_sm_configs_o_ar": (24, 1024),
+                "comm_sm_configs_o_ar": (12, 1024),
             }
 
 
