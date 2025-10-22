@@ -378,14 +378,15 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                 grad_comm_value = grad_comm_value[0][0]
 
             # Backward op
-            dx, fused_op_grad_params, fused_op_grad_extra_inputs = op.fuser_backward(
-                [basic_op_ctxs[idx] for idx in basic_op_idxs],
-                dx,
-                basic_op_grad_extra_outputs=grad_extra_outputs,
-            )
-            for idx, dparams in zip(basic_op_idxs, fused_op_grad_params):
-                grad_params[idx] = dparams
-                basic_op_ctxs[idx].saved_tensors = None
+            if not isinstance(op, RMSNorm):  # temporary for the wrong order problem
+                dx, fused_op_grad_params, fused_op_grad_extra_inputs = op.fuser_backward(
+                    [basic_op_ctxs[idx] for idx in basic_op_idxs],
+                    dx,
+                    basic_op_grad_extra_outputs=grad_extra_outputs,
+                )
+                for idx, dparams in zip(basic_op_idxs, fused_op_grad_params):
+                    grad_params[idx] = dparams
+                    basic_op_ctxs[idx].saved_tensors = None
 
             # if not profile:
             #     if fused_idx == comm_start - 1:
