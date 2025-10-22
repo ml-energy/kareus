@@ -144,6 +144,7 @@ class AllGatherKV():
         local_len = k.size(0)
         start = int(self.rank) * local_len
         end = start + local_len
+        # copy will deal with non-contiguous tensors
         self.input_buffer_k[start:end].copy_(k, non_blocking=False)
 
         current_stream = torch.cuda.current_stream()

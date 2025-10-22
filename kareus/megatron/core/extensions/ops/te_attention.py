@@ -293,7 +293,7 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
         method, which handles the fusing logic appropriately.
         """
         key, value= basic_op_extra_inputs[0]
-        batch_idx = basic_op_kwargs[0]['batch_idx']
+        batch_idx = basic_op_kwargs[0]['batch_idx'] if 'batch_idx' in basic_op_kwargs[0] else 0
 
         if self.config.context_parallel_size > 1:
             global K_TO_SAVE, V_TO_SAVE
@@ -363,6 +363,7 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
                 grad_input = grad_input.transpose(0, 1).contiguous()
             else:
                 grad_key, grad_value = grad_extra_inputs[0]
+                grad_input = grad_input.transpose(0, 1).contiguous()
                 grad_extra_inputs[0] = (grad_key.transpose(0, 1).contiguous(), grad_value.transpose(0, 1).contiguous())
 
         return grad_input, grad_params, grad_extra_inputs

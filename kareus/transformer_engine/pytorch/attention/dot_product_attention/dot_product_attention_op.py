@@ -496,6 +496,8 @@ class DotProductAttentionOp(BasicOperation):
                 alibi_slopes=alibi_slopes,
             )
         
+        key_layer_gathered = None
+        value_layer_gathered = None
         if context_parallel:
             global K_AG, V_AG
             key_layer_gathered = K_AG[batch_idx]
@@ -552,6 +554,8 @@ class DotProductAttentionOp(BasicOperation):
         context_parallel = ctx.context_parallel
         batch_idx = ctx.batch_idx
 
+        k_ag = None
+        v_ag = None
         if context_parallel:
             k_ag = K_AG[batch_idx]
             v_ag = V_AG[batch_idx]
