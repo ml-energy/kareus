@@ -140,13 +140,13 @@ class ReduceScatterKV():
         chunk_len = k.size(0) // self.world_size
         start = int(self.rank) * chunk_len
         end = start + chunk_len
-        self.input_buffer_k.copy_(k, non_blocking=False)
+        # self.input_buffer_k.copy_(k, non_blocking=False)
 
         current_stream = torch.cuda.current_stream()
         self.event_record(current_stream)
         self.event_wait()
 
-        self.input_buffer_v.copy_(v, non_blocking=False)
+        # self.input_buffer_v.copy_(v, non_blocking=False)
 
         new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
         # new_msccl_comm.msccl_ReduceScatter(sm_num, block_size)
