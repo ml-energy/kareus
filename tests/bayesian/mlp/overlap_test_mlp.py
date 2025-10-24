@@ -53,14 +53,16 @@ class MLPFuserTest:
         self.dtype = torch.bfloat16
         self.rank = rank
         self.world_size = world_size
-        self.tensor_parallel_size = world_size
+        assert self.world_size == args.tensor_parallel_size
+        self.context_parallel_size = args.context_parallel_size
+        self.tensor_parallel_size = args.tensor_parallel_size
         
         # Initialize distributed processing
         self.tp_group = init_distributed(rank, world_size)
         
         # Test configuration
         self.batch_size = args.batch_size
-        self.seq_length = args.seq_len
+        self.seq_length = args.seq_len // args.context_parallel_size
         self.hidden_size = FuserTestConfig.HIDDEN_SIZE
         self.num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
         self.num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
@@ -355,7 +357,9 @@ def overlap_test(rank, world_size, args, master_port):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument("--tensor_parallel_size", "-tp", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument("--context_parallel_size", "-cp", type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
     parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--frequency", "-f", type=str, default="default")

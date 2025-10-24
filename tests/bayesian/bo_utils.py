@@ -983,8 +983,9 @@ def select_acquisition_batch(
     exploit_eff_idx: List[int] = []
     exploit_real_idx: List[int] = []
     if k_exploit > 0:
-        k_exploit_eff = k_exploit // 2
-        k_exploit_real = k_exploit - k_exploit_eff
+        # Use integer counts: ~40% for effective-energy exploit, remainder for real-energy
+        k_exploit_eff = int(round(0.4 * k_exploit))
+        k_exploit_real = int(k_exploit) - k_exploit_eff
 
         # Top by EHVI (effective energy)
         top_eff = np.argsort(ehvi_eff_values)[-k_exploit_eff:][::-1].tolist() if k_exploit_eff > 0 else []

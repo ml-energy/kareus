@@ -128,14 +128,14 @@ class PartitionTestRunner:
             fuse_ops=False,
         )
 
-        self.group = self.test.cp_group
+        self.group = self.test.tp_group
         self.FREQ_VALUES = FREQ_VALUES
         self.SM_VALUES = SM_VALUES
         self.OVERLAP_WINDOWS = OVERLAP_WINDOWS
 
     @property
-    def cp_group(self):
-        return self.test.cp_group
+    def tp_group(self):
+        return self.test.tp_group
 
     def test_config(self, overlap_window, sm_configs):
         return self.attention_fuser(
@@ -172,7 +172,7 @@ def main() -> None:
     parser.add_argument("--normalize_objectives", action="store_true",
                         help="Normalize energy and time objectives to [0,1] range for balanced hypervolume calculation")
 
-    parser.add_argument("--explore_fraction", type=float, default=0.25,
+    parser.add_argument("--explore_fraction", type=float, default=0.2,
                         help="Fraction of each acquisition batch reserved for uncertainty-driven exploration (0..1)")
     parser.add_argument("--ensemble_size", type=int, default=5,
                         help="Size of the XGBoost ensemble used to estimate predictive uncertainty")
@@ -180,7 +180,7 @@ def main() -> None:
                         help="Bootstrap fraction for training each ensemble member")
     parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum",
                         help="How to combine energy/time predictive std into a single uncertainty score")
-    parser.add_argument("--time_fraction", type=float, default=0.25,
+    parser.add_argument("--time_fraction", type=float, default=0.2,
                         help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
 
     args = parser.parse_args()

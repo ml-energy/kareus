@@ -63,14 +63,14 @@ from botorch.utils.multi_objective.pareto import is_non_dominated
 OVERLAP_WINDOWS = [
     (0, 6), (2, 6), (4, 6), (5, 6),
 ]
-SM_VALUES = list(range(1, 21))
+SM_VALUES = list(range(3, 31, 3))
 
 # Determined at runtime
 FREQ_VALUES = []
 
-BO_DEFAULT_N_INIT = FuserTestConfig.BO_DEFAULT_N_INIT
-BO_DEFAULT_BATCHES = FuserTestConfig.BO_DEFAULT_BATCHES
-BO_DEFAULT_ACQ_BATCH = FuserTestConfig.BO_DEFAULT_ACQ_BATCH
+BO_DEFAULT_N_INIT = 96
+BO_DEFAULT_BATCHES = 6
+BO_DEFAULT_ACQ_BATCH = 32
 
 MASTER_PORT = 9010
 
@@ -86,7 +86,7 @@ class PartitionTestConfig:
     """
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
+        logs_dir = f"logs/{args.model_name}/cp{args.context_parallel_size}-tp{args.tensor_parallel_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
         os.makedirs(logs_dir, exist_ok=True)
         self.eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
         self.logs_dir = logs_dir
@@ -152,7 +152,10 @@ class PartitionTestRunner:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", "-m", type=str, default=FuserTestConfig.MODEL_NAME)
     parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument("--tensor_parallel_size", "-tp", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument("--context_parallel_size", "-cp", type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
     parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default=FuserTestConfig.GPU_TYPE)
@@ -165,7 +168,7 @@ def main() -> None:
     parser.add_argument("--normalize_objectives", action="store_true",
                         help="Normalize energy and time objectives to [0,1] range for balanced hypervolume calculation")
 
-    parser.add_argument("--explore_fraction", type=float, default=0.25,
+    parser.add_argument("--explore_fraction", type=float, default=0.2,
                         help="Fraction of each acquisition batch reserved for uncertainty-driven exploration (0..1)")
     parser.add_argument("--ensemble_size", type=int, default=5,
                         help="Size of the XGBoost ensemble used to estimate predictive uncertainty")
@@ -173,7 +176,7 @@ def main() -> None:
                         help="Bootstrap fraction for training each ensemble member")
     parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum",
                         help="How to combine energy/time predictive std into a single uncertainty score")
-    parser.add_argument("--time_fraction", type=float, default=0.25,
+    parser.add_argument("--time_fraction", type=float, default=0.2,
                         help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
 
     args = parser.parse_args()

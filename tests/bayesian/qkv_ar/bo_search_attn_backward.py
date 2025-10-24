@@ -172,7 +172,10 @@ class PartitionTestRunner:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", "-m", type=str, default=FuserTestConfig.MODEL_NAME)
     parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument("--context_parallel_size", "-c", type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
+    parser.add_argument("--tensor_parallel_size", "-tp", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"], default=FuserTestConfig.GPU_TYPE)
@@ -185,7 +188,7 @@ def main() -> None:
     parser.add_argument("--normalize_objectives", action="store_true",
                         help="Normalize energy and time objectives to [0,1] range for balanced hypervolume calculation")
 
-    parser.add_argument("--explore_fraction", type=float, default=0.25,
+    parser.add_argument("--explore_fraction", type=float, default=0.2,
                         help="Fraction of each acquisition batch reserved for uncertainty-driven exploration (0..1)")
     parser.add_argument("--ensemble_size", type=int, default=5,
                         help="Size of the XGBoost ensemble used to estimate predictive uncertainty")
@@ -193,7 +196,7 @@ def main() -> None:
                         help="Bootstrap fraction for training each ensemble member")
     parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum",
                         help="How to combine energy/time predictive std into a single uncertainty score")
-    parser.add_argument("--time_fraction", type=float, default=0.25,
+    parser.add_argument("--time_fraction", type=float, default=0.2,
                         help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
 
     args = parser.parse_args()
