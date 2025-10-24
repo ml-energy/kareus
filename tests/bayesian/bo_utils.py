@@ -367,6 +367,7 @@ def try_load_initial_from_cache(
             cfg = {
                 "freq": int(r["freq"]),
                 "sm": int(r["sm"]),
+                "block": int(r["block"]),
                 "overlap": (int(r["overlap_start"]), int(r["overlap_end"]))
             }
             # Note: block size is stored in cache but not needed for encoding (it's fixed per kernel type)
@@ -378,7 +379,17 @@ def try_load_initial_from_cache(
             init_time.append(t_s)
             init_avg_energy.append(e_j)
             init_eff_energy.append(eff_e_j)
-            all_records.append((cfg['freq'], cfg['overlap'][0], cfg['overlap'][1], cfg['sm'], t_s, e_j, eff_e_j))
+            # Persist full schema including fixed block size (1024)
+            all_records.append((
+                cfg['freq'],
+                cfg['overlap'][0],
+                cfg['overlap'][1],
+                cfg['sm'],
+                cfg['block'],
+                t_s,
+                e_j,
+                eff_e_j,
+            ))
         # Top-up missing initial points by generating and evaluating additional configs
         missing = int(n_init - total_cached)
         if missing > 0:
@@ -1145,7 +1156,7 @@ def save_pareto_and_results(
         )
 
     # Save Pareto frontiers to logs directory
-    logs_dir = f"logs/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
+    logs_dir = partition_test.logs_dir
     os.makedirs(logs_dir, exist_ok=True)
     
     # Save effective-energy Pareto frontier

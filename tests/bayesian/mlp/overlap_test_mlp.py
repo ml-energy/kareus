@@ -14,7 +14,7 @@ from common_config import FuserTestConfig
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
 from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
-from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
+from kareus.megatron.core.extensions.ops import BiasSwigluOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
@@ -67,7 +67,11 @@ class MLPFuserTest:
         self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
         
         # Create transformer config
-        self.config = FuserTestConfig.create_mlp_config(world_size, self.dtype)
+        self.config = FuserTestConfig.create_mlp_config(
+            context_parallel_size=1,
+            tensor_parallel_size=world_size, 
+            dtype=self.dtype
+        )
 
         self.frequency = args.frequency if hasattr(args, "frequency") else None
         self.repeat_num = 1
@@ -149,6 +153,7 @@ class MLPFuserTest:
 
         # 6. AllReduce Communication Operation
         if self.tensor_parallel_size > 1:
+            nano_batch_size = self.batch_size // 2
             allreduce_comm_op = AllReduce(
                 process_group=self.tp_group,
                 async_op=True,
@@ -157,7 +162,7 @@ class MLPFuserTest:
                 world_size=self.world_size,
                 use_persistent_output=True,
                 input_buffer=allreduce_inputs,
-                tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
+                tensor_size=[self.seq_length, nano_batch_size, self.hidden_size],
                 device=self.device,
                 dtype=self.dtype,
             )

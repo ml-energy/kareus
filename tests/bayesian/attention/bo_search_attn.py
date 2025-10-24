@@ -42,7 +42,6 @@ from overlap_test_attn import AttentionFuserTest  # noqa: E402
 from common_config import FuserTestConfig  # noqa: E402
 from kareus.megatron.core.extensions.partition_fuser import PartitionFuser  # noqa: E402
 
-# Import utility functions from bo_utils
 from bo_utils import (  # noqa: E402
     encode_cfg,
     one_hot_encode,
@@ -55,7 +54,6 @@ from bo_utils import (  # noqa: E402
     generate_all_configurations,
     is_config_in_dataset,
     save_iteration_plots,
-    # High-level orchestration helpers
     setup_initial_data,
     compute_normalization_bounds,
     score_candidates_with_ehvi,
@@ -74,7 +72,7 @@ from botorch.utils.multi_objective.hypervolume import Hypervolume
 
 # Editable
 OVERLAP_WINDOWS = [
-    (0, 8), (2, 8), (4, 8), (6, 8), # (7, 8),
+    (0, 8), (2, 8), (4, 8), (6, 8), (7, 8),
 ]
 SM_VALUES = list(range(1, 21))
 
