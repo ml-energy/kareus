@@ -431,7 +431,8 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             dx,  # hidden_states
             grad_bias,  # bias
             grad_residual,  # residual  
-            grad_rotary_pos_emb,  # rotary_pos_emb
+            # grad_rotary_pos_emb,  # rotary_pos_emb
+            None,  # rotary_pos_emb
             None,  # attention_mask
             grad_comm_input,  # comm_input
             None,  # comm_overlap_window

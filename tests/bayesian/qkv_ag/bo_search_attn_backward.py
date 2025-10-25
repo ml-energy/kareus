@@ -154,10 +154,18 @@ class PartitionTestRunner:
                 comm_overlap_window_backward=overlap_window,
                 comm_sm_configs_backward=sm_configs,
             )
-        torch.autograd.backward(
-            tensors=[self.query, self.key, self.value, self.residual_out],
-            grad_tensors=[self.query_grad, self.key_grad, self.value_grad, self.residual_grad],
+        # torch.autograd.backward(
+        #     tensors=[self.query, self.key, self.value, self.residual_out],
+        #     grad_tensors=[self.query_grad, self.key_grad, self.value_grad, self.residual_grad],
+        #     retain_graph=True,
+        # )
+        _ = torch.autograd.grad(
+            outputs=[self.query, self.key, self.value, self.residual_out],
+            inputs=[self.hidden_states, self.residual],
+            grad_outputs=[self.query_grad, self.key_grad, self.value_grad, self.residual_grad],
             retain_graph=True,
+            allow_unused=True,
+            create_graph=False,
         )
 
 
