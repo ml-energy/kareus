@@ -147,14 +147,15 @@ class AttentionFuserTest:
         local_seq_length = self.seq_length // self.context_parallel_size
         local_attention_heads = self.num_attention_heads // self.tensor_parallel_size
         local_query_groups = self.num_query_groups // self.tensor_parallel_size
+        local_hidden_size = self.hidden_size // self.tensor_parallel_size
         
         output_grad_1 = torch.randn(
-            local_seq_length, nano_batch_size, self.hidden_size,
+            local_seq_length, nano_batch_size, local_hidden_size,
             dtype=self.dtype, device=self.device
         )
 
         output_grad_2 = torch.randn(
-            local_seq_length, nano_batch_size, self.hidden_size,
+            local_seq_length, nano_batch_size, local_hidden_size,
             dtype=self.dtype, device=self.device
         )
         
@@ -174,11 +175,10 @@ class AttentionFuserTest:
             attention_type="self",
             cp_comm_type="all_gather",
         )
-        # TODO: remove cp_group in attention_op
         attention_op.set_context_parallel_group(
-            cp_group=self.cp_group,
-            cp_global_ranks=list(range(self.world_size)),
-            cp_stream=torch.cuda.current_stream(),
+            cp_size=self.context_parallel_size,
+            rank=self.rank,
+            cp_stream=torch.cuda.Stream(),
         )
 
         # 7. Linear Projection Operation
@@ -253,8 +253,8 @@ class AttentionFuserTest:
             
             AttnOprojAutogradFunction.backward(
                 func_ctx,
-                query_1, # grad_query
-                query_2,
+                output_grad_1,
+                output_grad_2,
                 bias_grad_1,
                 bias_grad_2,
             )
@@ -281,8 +281,8 @@ class AttentionFuserTest:
             for i in range(iterations):
                 AttnOprojAutogradFunction.backward(
                     func_ctx,
-                    query_1,
-                    query_2,
+                    output_grad_1,
+                    output_grad_2,
                     bias_grad_1,
                     bias_grad_2,
                 )

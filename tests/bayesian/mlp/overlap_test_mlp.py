@@ -7,7 +7,7 @@ import sys
 import traceback
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
-sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../fuser/'))
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from common_config import FuserTestConfig
@@ -17,7 +17,7 @@ from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.megatron.core.extensions.ops import BiasSwigluOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
+from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 from zeus.monitor import ZeusMonitor
 # from cfuser.core.utils import nvtx_range
 import pynvml
@@ -183,10 +183,11 @@ class MLPFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1),
-            (0, 1), (2, 3), (4, 4), (5, 6),
-            (0, 3), (2, 4), (4, 6),
-            (0, 4), (2, 6),
+            # (-1, -1),
+            # (0, 1), (2, 3), (4, 4), (5, 6),
+            # (0, 3), (2, 4), (4, 6),
+            # (0, 4), (2, 6),
+            # (0, 6),
             (0, 6),
         ]
         return overlap_windows
@@ -210,9 +211,9 @@ class MLPFuserTest:
                 hidden_states=hidden_states,
                 bias=bias,
                 residual=residual,
-                allreduce_input=allreduce_inputs,
-                allreduce_overlap_window=overlap_window,
-                allreduce_sm_configs=sm_configs,
+                comm_input=allreduce_inputs,
+                comm_overlap_window=overlap_window,
+                comm_sm_configs=sm_configs,
             )
         torch.cuda.synchronize()
         dist.barrier()
@@ -284,7 +285,7 @@ class MLPFuserTest:
 
         mlp_fuser = PartitionFuser(
             ops=comp_ops,
-            allreduce_comm_op=allreduce_comm_op,
+            comm_op_fwd=allreduce_comm_op,
             fuse_ops=False
         )
         print(f"mlp_fuser._forward_ops: {mlp_fuser._forward_ops}")

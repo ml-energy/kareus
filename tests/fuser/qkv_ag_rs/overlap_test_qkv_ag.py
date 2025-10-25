@@ -6,7 +6,7 @@ import sys
 import traceback
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
-sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../fuser/'))
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from common_config import FuserTestConfig
@@ -19,7 +19,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import AllGatherKV
 from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.qkv_fuser2 import QKVPartitionFuser as PartitionFuser
+from kareus.megatron.core.extensions.qkv_fuser2 import QKVPartitionFuser2 as PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from kareus.utils.debug import nvtx_range
@@ -77,7 +77,7 @@ class AttentionFuserTest:
         if rank == 0:
             print(f"self.config: {self.config}")
 
-        self.frequency = args.frequency
+        self.frequency = args.frequency if hasattr(args, "frequency") else "default"
         self.repeat_num = 1
     
     def create_test_tensors(self):

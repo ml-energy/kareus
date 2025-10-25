@@ -174,11 +174,10 @@ class AttentionFuserTest:
             attention_type="self",
             cp_comm_type="all_gather",
         )
-        # TODO: remove cp_group in attention_op
         attention_op.set_context_parallel_group(
-            cp_group=self.cp_group,
-            cp_global_ranks=list(range(self.world_size)),
-            cp_stream=torch.cuda.current_stream(),
+            cp_size=self.context_parallel_size,
+            rank=self.rank,
+            cp_stream=torch.cuda.Stream(),
         )
 
         # 7. Linear Projection Operation
@@ -353,7 +352,7 @@ class AttentionFuserTest:
                             test_tensors, grad_tensors, attention_fuser, 
                             overlap_window, sm_configs
                         )
-                    return
+                    # return
                     time.sleep(10)
 
 
