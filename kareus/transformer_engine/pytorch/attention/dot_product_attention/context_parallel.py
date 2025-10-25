@@ -245,7 +245,9 @@ def _attn_cp_kv_allgather_compute(
     deterministic,
     use_fused_attention,
     window_size,
-    cp_group,
+    # cp_group,
+    cp_size,
+    rank,
     cp_stream,
     use_flash_attn_3,
     k_ag,
@@ -261,8 +263,8 @@ def _attn_cp_kv_allgather_compute(
     q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
 
     qkv_dtype = q.dtype
-    cp_size = get_distributed_world_size(cp_group)
-    rank = get_distributed_rank(cp_group)
+    # cp_size = get_distributed_world_size(cp_group)
+    # rank = get_distributed_rank(cp_group)
     causal = "causal" in attn_mask_type
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -464,7 +466,9 @@ def _attn_cp_kv_allgather_compute(
     ctx.qkv_dtype = qkv_dtype
     ctx.kv_seq_range_per_step = kv_seq_range_per_step
     ctx.window_size_per_step = window_size_per_step
-    ctx.cp_group = cp_group
+    # ctx.cp_group = cp_group
+    ctx.cp_size = cp_size
+    ctx.rank = rank
     ctx.cp_stream = cp_stream
     ctx.dropout_p = dropout_p
     ctx.max_seqlen_q = max_seqlen_q
@@ -500,7 +504,9 @@ def AttnFuncWithCPAndKVAllGather_forward(
     deterministic,
     use_fused_attention,
     window_size,
-    cp_group,
+    # cp_group,
+    cp_size,
+    rank,
     cp_stream,
     use_flash_attn_3,
 ):
@@ -534,7 +540,9 @@ def AttnFuncWithCPAndKVAllGather_forward(
         deterministic,
         use_fused_attention,
         window_size,
-        cp_group,
+        # cp_group,
+        cp_size,
+        rank,
         cp_stream,
         use_flash_attn_3,
         k_ag,
@@ -558,8 +566,10 @@ def _attn_cp_kv_allgather_bwd_pre_reduce(
     k_ag,
     v_ag,
 ):
-    cp_size = get_distributed_world_size(ctx.cp_group)
-    rank = get_distributed_rank(ctx.cp_group)
+    # cp_size = get_distributed_world_size(ctx.cp_group)
+    # rank = get_distributed_rank(ctx.cp_group)
+    cp_size = ctx.cp_size
+    rank = ctx.rank
 
     (*saved_tensors,) = ctx.saved_tensors
     (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = saved_tensors[:5]
@@ -808,8 +818,10 @@ def attn_forward_func_with_cp(
     cu_seqlens_q_padded,
     cu_seqlens_kv_padded,
     dropout_p,
-    cp_group,
-    cp_global_ranks,
+    # cp_group,
+    cp_size,
+    rank,
+    # cp_global_ranks,
     cp_stream,
     cp_comm_type,
     softmax_scale=None,
@@ -899,9 +911,10 @@ def attn_forward_func_with_cp(
         #     cp_group = cp_group[0]
         #     cp_comm_type = "a2a"
     else:
-        assert isinstance(
-            cp_group, dist_group_type
-        ), f"Unsupported process group for CP communication type {cp_comm_type}!"
+        pass
+        # assert isinstance(
+        #     cp_group, dist_group_type
+        # ), f"Unsupported process group for CP communication type {cp_comm_type}!"
 
     assert qkv_format in [
         "bshd",
@@ -970,7 +983,7 @@ def attn_forward_func_with_cp(
     elif cp_comm_type == "all_gather":
         # args.pop(5)
         # args.pop(8)
-        args += [window_size, cp_group, cp_stream, use_flash_attn_3]
+        args += [window_size, cp_size, rank, cp_stream, use_flash_attn_3]
         out = AttnFuncWithCPAndKVAllGather_forward(*args)
     elif cp_comm_type == "a2a":
         raise NotImplementedError(f"Not supported cp_comm_type: {cp_comm_type}")
