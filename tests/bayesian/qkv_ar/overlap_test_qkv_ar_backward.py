@@ -72,9 +72,10 @@ class AttentionFuserTest:
         self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
         
         # Create transformer config
-        self.config = FuserTestConfig.create_attention_config()
-        if rank == 0:
-            print(f"self.config: {self.config}")
+        self.config = FuserTestConfig.create_attention_config(
+            context_parallel_size=self.context_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+        )
 
         self.frequency = args.frequency if hasattr(args, "frequency") else "default"
         self.repeat_num = 1

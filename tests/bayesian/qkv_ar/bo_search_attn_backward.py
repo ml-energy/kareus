@@ -67,7 +67,7 @@ SM_VALUES = list(range(3, 31, 3))
 
 FREQ_VALUES = []
 
-BO_DEFAULT_N_INIT = 36
+BO_DEFAULT_N_INIT = 48
 BO_DEFAULT_BATCHES = 4
 BO_DEFAULT_ACQ_BATCH = 16
 
@@ -172,6 +172,13 @@ class PartitionTestRunner:
             allow_unused=True,
             create_graph=False,
         )
+    
+    def clean(self):
+        self.query = None
+        self.key = None
+        self.value = None
+        self.residual_out = None
+        self.allreduce_output = None
 
 
 # -----------------------------

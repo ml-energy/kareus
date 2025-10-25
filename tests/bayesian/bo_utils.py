@@ -176,7 +176,7 @@ def _dist_batch_eval_worker(
         duration = (time_end - time_start) / 8.0
 
         if rank == 0:
-            iterations = int(max(1, round(8.0 / max(duration, 1e-6))))
+            iterations = int(max(1, round(6.0 / max(duration, 1e-6))))
             obj_list = [iterations]
         else:
             obj_list = [None]
@@ -192,6 +192,9 @@ def _dist_batch_eval_worker(
             partition_test.test_config(overlap_window, (sm_num, block_size))
         torch.cuda.synchronize()
         dist.barrier()
+        if hasattr(partition_test, "clean"):
+            print(f"Cleaning up partition test")
+            partition_test.clean()
 
         if rank == 0 and monitor is not None:
             result = monitor.end_window("step")
@@ -228,7 +231,7 @@ def _dist_batch_eval_worker(
                 "energy_j": float(avg_energy_j),
                 "time_s": float(avg_time_s),
             }
-        time.sleep(10)
+        time.sleep(15)
 
     if rank == 0:
         pid = os.getpid()

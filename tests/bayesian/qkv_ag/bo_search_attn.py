@@ -67,7 +67,7 @@ SM_VALUES = list(range(1, 21))
 
 FREQ_VALUES = []
 
-BO_DEFAULT_N_INIT = 36
+BO_DEFAULT_N_INIT = 48
 BO_DEFAULT_BATCHES = 4
 BO_DEFAULT_ACQ_BATCH = 16
 
@@ -80,7 +80,7 @@ class PartitionTestConfig:
     """
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        logs_dir = f"logs/{args.model_name}/cp{args.context_parallel_size}-tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
+        logs_dir = f"logs/{args.model_name}/cp{args.context_parallel_size}-tp{args.tensor_parallel_size}-bs{args.batch_size}-seq{args.seq_len}/forward"
         os.makedirs(logs_dir, exist_ok=True)
         self.eval_log_path = os.path.join(logs_dir, "eval_results.jsonl")
         self.logs_dir = logs_dir
