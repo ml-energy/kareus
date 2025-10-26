@@ -19,7 +19,7 @@ from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
-from cfuser.core.utils import nvtx_range
+# from cfuser.core.utils import nvtx_range
 import pynvml
 import multiprocessing
 
@@ -234,12 +234,13 @@ class AttentionFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            (-1, -1),
-            (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
-            (0, 3), (2, 5), (4, 6), (6, 8),
-            (0, 5), (2, 6), (4, 8),
-            (0, 6), (2, 8),
-            (0, 8),
+            # (-1, -1),
+            # (0, 1), (2, 3), (4, 5), (6, 6), (7, 8),
+            # (0, 3), (2, 5), (4, 6), (6, 8),
+            # (0, 5), (2, 6), (4, 8),
+            # (0, 6), (2, 8),
+            # (0, 8),
+            (-1, -1), (0, 8), (2, 8), (4, 8), (6, 8), (7, 8),
         ]
         return overlap_windows
     
@@ -333,32 +334,34 @@ class AttentionFuserTest:
         if self.rank == 0:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
-            os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
-                title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
-                for i in range(self.repeat_num):
-                    title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
-                title = title.rstrip(",")
-                title += "\n"
-                f.write(title)
+            # os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
+            # with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
+            #     title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
+            #     for i in range(self.repeat_num):
+            #         title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
+            #     title = title.rstrip(",")
+            #     title += "\n"
+            #     f.write(title)
         
         # skip = True
         overlap_windows = self.get_overlap_windows()
         for overlap_window in overlap_windows:
-            for sm_num in range(1, 21):
-                for block_size in [512, 1024]:
+            for sm_num in range(3, 31, 3):
+                for block_size in [1024]:
+                    if sm_num <= 20:
+                        continue
                     # if sm_num == 17 and block_size == 512 and overlap_window[0] == 4 and overlap_window[1] == 5:
                     #     skip = False
                     # if skip:
                     #     continue
                     sm_configs = (sm_num, block_size)
                     print(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}")
-                    with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
-                        self.test_config(
-                            monitor, 
-                            test_tensors, attention_fuser, 
-                            overlap_window, sm_configs
-                        )
+                    # with nvtx_range(f"Overlap {overlap_window} - SM: {sm_num}, Block: {block_size}"):
+                    self.test_config(
+                        monitor, 
+                        test_tensors, attention_fuser, 
+                        overlap_window, sm_configs
+                    )
                     time.sleep(15)
 
 

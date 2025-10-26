@@ -61,6 +61,8 @@ pip install -e .
 # allreduce
 # /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py
 # self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
+# /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/fuser.py
+# ctx._saved_tensors_range = None
 
 # mscclpp
 cd ../mscclpp

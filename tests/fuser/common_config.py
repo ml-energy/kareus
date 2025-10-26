@@ -13,37 +13,37 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 class FuserTestConfig:
     """Configuration factory for fuser test scripts."""
 
-    MODEL_NAME = "llama3.1b"
+    MODEL_NAME = "llama3.2_3b"
     
     # Default model dimensions (Llama-like)
-    HIDDEN_SIZE = 2048
-    NUM_ATTENTION_HEADS = 32
-    HEAD_DIM = 64
+    HIDDEN_SIZE = 3072
+    NUM_ATTENTION_HEADS = 24
+    HEAD_DIM = 128
     NUM_QUERY_GROUPS = 8  # For grouped query attention
     FFN_HIDDEN_SIZE = 8192
     VOCAB_SIZE = 128256
-    DROP_RATE = 0.0
-    NUM_LAYERS = 16
+    DROP_RATE = 0.5
+    NUM_LAYERS = 28
     
     # Default test parameters
-    DEFAULT_WORLD_SIZE = 2
+    # DEFAULT_WORLD_SIZE = 2
     DEFAULT_TENSOR_PARALLEL_SIZE = 4
     DEFAULT_CONTEXT_PARALLEL_SIZE = 2
     DEFAULT_BATCH_SIZE = 16
-    DEFAULT_SEQ_LENGTH = 8192
+    DEFAULT_SEQ_LENGTH = 4096
 
     DEFAULT_STAGES = 2
     DEFAULT_NUM_MICROBATCHES = 8
-    num_layers_in_first_pipeline_stage = 9
-    num_layers_in_last_pipeline_stage = 7
+    # num_layers_in_first_pipeline_stage = 9
+    # num_layers_in_last_pipeline_stage = 7
     
     # Default Bayesian Optimization parameters
-    BO_DEFAULT_N_INIT = 48
-    BO_DEFAULT_BATCHES = 4
-    BO_DEFAULT_ACQ_BATCH = 24
+    # BO_DEFAULT_N_INIT = 48
+    # BO_DEFAULT_BATCHES = 4
+    # BO_DEFAULT_ACQ_BATCH = 24
 
     # Default communication SM count candidates for fuser comm kernels
-    COMM_SM_VALUES = list(range(1, 21))
+    # COMM_SM_VALUES = list(range(1, 21))
 
     # GPU p2p power (W) configuration
     P2P_POWER_W_BY_GPU = {

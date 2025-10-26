@@ -12,6 +12,7 @@ import sys
 import time
 import argparse
 import numpy as np
+import torch
 from typing import List, Dict
 
 # Local imports: make current dir importable, then import the test harness
@@ -337,9 +338,10 @@ def main() -> None:
         ref_point_eff = np.array([np.max(y_energy_eff) * 1.1, np.max(y_time) * 1.1], dtype=np.float64)
         ref_point_real = np.array([np.max(y_energy_real) * 1.1, np.max(y_time) * 1.1], dtype=np.float64)
 
-        Y_current = np.column_stack((y_energy_eff, y_time))
-        pareto_mask = is_non_dominated(-np.asarray(Y_current, dtype=np.float64))
-        pareto_count = int(np.sum(pareto_mask))
+        Y_current = torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
+        neg_Y = -Y_current
+        pareto_mask = is_non_dominated(neg_Y)
+        pareto_count = int(torch.sum(pareto_mask).item())
 
         print(f"  Total evaluations so far: {X_train.shape[0]}")
         print(f"  Current Pareto points count: {pareto_count}")

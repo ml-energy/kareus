@@ -163,8 +163,8 @@ if __name__ == "__main__":
     skip = False
     overlap_windows = get_overlap_windows()
     for overlap_start, overlap_end in overlap_windows:
-        for sm_num in range(1, 21):
-            for block_size in [512, 1024]:
+        for sm_num in range(3, 31, 3):
+            for block_size in [1024]:
                 if sm_num == 11 and block_size == 1024 and overlap_start == 0 and overlap_end == 1:
                     skip = False
                 if skip:
@@ -172,61 +172,61 @@ if __name__ == "__main__":
                 output_name = f"profile_{overlap_start}_{overlap_end}_{sm_num}_{block_size}"
                 nsys_report = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.nsys-rep"
 
-                # try:
-                profile_cmd = [
-                    "nsys profile",
-                    "--gpu-metrics-devices", ",".join(target_indices),
-                    "--capture-range", "cudaProfilerApi",
-                    "--force-overwrite", "true",
-                    "-o", f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}",
-                    "python", f"overlap_test_attn_individual.py",
-                    "--world_size", str(args.world_size),
-                    "--batch_size", str(args.batch_size),
-                    "--seq_len", str(args.seq_len),
-                    "--frequency", frequency,
-                    "--overlap_start", str(overlap_start),
-                    "--overlap_end", str(overlap_end),
-                    "--sm_num", str(sm_num),
-                    "--block_size", str(block_size),
-                ]
-                if not skip and not os.path.exists(nsys_report):
-                    run_cmd(" ".join(profile_cmd))
-                print(f"[✓] nsys profiling done. Output: {nsys_report}")
+                try:
+                    profile_cmd = [
+                        "nsys profile",
+                        "--gpu-metrics-devices", ",".join(target_indices),
+                        "--capture-range", "cudaProfilerApi",
+                        "--force-overwrite", "true",
+                        "-o", f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}",
+                        "python", f"overlap_test_attn_individual.py",
+                        "--world_size", str(args.world_size),
+                        "--batch_size", str(args.batch_size),
+                        "--seq_len", str(args.seq_len),
+                        "--frequency", frequency,
+                        "--overlap_start", str(overlap_start),
+                        "--overlap_end", str(overlap_end),
+                        "--sm_num", str(sm_num),
+                        "--block_size", str(block_size),
+                    ]
+                    if not skip and not os.path.exists(nsys_report):
+                        run_cmd(" ".join(profile_cmd))
+                    print(f"[✓] nsys profiling done. Output: {nsys_report}")
 
-                csv_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv"
-                metrics_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.sqlite"
-                export_cmd = [
-                    "nsys stats", nsys_report,
-                    "--report", "cuda_gpu_kern_sum",
-                    "--format", "csv",
-                    "--force-export", "true",
-                    "--sqlite", metrics_file,
-                    "--output", csv_file,
-                ]
-                if not skip and not os.path.exists(metrics_file):
-                    run_cmd(" ".join(export_cmd))
-                print(f"[✓] nsys export done. Output: {metrics_file}")
+                    csv_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv"
+                    metrics_file = f"profile_result/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.sqlite"
+                    export_cmd = [
+                        "nsys stats", nsys_report,
+                        "--report", "cuda_gpu_kern_sum",
+                        "--format", "csv",
+                        "--force-export", "true",
+                        "--sqlite", metrics_file,
+                        "--output", csv_file,
+                    ]
+                    if not skip and not os.path.exists(metrics_file):
+                        run_cmd(" ".join(export_cmd))
+                    print(f"[✓] nsys export done. Output: {metrics_file}")
 
-                metrics_df = process_sqlite(metrics_file)
-                metrics_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv", index=False)
+                    metrics_df = process_sqlite(metrics_file)
+                    metrics_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.csv", index=False)
 
-                stats_df = calculate_metrics_stats(metrics_df)
-                stats_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.metrics_stats.csv", index=False)
+                    stats_df = calculate_metrics_stats(metrics_df)
+                    stats_df.to_csv(f"results/tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}/{frequency}/{output_name}.metrics_stats.csv", index=False)
 
-                result = {
-                    "overlap_start": overlap_start,
-                    "overlap_end": overlap_end,
-                    "sm_num": sm_num,
-                    "block_size": block_size,
-                }
-                for _, row in stats_df.iterrows():
-                    result[row["Metric"] + " Mean"] = row["Mean"]
-                results.append(result)
-                print(f"[✓] Result collected for {output_name}")
+                    result = {
+                        "overlap_start": overlap_start,
+                        "overlap_end": overlap_end,
+                        "sm_num": sm_num,
+                        "block_size": block_size,
+                    }
+                    for _, row in stats_df.iterrows():
+                        result[row["Metric"] + " Mean"] = row["Mean"]
+                    results.append(result)
+                    print(f"[✓] Result collected for {output_name}")
                 # exit()
-                # except:
-                #     print(f"[❌] Error processing {output_name}")
-                #     continue
+                except:
+                    print(f"[❌] Error processing {output_name}")
+                    continue
 
     # if results:
     #     results_df = pd.DataFrame(results)
