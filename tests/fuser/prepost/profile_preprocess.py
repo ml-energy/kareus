@@ -96,6 +96,9 @@ class PreprocessProfiler:
         self.args = args
         self.rank = rank
         self.world_size = world_size
+        assert self.world_size == args.tensor_parallel_size
+        self.context_parallel_size = args.context_parallel_size
+        self.tensor_parallel_size = args.tensor_parallel_size
         self.device = torch.device('cuda', rank)
         self.dtype = torch.bfloat16
 
@@ -109,8 +112,8 @@ class PreprocessProfiler:
 
         # Config (default to RoPE for positional embedding type)
         self.config = FuserTestConfig.create_postprocess_config(
-            world_size, 
-            self.dtype,
+            context_parallel_size=self.context_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
         )
 
         self.position_embedding_type = 'rope'
@@ -118,10 +121,11 @@ class PreprocessProfiler:
         self.repeat_num = 1
 
         # Ops
+        local_seq_length = self.seq_length // max(1, self.context_parallel_size)
         self.embedding = LanguageModelEmbedding(
             config=self.config,
             vocab_size=self.vocab_size,
-            max_sequence_length=self.seq_length,
+            max_sequence_length=local_seq_length,
             position_embedding_type=self.position_embedding_type,
             scatter_to_sequence_parallel=False,
         )
@@ -134,12 +138,12 @@ class PreprocessProfiler:
         self.input_ids = torch.randint(
             0,
             self.vocab_size,
-            (self.batch_size, self.seq_length),
+            (self.batch_size, local_seq_length),
             device=self.device,
             dtype=torch.long,
             requires_grad=False,
         )
-        self.position_ids = torch.arange(self.seq_length, device=self.device, dtype=torch.long)[
+        self.position_ids = torch.arange(local_seq_length, device=self.device, dtype=torch.long)[
             None, :
         ].expand(self.batch_size, -1)
 
@@ -155,11 +159,11 @@ class PreprocessProfiler:
         # Create logs dir on rank 0
         if self.rank == 0:
             os.makedirs(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
                 exist_ok=True,
             )
             with open(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/preprocess_energy.csv",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/preprocess_energy.csv",
                 'w',
             ) as f:
                 title = "time (s),total_energy (J)," + ",".join(
@@ -168,6 +172,7 @@ class PreprocessProfiler:
                 f.write(title + "\n")
 
         # Warmup and estimate iterations
+        torch.cuda.profiler.start()
         torch.cuda.synchronize()
         dist.barrier(group=self.tp_group)
         for i in range(10):
@@ -178,6 +183,7 @@ class PreprocessProfiler:
         dist.barrier(group=self.tp_group)
         t1 = time.time()
         duration = (t1 - t0) / 8.0
+        torch.cuda.profiler.stop()
         if self.rank == 0:
             iterations = max(1, int(8.0 / duration))
             dist_list = [iterations]
@@ -206,7 +212,7 @@ class PreprocessProfiler:
             e_total = result.total_energy / iterations
             ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
             with open(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/preprocess_energy.csv",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/preprocess_energy.csv",
                 'a',
             ) as f:
                 f.write(
@@ -241,7 +247,9 @@ if __name__ == '__main__':
     from torch.multiprocessing import spawn
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument('--context_parallel_size', '-c', type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
+    parser.add_argument('--tensor_parallel_size', '-t', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument('--batch_size', '-b', type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument('--seq_len', '-s', type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument('--vocab_size', '-v', type=int, default=FuserTestConfig.VOCAB_SIZE)

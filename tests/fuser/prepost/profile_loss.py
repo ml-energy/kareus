@@ -91,6 +91,9 @@ class LossProfiler:
         self.args = args
         self.rank = rank
         self.world_size = world_size
+        assert self.world_size == args.tensor_parallel_size
+        self.context_parallel_size = args.context_parallel_size
+        self.tensor_parallel_size = args.tensor_parallel_size
         self.device = torch.device('cuda', rank)
         self.dtype = torch.bfloat16
 
@@ -102,7 +105,10 @@ class LossProfiler:
         self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
 
         # Config: enable native fused CE if available
-        self.config = FuserTestConfig.create_loss_config(world_size, self.dtype)
+        self.config = FuserTestConfig.create_loss_config(
+            context_parallel_size=self.context_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+        )
 
         self.frequency = args.frequency
 
@@ -112,9 +118,10 @@ class LossProfiler:
         # Random inputs for loss compute
         torch.manual_seed(1234)
         # logits shape expected by loss: [s, b, vocab_per_partition]
-        self.vocab_per_partition = self.vocab_size // max(1, self.world_size)
+        self.vocab_per_partition = self.vocab_size // max(1, self.tensor_parallel_size)
+        local_seq_length = self.seq_length // max(1, self.context_parallel_size)
         self.logits = torch.randn(
-            self.seq_length,
+            local_seq_length,
             self.batch_size,
             self.vocab_per_partition,
             dtype=self.dtype,
@@ -125,7 +132,7 @@ class LossProfiler:
         self.labels = torch.randint(
             0,
             self.vocab_size,
-            (self.batch_size, self.seq_length),
+            (self.batch_size, local_seq_length),
             device=self.device,
             dtype=torch.long,
         )
@@ -141,11 +148,11 @@ class LossProfiler:
         # Logs dir
         if self.rank == 0:
             os.makedirs(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
                 exist_ok=True,
             )
             with open(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/loss_energy.csv",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/loss_energy.csv",
                 'w',
             ) as f:
                 title = "time (s),total_energy (J)," + ",".join(
@@ -192,7 +199,7 @@ class LossProfiler:
             e_total = result.total_energy / iterations
             ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
             with open(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/loss_energy.csv",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/loss_energy.csv",
                 'a',
             ) as f:
                 f.write(
@@ -225,7 +232,9 @@ if __name__ == '__main__':
     from torch.multiprocessing import spawn
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument('--context_parallel_size', '-c', type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
+    parser.add_argument('--tensor_parallel_size', '-t', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument('--batch_size', '-b', type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument('--seq_len', '-s', type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument('--vocab_size', '-v', type=int, default=FuserTestConfig.VOCAB_SIZE)

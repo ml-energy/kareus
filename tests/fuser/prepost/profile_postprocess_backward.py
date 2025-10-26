@@ -20,6 +20,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
+from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from zeus.monitor import ZeusMonitor
 # from cfuser.core.utils import nvtx_range
 
@@ -92,6 +93,9 @@ class PostprocessBackwardProfiler:
         self.args = args
         self.rank = rank
         self.world_size = world_size
+        assert self.world_size == args.tensor_parallel_size
+        self.context_parallel_size = args.context_parallel_size
+        self.tensor_parallel_size = args.tensor_parallel_size
         self.device = torch.device('cuda', rank)
         self.dtype = torch.bfloat16
 
@@ -105,9 +109,12 @@ class PostprocessBackwardProfiler:
 
         # Config
         self.config = FuserTestConfig.create_postprocess_config(
-            world_size, 
-            self.dtype,
+            context_parallel_size=self.context_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
         )
+
+        # Force RMSNorm for this profiler
+        self.config.normalization = "RMSNorm"
 
         self.frequency = args.frequency
 
@@ -124,38 +131,73 @@ class PostprocessBackwardProfiler:
 
         # Inputs and grad output
         torch.manual_seed(1234)
+        local_seq_length = self.seq_length // max(1, self.context_parallel_size)
+        nano_batches = 2
+        nb_batch_size = self.batch_size // nano_batches
         self.hidden_states = torch.randn(
-            self.seq_length,
+            local_seq_length,
             self.batch_size,
             self.hidden_size,
             dtype=self.dtype,
             device=self.device,
+            requires_grad=True,
+        )
+        self.hidden_states_nb0 = torch.randn(
+            local_seq_length,
+            nb_batch_size,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        self.hidden_states_nb1 = torch.randn(
+            local_seq_length,
+            nb_batch_size,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        self.rms_eps = 1e-5
+
+        # TENorm (RMSNorm)
+        self.norm = RMSNorm(
+            normalized_shape=self.hidden_size,
+            eps=self.rms_eps,
+            device=self.device,
+            dtype=self.dtype
         )
 
         self.tp_group = get_tensor_model_parallel_group()
 
         # Build graph once and cache outputs + grad tensor
         # with nvtx_range('postprocess_forward_for_backward'):
-        self.cached_logits, _ = self.output_layer(self.hidden_states, runtime_gather_output=None)
+        x = self.norm(self.hidden_states)
+        self.cached_logits, _ = self.output_layer(x, runtime_gather_output=None)
         self.cached_logits_grad = torch.randn_like(self.cached_logits, dtype=self.cached_logits.dtype)
 
     def _backward_step(self):
         # with nvtx_range('postprocess_backward'):
-        torch.autograd.backward(
-            tensors=[self.cached_logits],
-            grad_tensors=[self.cached_logits_grad],
+        self.cached_logits_grad.mul_(0.5) # grad scale
+        _ = torch.autograd.grad(
+            outputs=[self.cached_logits],
+            inputs=[self.hidden_states],
+            grad_outputs=[self.cached_logits_grad],
             retain_graph=True,
+            allow_unused=True,
+            create_graph=False,
         )
+        dummy = self.hidden_states_nb0 + self.hidden_states_nb1
 
     def run(self):
         # Logs dir
         if self.rank == 0:
             os.makedirs(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
                 exist_ok=True,
             )
             with open(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_backward_energy.csv",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_backward_energy.csv",
                 'w',
             ) as f:
                 title = "time (s),total_energy (J)," + ",".join(
@@ -164,6 +206,7 @@ class PostprocessBackwardProfiler:
                 f.write(title + "\n")
 
         # Warmup + iteration estimate
+        torch.cuda.profiler.start()
         self.output_layer.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
         dist.barrier(group=self.tp_group)
@@ -175,6 +218,7 @@ class PostprocessBackwardProfiler:
         dist.barrier(group=self.tp_group)
         t1 = time.time()
         duration = (t1 - t0) / 8.0
+        torch.cuda.profiler.stop()
         if self.rank == 0:
             iterations = max(1, int(8.0 / duration))
             dist_list = [iterations]
@@ -203,7 +247,7 @@ class PostprocessBackwardProfiler:
             e_total = result.total_energy / iterations
             ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
             with open(
-                f"logs/tp{self.world_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_backward_energy.csv",
+                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_backward_energy.csv",
                 'a',
             ) as f:
                 f.write(
@@ -214,7 +258,8 @@ class PostprocessBackwardProfiler:
         self.output_layer.zero_grad(set_to_none=True)
         self.cached_logits = self.cached_logits.detach()
         self.cached_logits_grad = None
-        self.hidden_states = None
+        self.hidden_states_nb0 = None
+        self.hidden_states_nb1 = None
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
@@ -255,7 +300,9 @@ if __name__ == '__main__':
     from torch.multiprocessing import spawn
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument('--context_parallel_size', '-c', type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
+    parser.add_argument('--tensor_parallel_size', '-t', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument('--batch_size', '-b', type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument('--seq_len', '-s', type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument('--vocab_size', '-v', type=int, default=FuserTestConfig.VOCAB_SIZE)
