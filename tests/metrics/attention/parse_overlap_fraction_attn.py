@@ -65,7 +65,7 @@ def draw_timeline_from_csv(csv_path, out_png, overlap_window, title_suffix=None,
     df = df[~df[col_kernel].str.contains('FillFunctor', na=False)]
 
     # AllReduce latency: use Min (ns)
-    ar_rows = df[df[col_kernel] == 'allreduceKernelEntryPointBF16']
+    ar_rows = df[df[col_kernel] == 'allreduce1']
     if ar_rows.empty:
         print(f"No AllReduce kernel found: {csv_path}")
         return False, None
@@ -278,8 +278,8 @@ def draw_timeline_from_csv(csv_path, out_png, overlap_window, title_suffix=None,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--frequency", "-f", type=str, default="default")
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=8)
+    parser.add_argument("--world_size", "-w", type=int, default=4)
+    parser.add_argument("--batch_size", "-b", type=int, default=16)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--gpu_type", type=str, default="ampere", help="GPU type: hopper or ampere")
     parser.add_argument("--input_dir", type=str, default="", help="If empty, derives from parameters: profile_result/tp<w>-bs<b>-seq<s>/<f>")

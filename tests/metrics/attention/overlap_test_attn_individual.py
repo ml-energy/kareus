@@ -37,7 +37,7 @@ def _spawn_entry(rank, world_size, args, master_port):
     
     attention_fuser = PartitionFuser(
         ops=comp_ops,
-        allreduce_comm_op=allreduce_comm_op,
+        comm_op_fwd=allreduce_comm_op,
         fuse_ops=False,
     )
 
@@ -51,9 +51,9 @@ def _spawn_entry(rank, world_size, args, master_port):
             residual=test_tensors[2],
             rotary_pos_emb=test_tensors[3],
             attention_mask=test_tensors[4],
-            allreduce_input=test_tensors[5],
-            allreduce_overlap_window=(args.overlap_start, args.overlap_end),
-            allreduce_sm_configs=(args.sm_num, args.block_size),
+            comm_input=test_tensors[5],
+            comm_overlap_window=(args.overlap_start, args.overlap_end),
+            comm_sm_configs=(args.sm_num, args.block_size),
         )
 
     cudart.cudaProfilerStart()
@@ -63,9 +63,9 @@ def _spawn_entry(rank, world_size, args, master_port):
         residual=test_tensors[2],
         rotary_pos_emb=test_tensors[3],
         attention_mask=test_tensors[4],
-        allreduce_input=test_tensors[5],
-        allreduce_overlap_window=(args.overlap_start, args.overlap_end),
-        allreduce_sm_configs=(args.sm_num, args.block_size),
+        comm_input=test_tensors[5],
+        comm_overlap_window=(args.overlap_start, args.overlap_end),
+        comm_sm_configs=(args.sm_num, args.block_size),
     )
     cudart.cudaProfilerStop()
 
@@ -78,8 +78,8 @@ def _spawn_entry(rank, world_size, args, master_port):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
+    parser.add_argument("--world_size", "-w", type=int, default=4)
+    parser.add_argument("--batch_size", "-b", type=int, default=16)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     parser.add_argument("--overlap_start", type=int, default=0)
