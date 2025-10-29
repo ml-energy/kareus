@@ -57,6 +57,14 @@ pip install -e .
 cd ../NeMo
 pip install -e . 
 
+cd ../
+rm /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py
+cp 3rdparty/TransformerEngine/transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/attention/dot_product_attention/
+rm /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/layernorm_linear.py
+cp 3rdparty/TransformerEngine/transformer_engine/pytorch/module/layernorm_linear.py /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/
+rm /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/fuser.py
+cp 3rdparty/TransformerEngine/transformer_engine/pytorch/ops/fuser.py /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/
+
 # /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/layernorm_linear.py
 # allreduce
 # /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py
@@ -78,8 +86,8 @@ pip install '.[pfo-server]'
 # export NVTE_FRAMEWORK=pytorch 
 # pip install --no-build-isolation -e .  
 
-# cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# # cargo
+# curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 pip install botorch
 
@@ -89,8 +97,10 @@ pip install mpi4py
 # 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
 # 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
 # export HF_HUB_ENABLE_HF_TRANSFER=1
-# huggingface-cli download --repo-type dataset ruofanwu/my-gpt_text_document \
-#   --local-dir ./my-gpt_text_document
+huggingface-cli download --repo-type dataset ruofanwu/my-gpt_text_document --local-dir ./my-gpt_text_document
+cd ../
+mkdir tests/simple_test/data
+mv my-gpt_text_document/my-gpt_text_document.* tests/simple_test/data
 
 # docker login -u ruofanwu7
 # dckr_pat_DI1BqD7uAvlv4tNRX_H_fDxxYG4
