@@ -105,6 +105,50 @@ def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str):
                 "comm_overlap_window_o_ar": (0, -1),
                 "comm_sm_configs_o_ar": (12, 1024),
             }
+    else:
+        item = getattr(comm_scheduler, "current_schedule", None)
+        if item is None:
+            raise ValueError("current_schedule is not set")
+
+        fwd_qkv_ar = item.fwd_qkv_ar
+        fwd_qkv_ag = item.fwd_qkv_ag
+        fwd_ao_ag = item.fwd_ao_ag
+        fwd_ao_ar = item.fwd_ao_ar
+        bwd_qkv_ar = item.bwd_qkv_ar
+        bwd_qkv_rs = item.bwd_qkv_rs
+        bwd_a_rs = item.bwd_a_rs
+        bwd_a_ag = item.bwd_a_ag
+        bwd_o_ag = item.bwd_o_ag
+        bwd_o_ar = item.bwd_o_ar
+        if fuser_type == "qkv_ar":
+            return {
+                "comm_overlap_window": None if fwd_qkv_ar is None else fwd_qkv_ar.overlap_window,
+                "comm_sm_configs": None if fwd_qkv_ar is None else fwd_qkv_ar.resource_shape,
+                "comm_overlap_window_backward": None if bwd_qkv_ar is None else bwd_qkv_ar.overlap_window,
+                "comm_sm_configs_backward": None if bwd_qkv_ar is None else bwd_qkv_ar.resource_shape,
+            }
+        elif fuser_type == "qkv_ag":
+            return {
+                "comm_overlap_window": None if fwd_qkv_ag is None else fwd_qkv_ag.overlap_window,
+                "comm_sm_configs": None if fwd_qkv_ag is None else fwd_qkv_ag.resource_shape,
+                "comm_overlap_window_backward": None if bwd_qkv_rs is None else bwd_qkv_rs.overlap_window,
+                "comm_sm_configs_backward": None if bwd_qkv_rs is None else bwd_qkv_rs.resource_shape,
+            }
+        else:
+            return {
+                "comm_overlap_window_ao_ag": None if fwd_ao_ag is None else fwd_ao_ag.overlap_window,
+                "comm_sm_configs_ao_ag": None if fwd_ao_ag is None else fwd_ao_ag.resource_shape,
+                "comm_overlap_window_ao_ar": None if fwd_ao_ar is None else fwd_ao_ar.overlap_window,
+                "comm_sm_configs_ao_ar": None if fwd_ao_ar is None else fwd_ao_ar.resource_shape,
+                "comm_overlap_window_a_rs": None if bwd_a_rs is None else bwd_a_rs.overlap_window,
+                "comm_sm_configs_a_rs": None if bwd_a_rs is None else bwd_a_rs.resource_shape,
+                "comm_overlap_window_a_ag": None if bwd_a_ag is None else bwd_a_ag.overlap_window,
+                "comm_sm_configs_a_ag": None if bwd_a_ag is None else bwd_a_ag.resource_shape,
+                "comm_overlap_window_o_ag": None if bwd_o_ag is None else bwd_o_ag.overlap_window,
+                "comm_sm_configs_o_ag": None if bwd_o_ag is None else bwd_o_ag.resource_shape,
+                "comm_overlap_window_o_ar": None if bwd_o_ar is None else bwd_o_ar.overlap_window,
+                "comm_sm_configs_o_ar": None if bwd_o_ar is None else bwd_o_ar.resource_shape,
+            }
 
 
 class AttentionLayer(MegatronModule, BaseTransformerLayer):

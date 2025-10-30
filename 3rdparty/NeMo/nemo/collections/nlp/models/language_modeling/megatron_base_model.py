@@ -675,7 +675,10 @@ class MegatronBaseModel(NLPModel):
                 server_url=perseus_server_url,
                 job_metadata=self.cfg.get('perseus_job_metadata', None),
             )
-            self.model.config.perseus_optimizer = self.perseus_optimizer
+            if isinstance(self.model, list):
+                self.model[0].config.perseus_optimizer = self.perseus_optimizer
+            else:
+                self.model.config.perseus_optimizer = self.perseus_optimizer
             print(f"Perseus optimizer successfully initialized for rank {self.trainer.global_rank}")
         
         if self.cfg.get('enable_kareus_scheduler', False) and HAVE_KAREUS_SCHEDULER and self.kareus_scheduler is None:
@@ -690,7 +693,11 @@ class MegatronBaseModel(NLPModel):
                 use_activation_checkpointing=self.cfg.get('activations_checkpoint_granularity', None) is not None,
                 context_parallel=self.cfg.get('context_parallel_size', 1) > 1,
             )
-            self.model.config.kareus_scheduler = self.kareus_scheduler
+            # print(self.model)
+            if isinstance(self.model, list):
+                self.model[0].config.kareus_scheduler = self.kareus_scheduler
+            else:
+                self.model.config.kareus_scheduler = self.kareus_scheduler
             print(f"Kareus scheduler successfully initialized for rank {self.trainer.global_rank}")
         
         if self.cfg.get('enable_power_monitor', False) and HAVE_POWER_MONITOR:
