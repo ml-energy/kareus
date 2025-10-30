@@ -107,3 +107,31 @@ mv my-gpt_text_document/my-gpt_text_document.* tests/simple_test/data
 
 # AWS
 # https://github.com/ml-energy/vllm/commit/0ecb7b84140630f885c36bac0233023b8e9df7c0
+
+curl -O https://efa-installer.amazonaws.com/aws-efa-installer-1.34.0.tar.gz \
+&& tar -xf aws-efa-installer-1.34.0.tar.gz \
+&& cd aws-efa-installer \
+&& ./efa_installer.sh -y --skip-kmod --mpi=openmpi4 --no-verify
+
+PATH="/opt/amazon/openmpi/bin:$PATH"
+LD_LIBRARY_PATH="/opt/amazon/openmpi/lib:$LD_LIBRARY_PATH"
+NCCL_VERSION=2.20.5
+cat <<'EOF' >> ~/.zshrc
+# AWS OpenMPI/NCCL environment variables
+export PATH="/opt/amazon/openmpi/bin:$PATH"
+export LD_LIBRARY_PATH="/opt/amazon/openmpi/lib:$LD_LIBRARY_PATH"
+export NCCL_VERSION=2.20.5
+EOF
+
+cd $HOME \
+&& git clone https://github.com/NVIDIA/nccl.git -b v${NCCL_VERSION}-1 \
+&& cd nccl \
+&& make -j64 src.build BUILDDIR=/usr/local
+
+apt-get update && apt-get install -y autoconf libhwloc-dev wget
+wget https://github.com/aws/aws-ofi-nccl/releases/download/v1.10.0-aws/aws-ofi-nccl-1.10.0-aws.tar.gz \
+&& tar -xf aws-ofi-nccl-1.10.0-aws.tar.gz \
+&& cd aws-ofi-nccl-1.10.0-aws \
+&& ./configure --prefix=/usr/local --with-mpi=/opt/amazon/openmpi --with-libfabric=/opt/amazon/efa --with-cuda=/usr/local/cuda --with-nccl=/usr/local --enable-platform-aws \
+&& make \
+&& make install
