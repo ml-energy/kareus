@@ -688,6 +688,7 @@ class MegatronBaseModel(NLPModel):
                 pp_rank=parallel_state.get_pipeline_model_parallel_rank(),
                 num_microbatches=get_num_microbatches(),
                 use_activation_checkpointing=self.cfg.get('activations_checkpoint_granularity', None) is not None,
+                context_parallel=self.cfg.get('context_parallel_size', 1) > 1,
             )
             self.model.config.kareus_scheduler = self.kareus_scheduler
             print(f"Kareus scheduler successfully initialized for rank {self.trainer.global_rank}")

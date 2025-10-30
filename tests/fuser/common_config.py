@@ -34,8 +34,8 @@ class FuserTestConfig:
 
     DEFAULT_STAGES = 2
     DEFAULT_NUM_MICROBATCHES = 8
-    # num_layers_in_first_pipeline_stage = 9
-    # num_layers_in_last_pipeline_stage = 7
+    num_layers_in_first_pipeline_stage = 15
+    num_layers_in_last_pipeline_stage = 13
     
     # Default Bayesian Optimization parameters
     # BO_DEFAULT_N_INIT = 48

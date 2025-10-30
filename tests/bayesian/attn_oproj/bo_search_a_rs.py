@@ -87,7 +87,7 @@ class PartitionTestConfig:
     """
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        logs_dir = f"logs/a_rs/{args.model_name}/cp{args.context_parallel_size}-tp{args.world_size}-bs{args.batch_size}-seq{args.seq_len}"
+        logs_dir = f"logs/a_rs/{args.model_name}/cp{args.context_parallel_size}-tp{args.tensor_parallel_size}-bs{args.batch_size}-seq{args.seq_len}"
         os.makedirs(logs_dir, exist_ok=True)
         self.eval_log_path = os.path.join(logs_dir, "eval_results_bwd.jsonl")
         self.logs_dir = logs_dir
