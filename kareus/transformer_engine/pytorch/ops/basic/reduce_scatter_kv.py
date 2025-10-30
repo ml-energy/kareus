@@ -127,7 +127,7 @@ class ReduceScatterKV():
             if sm_num is None or block_size is None:
                 # Fallback to NCCL reduce_scatter
                 k_out, v_out = self._nccl_reduce_scatter_kv(k, v)
-                self.backend = "nccl"
+                # self.backend = "nccl"
                 return k_out, v_out
             else:
                 k_out, v_out = self._msccl_reduce_scatter_kv(k, v, sm_num, block_size)
@@ -176,9 +176,14 @@ class ReduceScatterKV():
 
     def sync(self, current_stream: torch.cuda.Stream = None) -> None:
         if self.backend == "msccl":
-            # new_msccl_comm.msccl_ReduceScatter_sync()
-            self.wait_event.record(self.comm_stream)
-            current_stream.wait_event(self.wait_event)
+            if len(self._work_handles) > 0:
+                for handle in self._work_handles:
+                    handle.wait()
+                self._work_handles = []
+            else:
+                # new_msccl_comm.msccl_ReduceScatter_sync()
+                self.wait_event.record(self.comm_stream)
+                current_stream.wait_event(self.wait_event)
         else:
             for handle in self._work_handles:
                 handle.wait()

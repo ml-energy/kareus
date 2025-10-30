@@ -185,14 +185,18 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                     basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
                 )
 
-            x, fused_op_extra_outputs = op.fuser_forward(
-                [basic_op_ctxs[idx] for idx in basic_op_idxs],
-                x,
-                basic_op_extra_inputs=extra_inputs,
-                basic_op_prev_ops=prev_ops,
-                basic_op_next_ops=next_ops,
-                basic_op_kwargs=[{} for _ in basic_op_idxs],
-            )
+            if is_first_attn and (isinstance(op, BiasDropoutAddOp) or isinstance(op, RMSNorm)):
+                fused_op_extra_outputs = [()]
+                pass   # temporary for the wrong order problem
+            else:
+                x, fused_op_extra_outputs = op.fuser_forward(
+                    [basic_op_ctxs[idx] for idx in basic_op_idxs],
+                    x,
+                    basic_op_extra_inputs=extra_inputs,
+                    basic_op_prev_ops=prev_ops,
+                    basic_op_next_ops=next_ops,
+                    basic_op_kwargs=[{} for _ in basic_op_idxs],
+                )
 
             # Record event after the operation at fused_idx-1 completes
             if fused_idx == comm_start - 1:

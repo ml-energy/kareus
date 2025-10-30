@@ -117,22 +117,22 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
         else:
             comm_start, comm_end = -1, -1
 
-        if comm_start == -1 and comm_op_fwd is not None:
-            # current_stream.synchronize()
-            comm_op_fwd.fuser_forward(
-                [None], comm_key,
-                basic_op_extra_inputs=[(comm_value,)], 
-                basic_op_prev_ops=[None], 
-                basic_op_next_ops=[None], 
-                basic_op_kwargs=[{
-                    "sm_num": sm_num, 
-                    "block_size": block_size
-                }]
-            )
-            # comm_op_fwd.sync()
-            # WAIT_EVENT.record(comm_op_fwd.comm_stream)
-            # current_stream.wait_event(WAIT_EVENT)
-            comm_op_fwd.sync(current_stream)
+        # if comm_start == -1 and comm_op_fwd is not None:
+        #     # current_stream.synchronize()
+        #     comm_op_fwd.fuser_forward(
+        #         [None], comm_key,
+        #         basic_op_extra_inputs=[(comm_value,)], 
+        #         basic_op_prev_ops=[None], 
+        #         basic_op_next_ops=[None], 
+        #         basic_op_kwargs=[{
+        #             "sm_num": sm_num, 
+        #             "block_size": block_size
+        #         }]
+        #     )
+        #     # comm_op_fwd.sync()
+        #     # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        #     # current_stream.wait_event(WAIT_EVENT)
+        #     comm_op_fwd.sync(current_stream)
         
         # if not profile:
         #     if comm_start == 0:
@@ -231,6 +231,23 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                 for y in ys:
                     if y is not None:
                         y.requires_grad_(requires_grad=requires_grad)
+        
+        if comm_start == -1 and comm_op_fwd is not None:
+            # current_stream.synchronize()
+            comm_op_fwd.fuser_forward(
+                [None], comm_key,
+                basic_op_extra_inputs=[(comm_value,)], 
+                basic_op_prev_ops=[None], 
+                basic_op_next_ops=[None], 
+                basic_op_kwargs=[{
+                    "sm_num": sm_num, 
+                    "block_size": block_size
+                }]
+            )
+            # comm_op_fwd.sync()
+            # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            # current_stream.wait_event(WAIT_EVENT)
+            # comm_op_fwd.sync(current_stream)
 
         # Save context for backward pass
         if is_grad_enabled:

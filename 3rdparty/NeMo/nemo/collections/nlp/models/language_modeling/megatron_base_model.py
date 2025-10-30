@@ -656,7 +656,15 @@ class MegatronBaseModel(NLPModel):
         
         # Initialize Perseus optimizer here after distributed setup is complete
         if self.cfg.get('enable_perseus_optimizer', False) and HAVE_PERSEUS_OPTIMIZER and self.perseus_optimizer is None:
-            print(f"rank: {self.trainer.global_rank}, dp_rank: {parallel_state.get_data_parallel_rank()}, pp_rank: {parallel_state.get_pipeline_model_parallel_rank()}, tp_rank: {parallel_state.get_tensor_model_parallel_rank()}, device_id: {self.trainer.local_rank}, dp_degree: {parallel_state.get_data_parallel_world_size()}, pp_degree: {parallel_state.get_pipeline_model_parallel_world_size()}, tp_degree: {parallel_state.get_tensor_model_parallel_world_size()}, world_size: {self.trainer.world_size}")
+            # Consider CP as part of TP: combine TP and CP for rank/degree
+            _cp_size = parallel_state.get_context_parallel_world_size()
+            _cp_rank = parallel_state.get_context_parallel_rank()
+            _tp_size = parallel_state.get_tensor_model_parallel_world_size()
+            _tp_rank = parallel_state.get_tensor_model_parallel_rank()
+            _combined_tp_degree = _tp_size * (_cp_size if _cp_size is not None else 1)
+            _combined_tp_rank = _tp_rank + _tp_size * (_cp_rank if _cp_rank is not None else 0)
+
+            print(f"rank: {self.trainer.global_rank}, dp_rank: {parallel_state.get_data_parallel_rank()}, pp_rank: {parallel_state.get_pipeline_model_parallel_rank()}, tp_rank: {_combined_tp_rank}, device_id: {self.trainer.local_rank}, dp_degree: {parallel_state.get_data_parallel_world_size()}, pp_degree: {parallel_state.get_pipeline_model_parallel_world_size()}, tp_degree: {_combined_tp_degree}, world_size: {self.trainer.world_size}")
             # Determine Perseus server URL. If MASTER_ADDR is set, prefer it; otherwise use config/default.
             master_addr = os.environ.get('MASTER_ADDR')
             perseus_server_url = (
@@ -666,11 +674,11 @@ class MegatronBaseModel(NLPModel):
                 rank=self.trainer.global_rank,
                 dp_rank=parallel_state.get_data_parallel_rank(),
                 pp_rank=parallel_state.get_pipeline_model_parallel_rank(),
-                tp_rank=parallel_state.get_tensor_model_parallel_rank(),
+                tp_rank=_combined_tp_rank,
                 device_id=self.trainer.local_rank,
                 dp_degree=parallel_state.get_data_parallel_world_size(),
                 pp_degree=parallel_state.get_pipeline_model_parallel_world_size(),
-                tp_degree=parallel_state.get_tensor_model_parallel_world_size(),
+                tp_degree=_combined_tp_degree,
                 world_size=self.trainer.world_size,
                 server_url=perseus_server_url,
                 job_metadata=self.cfg.get('perseus_job_metadata', None),

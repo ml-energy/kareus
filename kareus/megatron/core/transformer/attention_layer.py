@@ -73,8 +73,31 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
         }
 
 
-def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str):
+def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str, is_first_layer: bool = False):
     comm_scheduler = config.kareus_scheduler
+    if is_first_layer:
+        if fuser_type == "qkv_ag":
+            return {
+                "comm_overlap_window": (-1, -1),
+                "comm_sm_configs": (12, 1024),
+                "comm_overlap_window_backward": (0, -1),
+                "comm_sm_configs_backward": (12, 1024),
+            }
+        if fuser_type == "ao_ag":
+            return {
+                "comm_overlap_window": (-1, -1),
+                "comm_sm_configs": (12, 1024),
+                "comm_overlap_window_backward": (0, -1),
+                "comm_sm_configs_backward": (12, 1024),
+            }
+        # if fuser_type == "ao_ar":
+        #     return {
+        #         "comm_overlap_window": (-1, -1),
+        #         "comm_sm_configs": (None, None),
+        #         "comm_overlap_window_backward": (0, -1),
+        #         "comm_sm_configs_backward": (12, 1024),
+        #     }
+
     if comm_scheduler is None:
         if fuser_type == "qkv_ar":
             return {
@@ -406,7 +429,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
                 rotary_pos_emb=rotary_pos_emb,
                 attention_mask=attention_mask,
                 comm_input=comm_input_1,
-                **get_fuser_comm_kwargs_cp(self.config, "qkv_ar")
+                **get_fuser_comm_kwargs_cp(self.config, "qkv_ar", self.is_first_layer)
             )
             hidden_states_2 = allreduce_output_1
             
@@ -418,7 +441,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
                 attention_mask=attention_mask,
                 comm_key=key_1,
                 comm_value=value_1,
-                **get_fuser_comm_kwargs_cp(self.config, "qkv_ag")
+                **get_fuser_comm_kwargs_cp(self.config, "qkv_ag", self.is_first_layer)
             )
 
             out_1, out_2, bias_1, bias_2 = ao_fuser(
@@ -426,7 +449,7 @@ class AttentionLayer(MegatronModule, BaseTransformerLayer):
                 query_2=query_2,
                 comm_key=key_2,
                 comm_value=value_2,
-                **get_fuser_comm_kwargs_cp(self.config, "ao")
+                **get_fuser_comm_kwargs_cp(self.config, "ao", self.is_first_layer)
             )
 
             return (out_1, bias_1), (out_2, bias_2), residual_1, residual_2

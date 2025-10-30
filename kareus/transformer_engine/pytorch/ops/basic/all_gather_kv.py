@@ -123,7 +123,7 @@ class AllGatherKV():
             if sm_num is None or block_size is None:
                 # Fallback to NCCL all_gather
                 k_out, v_out = self._nccl_all_gather_kv(k, v)
-                self.backend = "nccl"
+                # self.backend = "nccl"
                 if not backward:
                     K_AG[self.batch_idx] = k_out
                     V_AG[self.batch_idx] = v_out
@@ -181,9 +181,14 @@ class AllGatherKV():
 
     def sync(self, current_stream: torch.cuda.Stream = None) -> None:
         if self.backend == "msccl":
-            # new_msccl_comm.msccl_AllGather_sync()
-            self.wait_event.record(self.comm_stream)
-            current_stream.wait_event(self.wait_event)
+            if len(self._work_handles) > 0:
+                for handle in self._work_handles:
+                    handle.wait()
+                self._work_handles = []
+            else:
+                # new_msccl_comm.msccl_AllGather_sync()
+                self.wait_event.record(self.comm_stream)
+                current_stream.wait_event(self.wait_event)
         else:
             for handle in self._work_handles:
                 handle.wait()

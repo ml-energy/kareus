@@ -133,7 +133,7 @@ class AllReduce(BasicOperation):
                 self._work_handle = torch.distributed.all_reduce(x, group=self.process_group,
                     async_op=self.async_op,
                 )
-                self.backend = "nccl"
+                # self.backend = "nccl"
                 return x
             else:
                 assert x.shape == self.input_buffer.shape, "input_buffer shape must match x shape"
@@ -165,8 +165,12 @@ class AllReduce(BasicOperation):
             # new_msccl_comm.msccl_AllReduce_sync()
             # else:
             #     msccl_comm.msccl_sync()
-            self.wait_event.record(self.comm_stream)
-            current_stream.wait_event(self.wait_event)
+            if self._work_handle is None:
+                self.wait_event.record(self.comm_stream)
+                current_stream.wait_event(self.wait_event)
+            else:
+                self._work_handle.wait()
+                self._work_handle = None
         else:
             if self._work_handle is None:
                 raise Warning("No AllReduce operation to sync")
