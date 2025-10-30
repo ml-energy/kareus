@@ -78,10 +78,8 @@ def flash_attention_forward(
     attn_mask_type: str = "causal",
     window_size: Optional[Tuple[int, int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
-    # cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
-    cp_size: int = 1,
-    rank: int = 0,
-    # cp_global_ranks: List[int] = None,
+    cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
+    cp_global_ranks: List[int] = None,
     cp_stream: torch.cuda.Stream = None,
     cp_comm_type: str = "p2p",
     fp8: bool = False,
@@ -113,12 +111,12 @@ def flash_attention_forward(
         qkv_layout in QKVLayouts
     ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
 
-    # cp_size = 1
-    # if isinstance(cp_group, dist_group_type):
-    #     cp_size = get_distributed_world_size(cp_group)
-    # elif isinstance(cp_group, list):
-    #     for group in cp_group:
-    #         cp_size *= get_distributed_world_size(group)
+    cp_size = 1
+    if isinstance(cp_group, dist_group_type):
+        cp_size = get_distributed_world_size(cp_group)
+    elif isinstance(cp_group, list):
+        for group in cp_group:
+            cp_size *= get_distributed_world_size(group)
     context_parallel = cp_size > 1
 
     # get q_format and kv_format for training and inference
@@ -328,10 +326,8 @@ def flash_attention_forward(
                 cu_seqlens_q if qkv_format == "thd" else None,
                 cu_seqlens_kv if qkv_format == "thd" else None,
                 attention_dropout if training else 0.0,
-                # cp_group,
-                # cp_global_ranks,
-                cp_size,
-                rank,
+                cp_group,
+                cp_global_ranks,
                 cp_stream,
                 cp_comm_type,
                 softmax_scale=softmax_scale,

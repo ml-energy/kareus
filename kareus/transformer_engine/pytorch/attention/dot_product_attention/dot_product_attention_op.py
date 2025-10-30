@@ -22,7 +22,6 @@ from transformer_engine.pytorch.constants import (
 )
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
-    get_distributed_rank,
     checkpoint,
     set_all_rng_states,
     CudaRNGStatesTracker,
@@ -129,8 +128,6 @@ class DotProductAttentionOp(BasicOperation):
         attention_type: str = "self",
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
-        cp_size: int = 1,
-        rank: int = 0,
         cp_stream: torch.cuda.Stream = None,
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
@@ -160,8 +157,6 @@ class DotProductAttentionOp(BasicOperation):
         self.layer_number = 1 if layer_number is None else layer_number
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
-        self.cp_size = cp_size
-        self.rank = rank
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
 
@@ -215,18 +210,14 @@ class DotProductAttentionOp(BasicOperation):
 
     def set_context_parallel_group(
         self,
-        cp_group: Union[dist_group_type, List[dist_group_type], None] = None,
-        cp_global_ranks: List[int] = None,
-        cp_stream: torch.cuda.Stream = torch.cuda.Stream(),
-        cp_comm_type: str = "all_gather",
-        cp_size: int = None, # For profiling, we can set the cp_size and rank manually without providing the cp_group
-        rank: int = None,
+        cp_group: Union[dist_group_type, List[dist_group_type], None],
+        cp_global_ranks: List[int],
+        cp_stream: torch.cuda.Stream,
+        cp_comm_type: str = "p2p",
     ) -> None:
         """Set the context parallel attributes for the given module."""
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
-        self.cp_size = get_distributed_world_size(cp_group) if cp_size is None else cp_size
-        self.rank = get_distributed_rank(cp_group) if rank is None else rank
         self.cp_stream = cp_stream
         # self.cp_stream = torch.cuda.current_stream()
         self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
@@ -410,16 +401,16 @@ class DotProductAttentionOp(BasicOperation):
             )
 
         # Adjust max_seqlen and cu_seqlens for CP
-        # cp_size = 1
-        # if isinstance(self.cp_group, dist_group_type):
-        #     cp_size = get_distributed_world_size(self.cp_group)
-        # elif isinstance(self.cp_group, list):
-        #     for group in self.cp_group:
-        #         cp_size *= get_distributed_world_size(group)
-        context_parallel = self.cp_size > 1
+        cp_size = 1
+        if isinstance(self.cp_group, dist_group_type):
+            cp_size = get_distributed_world_size(self.cp_group)
+        elif isinstance(self.cp_group, list):
+            for group in self.cp_group:
+                cp_size *= get_distributed_world_size(group)
+        context_parallel = cp_size > 1
         
         if q_format in ["sbhd", "bshd"]:
-            max_seqlen_q *= self.cp_size
+            max_seqlen_q *= cp_size
             if cu_seqlens_q is None:
                 if "padding" in attn_mask_type:
                     assert (
@@ -436,7 +427,7 @@ class DotProductAttentionOp(BasicOperation):
                         query_layer.device,
                     )
         if kv_format in ["sbhd", "bshd"]:
-            max_seqlen_kv *= self.cp_size
+            max_seqlen_kv *= cp_size
             if cu_seqlens_kv is None:
                 if "padding" in attn_mask_type:
                     assert (
@@ -529,10 +520,8 @@ class DotProductAttentionOp(BasicOperation):
             attn_mask_type=attn_mask_type,
             window_size=window_size,
             alibi_slopes=alibi_slopes,
-            # cp_group=self.cp_group,
-            # cp_global_ranks=self.cp_global_ranks,
-            cp_size=self.cp_size,
-            rank=self.rank,
+            cp_group=self.cp_group,
+            cp_global_ranks=self.cp_global_ranks,
             cp_stream=self.cp_stream,
             cp_comm_type=self.cp_comm_type,
             fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa if hasattr(self, 'fp8') else False,
