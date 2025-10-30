@@ -47,21 +47,23 @@ model:
   mcore_gpt: True
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
-  micro_batch_size: 16 # Increased for smaller model
+  micro_batch_size: 16 # Reduced for larger 3B model
   global_batch_size: 128 # will use more micro batches to reach global batch size
-  tensor_model_parallel_size: 8 # Reduced for smaller model
-  pipeline_model_parallel_size: 2 # inter-layer model parallelism
+  tensor_model_parallel_size: 4 # Appropriate for 3B model
+  pipeline_model_parallel_size: 2 # inter-layer model parallelism for larger model
+  context_parallel_size: 2 # context parallelism
+  cp_comm_type: "all_gather"
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
-
-  # num_layers_in_first_pipeline_stage: 4
-  # num_layers_in_last_pipeline_stage: 2
+ 
+  num_layers_in_first_pipeline_stage: 15
+  # num_layers_in_last_pipeline_stage: 13
 
   # model architecture - LLaMA 3.2 3B
   encoder_seq_length: 4096 # Same as 3.1 8B for consistency
   max_position_embeddings: ${.encoder_seq_length}
   num_layers: 28 # LLaMA 3.2 3B: 28 layers
   hidden_size: 3072 # LLaMA 3.2 3B: 3072
-  ffn_hidden_size: 8192 # LLaMA 3.2 3B: 8192 (4 * hidden_size)
+  ffn_hidden_size: 8192 # LLaMA 3.2 3B: 8192 (intermediate size)
   num_attention_heads: 24 # LLaMA 3.2 3B: 24 attention heads
   init_method_std: 0.02 # Standard deviation of the zero mean normal distribution used for weight initialization.')
   use_scaled_init_method: True # use scaled residuals initialization
@@ -100,15 +102,12 @@ model:
   enable_perseus_optimizer: false
   enable_kareus_scheduler: false
   kareus_scheduler_kwargs:
-    solution_path: /workspaces/Kareus/tests/perseus/nemo_experiments/megatron_llama_3_2_1b/scheds_pipeline_01946.py
+    solution_path: /workspaces/Kareus/tests/kareus/llama3.2_3b/cp2_tp4_bs16_seq4096/scheds_pipeline_07795.py
 
   tokenizer:
     library: 'huggingface'
-    type: 'meta-llama/Llama-3.2-3B-Instruct'  # Exact match for Llama 3.2 3B
+    type: 'meta-llama/Llama-3.2-3B-Instruct'
     use_fast: True
-    # library: 'huggingface'
-    # type: 'gpt2'
-    # use_fast: True
     delimiter: null # only used for tabular tokenizer
     sentencepiece_legacy: False # Legacy=True allows you to add special tokens to sentencepiece tokenizers.
 
@@ -143,12 +142,12 @@ model:
   gradient_as_bucket_view: True # PyTorch DDP argument. Allocate gradients in a contiguous bucket to save memory (less fragmentation and buffer memory)
   sync_batch_comm: False # Enable stream synchronization after each p2p communication between pipeline stages
 
-  ## Activation Checkpointing - MAXIMUM MEMORY SAVINGS
+  ## Activation Checkpointing
   # NeMo Megatron supports 'selective' activation checkpointing where only the memory intensive part of attention is checkpointed.
   # These memory intensive activations are also less compute intensive which makes activation checkpointing more efficient for LLMs (20B+).
   # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
   # 'full' will checkpoint the entire transformer layer.
-  activations_checkpoint_granularity: "full" # Checkpoint entire layers for maximum memory savings
+  activations_checkpoint_granularity: 'full' # Checkpoint entire layers for maximum memory savings
   activations_checkpoint_method: 'uniform' # Evenly distribute checkpoints across all layers
   # 'uniform' divides the total number of transformer layers and checkpoints the input activation
   # of each chunk at the specified granularity. When used with 'selective', 'uniform' checkpoints all attention blocks in the model.
@@ -221,14 +220,14 @@ model:
 
   # Nsys profiling options
   nsys_profile:
-    enabled: False
-    start_step: 10  # Global batch to start profiling
-    end_step: 15 # Global batch to end profiling
+    enabled: True
+    start_step: 5  # Global batch to start profiling
+    end_step: 6 # Global batch to end profiling
     ranks: [0] # Global rank IDs to profile
     gen_shape: False # Generate model and kernel details including input shapes
   
   optim:
-    name: fused_adam
+    name: mcore_distributed_optim
     lr: 2e-4
     weight_decay: 0.01 
     betas: 

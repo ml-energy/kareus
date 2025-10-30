@@ -36,7 +36,7 @@ torch._dynamo.config.suppress_errors = True
 mp.set_start_method("spawn", force=True)
 
 
-@hydra_runner(config_path="conf", config_name="megatron_llama_3_2_1b_config_half")
+@hydra_runner(config_path="conf", config_name="megatron_llama_3_2_3b_config_2nodes")
 def main(cfg) -> None:
     logging.info("\n\n************** Experiment configuration ***********")
     logging.info(f'\n{OmegaConf.to_yaml(cfg)}')

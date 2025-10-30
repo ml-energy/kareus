@@ -1,5 +1,6 @@
 *.nsys-rep
 log/
+logs/
 *.patch
 *.log
 data/
