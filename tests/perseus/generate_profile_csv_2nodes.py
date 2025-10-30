@@ -238,7 +238,7 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile_dir", default="nemo_experiments/megatron_llama_3_2_1b/profiling", help="Directory containing profiling results.")
+    parser.add_argument("--profile_dir", default="nemo_experiments/megatron_llama_3_2_3b/profiling", help="Directory containing profiling results.")
     parser.add_argument("--num_microbatches", default=FuserTestConfig.DEFAULT_NUM_MICROBATCHES, type=int, help="Number of microbatches.")
     parser.add_argument("--num_prof_iters", default=20, type=int, help="Number of profiling iterations.")
     parser.add_argument("--warmup_iters", default=10, type=int, help="Number of warmup iterations.")

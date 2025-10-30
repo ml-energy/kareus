@@ -102,7 +102,7 @@ model:
   enable_perseus_optimizer: false
   enable_kareus_scheduler: false
   kareus_scheduler_kwargs:
-    solution_path: /workspaces/Kareus/tests/kareus/llama3.2_3b/cp2_tp4_bs16_seq4096/scheds_pipeline_07795.py
+    solution_path: /workspaces/Kareus/tests/kareus/llama3.2_3b/cp2_tp4_bs16_seq4096/scheds_pipeline_06713.py
 
   tokenizer:
     library: 'huggingface'
