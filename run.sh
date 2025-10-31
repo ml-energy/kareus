@@ -51,5 +51,5 @@ python parse_results.py
 # enable_zeus_monitor: true
 # enable_kareus_scheduler: true
 # enable_perseus_optimizer: true
-# ZEUS_PFO_SCHEDULER=PointSolution3D ZEUS_PFO_SCHEDULER_ARGS='{"solution_path": "/workspaces/Kareus/tests/kareus/llama3.2_3b/cp2_tp4_bs16_seq4096/freqs_pipeline_06713.py"}' uvicorn zeus.optimizer.pipeline_frequency.server.router:app --port 7787
+# ZEUS_PFO_SCHEDULER=PointSolution3D ZEUS_PFO_SCHEDULER_ARGS='{"solution_path": "/workspaces/Kareus/tests/kareus/llama3.2_3b/cp2_tp4_bs16_seq4096/freqs_pipeline_06713.py"}' uvicorn zeus.optimizer.pipeline_frequency.server.router:app --host 172.31.39.81 --port 7787
 python kareus_gpt_pretraining.py

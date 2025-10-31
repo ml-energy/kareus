@@ -64,11 +64,11 @@ class AllGatherKV():
             if K_AG[self.batch_idx] is None:
                 K_AG[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
-                )
+                ).round(decimals=4)
             if V_AG[self.batch_idx] is None:
                 V_AG[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
-                )
+                ).round(decimals=4)
             self.input_buffer_k = K_AG[self.batch_idx]
             self.input_buffer_v = V_AG[self.batch_idx]
             self.output_buffer_k = K_AG[self.batch_idx]
@@ -125,8 +125,8 @@ class AllGatherKV():
                 k_out, v_out = self._nccl_all_gather_kv(k, v)
                 # self.backend = "nccl"
                 if not backward:
-                    K_AG[self.batch_idx] = k_out
-                    V_AG[self.batch_idx] = v_out
+                    # K_AG[self.batch_idx] = k_out
+                    # V_AG[self.batch_idx] = v_out
                     K_TO_SAVE[self.batch_idx] = k
                     V_TO_SAVE[self.batch_idx] = v
                 return k_out, v_out

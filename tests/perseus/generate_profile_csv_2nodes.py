@@ -243,7 +243,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_prof_iters", default=20, type=int, help="Number of profiling iterations.")
     parser.add_argument("--warmup_iters", default=10, type=int, help="Number of warmup iterations.")
     parser.add_argument("--gpu_type", default="A100", choices=["A40", "A100"], help="Name of the GPU type.")
-    parser.add_argument("--tensor_parallel_size", default=FuserTestConfig.DEFAULT_WORLD_SIZE, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
+    parser.add_argument("--tensor_parallel_size", default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE * FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
     args = parser.parse_args()
 
     main(args.profile_dir, args.num_microbatches, args.num_prof_iters, args.warmup_iters, args.gpu_type, args.tensor_parallel_size)

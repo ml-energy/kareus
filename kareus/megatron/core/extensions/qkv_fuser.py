@@ -185,18 +185,14 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
                     basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
                 )
 
-            if is_first_attn and (isinstance(op, BiasDropoutAddOp) or isinstance(op, RMSNorm)):
-                fused_op_extra_outputs = [()]
-                pass   # temporary for the wrong order problem
-            else:
-                x, fused_op_extra_outputs = op.fuser_forward(
-                    [basic_op_ctxs[idx] for idx in basic_op_idxs],
-                    x,
-                    basic_op_extra_inputs=extra_inputs,
-                    basic_op_prev_ops=prev_ops,
-                    basic_op_next_ops=next_ops,
-                    basic_op_kwargs=[{} for _ in basic_op_idxs],
-                )
+            x, fused_op_extra_outputs = op.fuser_forward(
+                [basic_op_ctxs[idx] for idx in basic_op_idxs],
+                x,
+                basic_op_extra_inputs=extra_inputs,
+                basic_op_prev_ops=prev_ops,
+                basic_op_next_ops=next_ops,
+                basic_op_kwargs=[{} for _ in basic_op_idxs],
+            )
 
             # Record event after the operation at fused_idx-1 completes
             if fused_idx == comm_start - 1:
@@ -413,24 +409,24 @@ class _QKVFuserAutogradFunction(torch.autograd.Function):
             # current_stream.wait_event(WAIT_EVENT)
             comm_op_bwd.sync(current_stream)
 
-        if is_first_attn:
-            comm_op_bwd.event_record(current_stream)
-            comm_op_bwd.event_wait()
-            comm_op_bwd.fuser_forward(
-                [None], grad_comm_input,
-                basic_op_extra_inputs=[], 
-                basic_op_prev_ops=[None], 
-                basic_op_next_ops=[None], 
-                basic_op_kwargs=[{
-                    "sm_num": 30, 
-                    "block_size": 1024, 
-                    "backward": True
-                }]
-            )
-            # comm_op_bwd.sync()
-            # WAIT_EVENT.record(comm_op_bwd.comm_stream)
-            # current_stream.wait_event(WAIT_EVENT)
-            comm_op_bwd.sync(current_stream)
+        # if is_first_attn:
+        #     comm_op_bwd.event_record(current_stream)
+        #     comm_op_bwd.event_wait()
+        #     comm_op_bwd.fuser_forward(
+        #         [None], grad_comm_input,
+        #         basic_op_extra_inputs=[], 
+        #         basic_op_prev_ops=[None], 
+        #         basic_op_next_ops=[None], 
+        #         basic_op_kwargs=[{
+        #             "sm_num": 30, 
+        #             "block_size": 1024, 
+        #             "backward": True
+        #         }]
+        #     )
+        #     # comm_op_bwd.sync()
+        #     # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        #     # current_stream.wait_event(WAIT_EVENT)
+        #     comm_op_bwd.sync(current_stream)
         return (
             dx,  # hidden_states
             grad_bias,  # bias

@@ -252,17 +252,17 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             # current_stream.wait_event(WAIT_EVENT)
             comm_op_fwd.sync(current_stream)
         
-        if is_last_mlp:
-            comm_op_fwd.event_record(current_stream)
-            comm_op_fwd.event_wait()
-            comm_op_fwd.fuser_forward(
-                [None], comm_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": 30, "block_size": 1024}]
-            )
-            # comm_op_fwd.sync()
-            # WAIT_EVENT.record(comm_op_fwd.comm_stream)
-            # current_stream.wait_event(WAIT_EVENT)
-            comm_op_fwd.sync(current_stream)
+        # if is_last_mlp:
+        #     comm_op_fwd.event_record(current_stream)
+        #     comm_op_fwd.event_wait()
+        #     comm_op_fwd.fuser_forward(
+        #         [None], comm_input,
+        #         basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": 30, "block_size": 1024}]
+        #     )
+        #     # comm_op_fwd.sync()
+        #     # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+        #     # current_stream.wait_event(WAIT_EVENT)
+        #     comm_op_fwd.sync(current_stream)
         assert get_bias and get_residual, f"get_bias: {get_bias}, get_residual: {get_residual}"
         return x, bias, residual, comm_input
 

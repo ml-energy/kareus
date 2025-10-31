@@ -64,11 +64,11 @@ class ReduceScatterKV():
             if K_RS_BUFFER[self.batch_idx] is None:
                 K_RS_BUFFER[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
-                )
+                ).round(decimals=4)
             if V_RS_BUFFER[self.batch_idx] is None:
                 V_RS_BUFFER[self.batch_idx] = torch.randn(
                     *tensor_size, dtype=dtype, device=device,
-                )
+                ).round(decimals=4)
             self.input_buffer_k = K_RS_BUFFER[self.batch_idx]
             self.input_buffer_v = V_RS_BUFFER[self.batch_idx]
             self.output_buffer_k = K_RS_BUFFER[self.batch_idx]
@@ -127,8 +127,12 @@ class ReduceScatterKV():
             if sm_num is None or block_size is None:
                 # Fallback to NCCL reduce_scatter
                 k_out, v_out = self._nccl_reduce_scatter_kv(k, v)
-                # self.backend = "nccl"
-                return k_out, v_out
+                chunk_len = k.size(0) // self.world_size
+                start = int(self.rank) * chunk_len
+                end = start + chunk_len
+                return self.output_buffer_k[start:end], self.output_buffer_v[start:end]
+                # # self.backend = "nccl"
+                # return k_out, v_out
             else:
                 k_out, v_out = self._msccl_reduce_scatter_kv(k, v, sm_num, block_size)
                 return k_out, v_out

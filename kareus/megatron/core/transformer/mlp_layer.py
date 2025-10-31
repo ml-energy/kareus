@@ -30,16 +30,21 @@ from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
 def get_fuser_comm_kwargs(config: TransformerConfig):
     comm_scheduler = config.kareus_scheduler
     if comm_scheduler is None:
+        # return {
+        #     "comm_overlap_window": (0, 6),
+        #     "comm_sm_configs": (12, 1024),
+        #     "comm_overlap_window_backward": (0, 6),
+        #     "comm_sm_configs_backward": (12, 1024),
+        # }
         return {
             "comm_overlap_window": (0, 6),
-            "comm_sm_configs": (12, 1024),
+            "comm_sm_configs": (None, None),
             "comm_overlap_window_backward": (0, 6),
-            "comm_sm_configs_backward": (12, 1024),
+            "comm_sm_configs_backward": (None, None),
         }
     else:
         item = getattr(comm_scheduler, "current_schedule", None)
         if item is None:
-            print("current_schedule is not set")
             return {
                 "comm_overlap_window": (2, 6),
                 "comm_sm_configs": (6, 1024),

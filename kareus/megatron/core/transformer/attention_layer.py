@@ -75,21 +75,21 @@ def get_fuser_comm_kwargs(config: TransformerConfig):
 
 def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str, is_first_layer: bool = False):
     comm_scheduler = config.kareus_scheduler
-    if is_first_layer:
-        if fuser_type == "qkv_ag":
-            return {
-                "comm_overlap_window": (-1, -1),
-                "comm_sm_configs": (12, 1024),
-                "comm_overlap_window_backward": (0, -1),
-                "comm_sm_configs_backward": (12, 1024),
-            }
-        if fuser_type == "ao_ag":
-            return {
-                "comm_overlap_window": (-1, -1),
-                "comm_sm_configs": (12, 1024),
-                "comm_overlap_window_backward": (0, -1),
-                "comm_sm_configs_backward": (12, 1024),
-            }
+    # if is_first_layer:
+    #     if fuser_type == "qkv_ag":
+    #         return {
+    #             "comm_overlap_window": (-1, -1),
+    #             "comm_sm_configs": (12, 1024),
+    #             "comm_overlap_window_backward": (0, -1),
+    #             "comm_sm_configs_backward": (12, 1024),
+    #         }
+    #     if fuser_type == "ao_ag":
+    #         return {
+    #             "comm_overlap_window": (-1, -1),
+    #             "comm_sm_configs": (12, 1024),
+    #             "comm_overlap_window_backward": (0, -1),
+    #             "comm_sm_configs_backward": (12, 1024),
+    #         }
         # if fuser_type == "ao_ar":
         #     return {
         #         "comm_overlap_window": (-1, -1),
@@ -99,39 +99,96 @@ def get_fuser_comm_kwargs_cp(config: TransformerConfig, fuser_type: str, is_firs
         #     }
 
     if comm_scheduler is None:
+        # if fuser_type == "qkv_ar":
+        #     return {
+        #         "comm_overlap_window": (0, -1),  # comm_end doesn't matter
+        #         "comm_sm_configs": (12, 1024),
+        #         "comm_overlap_window_backward": (0, -1),
+        #         "comm_sm_configs_backward": (12, 1024),
+        #     }
+        # elif fuser_type == "qkv_ag":
+        #     return {
+        #         "comm_overlap_window": (0, -1),
+        #         "comm_sm_configs": (12, 1024),
+        #         "comm_overlap_window_backward": (0, -1),
+        #         "comm_sm_configs_backward": (12, 1024),
+        #     }
+        # else:
+        #     return {
+        #         "comm_overlap_window_ao_ag": (0, -1),
+        #         "comm_sm_configs_ao_ag": (12, 1024),
+        #         "comm_overlap_window_ao_ar": (0, -1),
+        #         "comm_sm_configs_ao_ar": (12, 1024),
+        #         "comm_overlap_window_a_rs": (0, -1),
+        #         "comm_sm_configs_a_rs": (12, 1024),
+        #         "comm_overlap_window_a_ag": (0, -1),
+        #         "comm_sm_configs_a_ag": (12, 1024),
+        #         "comm_overlap_window_o_ag": (0, -1),
+        #         "comm_sm_configs_o_ag": (12, 1024),
+        #         "comm_overlap_window_o_ar": (0, -1),
+        #         "comm_sm_configs_o_ar": (12, 1024),
+        #     }
         if fuser_type == "qkv_ar":
             return {
                 "comm_overlap_window": (0, -1),  # comm_end doesn't matter
-                "comm_sm_configs": (12, 1024),
+                "comm_sm_configs": (None, None),
                 "comm_overlap_window_backward": (0, -1),
-                "comm_sm_configs_backward": (12, 1024),
+                "comm_sm_configs_backward": (None, None),
             }
         elif fuser_type == "qkv_ag":
             return {
                 "comm_overlap_window": (0, -1),
-                "comm_sm_configs": (12, 1024),
+                "comm_sm_configs": (None, None),
                 "comm_overlap_window_backward": (0, -1),
-                "comm_sm_configs_backward": (12, 1024),
+                "comm_sm_configs_backward": (None, None),
             }
         else:
             return {
                 "comm_overlap_window_ao_ag": (0, -1),
-                "comm_sm_configs_ao_ag": (12, 1024),
+                "comm_sm_configs_ao_ag": (None, None),
                 "comm_overlap_window_ao_ar": (0, -1),
-                "comm_sm_configs_ao_ar": (12, 1024),
+                "comm_sm_configs_ao_ar": (None, None),
                 "comm_overlap_window_a_rs": (0, -1),
-                "comm_sm_configs_a_rs": (12, 1024),
+                "comm_sm_configs_a_rs": (None, None),
                 "comm_overlap_window_a_ag": (0, -1),
-                "comm_sm_configs_a_ag": (12, 1024),
+                "comm_sm_configs_a_ag": (None, None),
                 "comm_overlap_window_o_ag": (0, -1),
-                "comm_sm_configs_o_ag": (12, 1024),
+                "comm_sm_configs_o_ag": (None, None),
                 "comm_overlap_window_o_ar": (0, -1),
-                "comm_sm_configs_o_ar": (12, 1024),
+                "comm_sm_configs_o_ar": (None, None),
             }
     else:
         item = getattr(comm_scheduler, "current_schedule", None)
         if item is None:
-            raise ValueError("current_schedule is not set")
+            if fuser_type == "qkv_ar":
+                return {
+                    "comm_overlap_window": (0, -1),  # comm_end doesn't matter
+                    "comm_sm_configs": (12, 1024),
+                    "comm_overlap_window_backward": (0, -1),
+                    "comm_sm_configs_backward": (12, 1024),
+                }
+            elif fuser_type == "qkv_ag":
+                return {
+                    "comm_overlap_window": (0, -1),
+                    "comm_sm_configs": (12, 1024),
+                    "comm_overlap_window_backward": (0, -1),
+                    "comm_sm_configs_backward": (12, 1024),
+                }
+            else:
+                return {
+                    "comm_overlap_window_ao_ag": (0, -1),
+                    "comm_sm_configs_ao_ag": (12, 1024),
+                    "comm_overlap_window_ao_ar": (0, -1),
+                    "comm_sm_configs_ao_ar": (12, 1024),
+                    "comm_overlap_window_a_rs": (0, -1),
+                    "comm_sm_configs_a_rs": (12, 1024),
+                    "comm_overlap_window_a_ag": (0, -1),
+                    "comm_sm_configs_a_ag": (12, 1024),
+                    "comm_overlap_window_o_ag": (0, -1),
+                    "comm_sm_configs_o_ag": (12, 1024),
+                    "comm_overlap_window_o_ar": (0, -1),
+                    "comm_sm_configs_o_ar": (12, 1024),
+                }
 
         fwd_qkv_ar = item.fwd_qkv_ar
         fwd_qkv_ag = item.fwd_qkv_ag

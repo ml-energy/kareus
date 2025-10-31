@@ -8,9 +8,9 @@ trainer:
   enable_checkpointing: False
   use_distributed_sampler: False
   max_epochs: 1 # PTL default. In practice, max_steps will be reached first. 
-  max_steps: 30 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
-  log_every_n_steps: 40
-  val_check_interval: 40
+  max_steps: 15 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
+  log_every_n_steps: 20
+  val_check_interval: 20
   limit_val_batches: 1
   limit_test_batches: 1
   accumulate_grad_batches: 1 # do not modify, grad acc is automatic for training megatron models
@@ -93,16 +93,16 @@ model:
   batch_p2p_comm: True # Batch consecutive inter-peer send/recv operations. This argument is valid only when `virtual_pipeline_model_parallel_size` is larger than 1
   num_query_groups: 8 # LLaMA 3.2 3B uses grouped query attention with 8 key-value heads
 
-  enable_megatron_timers: false
+  enable_megatron_timers: true
   megatron_timer_kwargs:
     enable_energy_monitoring: true
     
   enable_zeus_monitor: true
-  enable_power_monitor: false
-  enable_perseus_optimizer: false
-  enable_kareus_scheduler: false
-  kareus_scheduler_kwargs:
-    solution_path: /workspaces/Kareus/tests/kareus/llama3.2_3b/cp2_tp4_bs16_seq4096/scheds_pipeline_06713.py
+  # enable_power_monitor: true
+  # enable_perseus_optimizer: true
+  # enable_kareus_scheduler: true
+  # kareus_scheduler_kwargs:
+  #   solution_path: /workspaces/Kareus/tests/kareus/llama3.2_3b/cp2_tp4_bs16_seq4096/scheds_pipeline_06713.py
 
   tokenizer:
     library: 'huggingface'

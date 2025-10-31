@@ -57,7 +57,16 @@ pip install -e .
 cd ../NeMo
 pip install -e . 
 
-cd ../
+# mscclpp
+cd ../mscclpp
+python3 -m pip install .
+
+# zeus 
+cd ../zeus
+pip install -e . 
+pip install '.[pfo-server]'
+
+cd ../../
 rm /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py
 cp 3rdparty/TransformerEngine/transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/attention/dot_product_attention/
 rm /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/layernorm_linear.py
@@ -71,15 +80,6 @@ cp 3rdparty/TransformerEngine/transformer_engine/pytorch/ops/fuser.py /usr/local
 # self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
 # /usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/fuser.py
 # ctx._saved_tensors_range = None
-
-# mscclpp
-cd ../mscclpp
-python3 -m pip install .
-
-# zeus 
-cd ../zeus
-pip install -e . 
-pip install '.[pfo-server]'
 
 # # TransformerEngine
 # cd ../TransformerEngine
@@ -98,7 +98,7 @@ pip install mpi4py
 # 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
 # export HF_HUB_ENABLE_HF_TRANSFER=1
 huggingface-cli download --repo-type dataset ruofanwu/my-gpt_text_document --local-dir ./my-gpt_text_document
-cd ../
+# cd ../
 mkdir tests/simple_test/data
 mv my-gpt_text_document/my-gpt_text_document.* tests/simple_test/data
 
