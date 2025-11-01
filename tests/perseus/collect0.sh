@@ -1,0 +1,2 @@
+ mv nemo_experiments/megatron_llama_3_2_3b/2025* nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq8192/perseus
+ mv nemo_experiments/megatron_llama_3_2_3b/*.txt nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq8192/perseus/

@@ -108,6 +108,9 @@ mv my-gpt_text_document/my-gpt_text_document.* tests/simple_test/data
 # AWS
 # https://github.com/ml-energy/vllm/commit/0ecb7b84140630f885c36bac0233023b8e9df7c0
 
+sed -i 's|http://archive.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+apt-get update -o Acquire::Retries=3
+
 curl -O https://efa-installer.amazonaws.com/aws-efa-installer-1.34.0.tar.gz \
 && tar -xf aws-efa-installer-1.34.0.tar.gz \
 && cd aws-efa-installer \
@@ -135,3 +138,13 @@ wget https://github.com/aws/aws-ofi-nccl/releases/download/v1.10.0-aws/aws-ofi-n
 && ./configure --prefix=/usr/local --with-mpi=/opt/amazon/openmpi --with-libfabric=/opt/amazon/efa --with-cuda=/usr/local/cuda --with-nccl=/usr/local --enable-platform-aws \
 && make \
 && make install
+
+
+# sudo chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+# sudo chown ubuntu:ubuntu /home/ubuntu
+
+# sudo chmod 700 /home/ubuntu/.ssh
+# sudo chmod 600 /home/ubuntu/.ssh/authorized_keys
+# sudo chmod 755 /home/ubuntu
+
+# sudo apt remove -y unattended-upgrades
