@@ -420,24 +420,24 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
             # current_stream.wait_event(WAIT_EVENT)
             comm_op_bwd.sync(current_stream)
 
-        if is_first_attn:
-            comm_op_bwd.event_record(current_stream)
-            comm_op_bwd.event_wait()
-            comm_op_bwd.fuser_forward(
-                [None], grad_comm_input,
-                basic_op_extra_inputs=[], 
-                basic_op_prev_ops=[None], 
-                basic_op_next_ops=[None], 
-                basic_op_kwargs=[{
-                    "sm_num": sm_num, 
-                    "block_size": block_size, 
-                    "backward": True
-                }]
-            )
-            # comm_op_bwd.sync()
-            # WAIT_EVENT.record(comm_op_bwd.comm_stream)
-            # current_stream.wait_event(WAIT_EVENT)
-            comm_op_bwd.sync(current_stream)
+        # if is_first_attn:
+        #     comm_op_bwd.event_record(current_stream)
+        #     comm_op_bwd.event_wait()
+        #     comm_op_bwd.fuser_forward(
+        #         [None], grad_comm_input,
+        #         basic_op_extra_inputs=[], 
+        #         basic_op_prev_ops=[None], 
+        #         basic_op_next_ops=[None], 
+        #         basic_op_kwargs=[{
+        #             "sm_num": sm_num, 
+        #             "block_size": block_size, 
+        #             "backward": True
+        #         }]
+        #     )
+        #     # comm_op_bwd.sync()
+        #     # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+        #     # current_stream.wait_event(WAIT_EVENT)
+        #     comm_op_bwd.sync(current_stream)
         return (
             dx,  # hidden_states
             grad_bias,  # bias
