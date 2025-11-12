@@ -44,6 +44,7 @@ def read_prepost_profile(
     batch_size: int,
     seq_len: int,
     freqs: list[int],
+    model_name: str,
 ):
     """Read pre/post profiling results produced by profile_preprocess/postprocess/loss scripts.
 
@@ -62,7 +63,7 @@ def read_prepost_profile(
     """
     results: dict[int, dict[str, tuple[float, float]]] = {}
     for frequency in freqs:
-        freq_dir = f"{prepost_profile_dir}/logs/tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{frequency}"
+        freq_dir = f"{prepost_profile_dir}/logs/{model_name}/cp1-tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{frequency}"
         emb_path = f"{freq_dir}/preprocess_energy.csv"
         out_path = f"{freq_dir}/postprocess_energy.csv"
         loss_path = f"{freq_dir}/loss_energy.csv"
@@ -97,6 +98,7 @@ def _read_bo_jsonl(
     tensor_parallel_size: int,
     batch_size: int,
     seq_len: int,
+    model_name: str,
 ):
     """Read BO results from JSONL and group by frequency.
 
@@ -110,7 +112,7 @@ def _read_bo_jsonl(
     Returns dict: { frequency: [((overlap_start, overlap_end, sm, block), (time, energy))] }
     """
     results_by_freq: dict[int, list[tuple[tuple[int, int, int, int], tuple[float, float]]]] = {}
-    base_dir = f"{bayesian_profile_dir}/{partition}/logs/tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}"
+    base_dir = f"{bayesian_profile_dir}/{partition}/logs/{model_name}/cp1-tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{direction}"
     file_name = "eval_results_bwd.jsonl" if direction == "backward" else "eval_results.jsonl"
     jsonl_path = f"{base_dir}/{file_name}"
     if not os.path.exists(jsonl_path):
@@ -256,6 +258,8 @@ def main(
     num_layers_in_last_pipeline_stage: int,
     p2p_power: float,
     use_activation_checkpointing: bool,
+    model_name: str,
+    scale_time_energy: bool,
 ) -> None:
     """Run the main routine."""
     print(f"Processing BO JSONL results in {bayesian_profile_dir} and pre/post results in {prepost_profile_dir}.")
@@ -263,19 +267,19 @@ def main(
     # Load BO partitioning results grouped by frequency (from JSONL)
     attention_fwd_map = _read_bo_jsonl(
         bayesian_profile_dir, "attention", "forward",
-        tensor_parallel_size, batch_size, seq_len,
+        tensor_parallel_size, batch_size, seq_len, model_name,
     )
     mlp_fwd_map = _read_bo_jsonl(
         bayesian_profile_dir, "mlp", "forward",
-        tensor_parallel_size, batch_size, seq_len,
+        tensor_parallel_size, batch_size, seq_len, model_name,
     )
     attention_bwd_map = _read_bo_jsonl(
         bayesian_profile_dir, "attention", "backward",
-        tensor_parallel_size, batch_size, seq_len,
+        tensor_parallel_size, batch_size, seq_len, model_name,
     )
     mlp_bwd_map = _read_bo_jsonl(
         bayesian_profile_dir, "mlp", "backward",
-        tensor_parallel_size, batch_size, seq_len,
+        tensor_parallel_size, batch_size, seq_len, model_name,
     )
 
     # Determine usable frequencies as intersection across all partitions/directions
@@ -292,9 +296,10 @@ def main(
         batch_size,
         seq_len,
         freqs,
+        model_name,
     )
 
-    profile_csv = open("profile.csv", "w")
+    profile_csv = open(f"profile_{model_name}_cp1_tp{tensor_parallel_size}_bs{batch_size}_seq{seq_len}.csv", "w")
     # Choose header based on activation checkpointing usage
     if use_activation_checkpointing:
         # Backward rows carry recompute-forward configs
@@ -323,6 +328,9 @@ def main(
             for mlp_config, mlp_result in mlp_fwd_result:
                 sum_time = (attn_result[0] + mlp_result[0])
                 sum_energy = (attn_result[1] + mlp_result[1])
+                if scale_time_energy:
+                    sum_time *= 1.2
+                    sum_energy *= 1.2
 
                 for stage in range(pipeline_parallel_size):
                     # 2 nanobatches per layer
@@ -352,6 +360,9 @@ def main(
                         for bwd_mlp_cfg, bwd_mlp_res in mlp_bwd_result:
                             sum_time = (rec_attn_res[0] + rec_mlp_res[0] + bwd_attn_res[0] + bwd_mlp_res[0])
                             sum_energy = (rec_attn_res[1] + rec_mlp_res[1] + bwd_attn_res[1] + bwd_mlp_res[1])
+                            if scale_time_energy:
+                                sum_time *= 1.2
+                                sum_energy *= 1.2
 
                             for stage in range(pipeline_parallel_size):
                                 # 2 nanobatches per layer
@@ -374,6 +385,9 @@ def main(
                 for mlp_config, mlp_result in mlp_bwd_result:
                     sum_time = (attn_result[0] + mlp_result[0])
                     sum_energy = (attn_result[1] + mlp_result[1])
+                    if scale_time_energy:
+                        sum_time *= 1.2
+                        sum_energy *= 1.2
 
                     for stage in range(pipeline_parallel_size):
                         # 2 nanobatches per layer
@@ -417,9 +431,10 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", default=FuserTestConfig.MODEL_NAME, help="Name of the model.")
     parser.add_argument("--bayesian_profile_dir", default="../bayesian", help="Directory containing BO results.")
     parser.add_argument("--prepost_profile_dir", default="../fuser/prepost", help="Directory containing profiling results.")
-    parser.add_argument("--tensor_parallel_size", default=FuserTestConfig.DEFAULT_WORLD_SIZE, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
+    parser.add_argument("--tensor_parallel_size", default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE, type=int, help="Number of tensor-parallel ranks per stage. Times and energies are summed across these ranks.")
     parser.add_argument("--pipeline_parallel_size", default=FuserTestConfig.DEFAULT_STAGES, type=int, help="Number of pipeline-parallel stages.")
     parser.add_argument("--batch_size", default=FuserTestConfig.DEFAULT_BATCH_SIZE, type=int, help="Batch size.")
     parser.add_argument("--seq_len", default=FuserTestConfig.DEFAULT_SEQ_LENGTH, type=int, help="Sequence length.")
@@ -429,6 +444,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpu_type", default=FuserTestConfig.GPU_TYPE, choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--p2p_power", default=None, type=float, help="GPU power while blocking on P2P (W). If omitted, uses FuserTestConfig.")
     parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="When set, generate backward candidates with recompute-forward configs and extended CSV header.")
+    parser.add_argument("--scale_time_energy", default=False, type=bool, help="When set, scale sum_time and sum_energy by 1.2.")
     args = parser.parse_args()
 
     p2p_power = args.p2p_power if args.p2p_power is not None else FuserTestConfig.get_p2p_power(args.gpu_type)
@@ -445,6 +461,8 @@ if __name__ == "__main__":
         args.num_layers_in_last_pipeline_stage,
         p2p_power,
         args.use_activation_checkpointing,
+        args.model_name,
+        args.scale_time_energy,
     )
 
 

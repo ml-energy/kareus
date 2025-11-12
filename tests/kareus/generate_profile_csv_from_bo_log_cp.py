@@ -45,6 +45,7 @@ def read_prepost_profile(
     batch_size: int,
     seq_len: int,
     freqs: list[int],
+    model_name: str,
 ):
     """Read pre/post profiling results produced by profile_preprocess/postprocess/loss scripts.
 
@@ -63,7 +64,7 @@ def read_prepost_profile(
     """
     results: dict[int, dict[str, tuple[float, float]]] = {}
     for frequency in freqs:
-        freq_dir = f"{prepost_profile_dir}/logs/cp{context_parallel_size}-tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{frequency}"
+        freq_dir = f"{prepost_profile_dir}/logs/{model_name}/cp{context_parallel_size}-tp{tensor_parallel_size}-bs{batch_size}-seq{seq_len}/{frequency}"
         emb_path = f"{freq_dir}/preprocess_energy.csv"
         out_path = f"{freq_dir}/postprocess_energy.csv"
         loss_path = f"{freq_dir}/loss_energy.csv"
@@ -270,6 +271,7 @@ def main(
     p2p_power: float,
     use_activation_checkpointing: bool,
     model_name: str,
+    scale_time_energy: bool,
 ) -> None:
     """Run the main routine."""
     print(f"Processing BO JSONL results in {bayesian_profile_dir} and pre/post results in {prepost_profile_dir}.")
@@ -356,6 +358,7 @@ def main(
         batch_size,
         seq_len,
         freqs,
+        model_name,
     )
 
     profile_csv = open(f"profile_{model_name}_cp{context_parallel_size}_tp{tensor_parallel_size}_bs{batch_size}_seq{seq_len}.csv", "w")
@@ -390,13 +393,13 @@ def main(
     fwd_mlp_map_f = _filter_map_by_pareto(fwd_mlp_map, 1e-4)
 
     # Backward partitions (slightly larger tolerance to dedupe near-equal points)
-    bwd_qkv_ar_map_f = _filter_map_by_pareto(bwd_qkv_ar_map, 0.01)
-    bwd_qkv_rs_map_f = _filter_map_by_pareto(bwd_qkv_rs_map, 0.01)
-    bwd_a_rs_map_f = _filter_map_by_pareto(bwd_a_rs_map, 0.01)
-    bwd_a_ag_map_f = _filter_map_by_pareto(bwd_a_ag_map, 0.01)
-    bwd_o_ag_map_f = _filter_map_by_pareto(bwd_o_ag_map, 0.01)
-    bwd_o_ar_map_f = _filter_map_by_pareto(bwd_o_ar_map, 0.01)
-    bwd_mlp_map_f = _filter_map_by_pareto(bwd_mlp_map, 0.01)
+    bwd_qkv_ar_map_f = _filter_map_by_pareto(bwd_qkv_ar_map, 1e-4)
+    bwd_qkv_rs_map_f = _filter_map_by_pareto(bwd_qkv_rs_map, 1e-4)
+    bwd_a_rs_map_f = _filter_map_by_pareto(bwd_a_rs_map, 1e-4)
+    bwd_a_ag_map_f = _filter_map_by_pareto(bwd_a_ag_map, 1e-4)
+    bwd_o_ag_map_f = _filter_map_by_pareto(bwd_o_ag_map, 1e-4)
+    bwd_o_ar_map_f = _filter_map_by_pareto(bwd_o_ar_map, 1e-4)
+    bwd_mlp_map_f = _filter_map_by_pareto(bwd_mlp_map, 1e-4)
 
     # Accumulate all candidate points across frequencies to filter globally per stage.
     # Forward payload: (freq, f_qkv_ar, f_qkv_ag, f_ao_ag, f_ao_ar, f_mlp)
@@ -418,13 +421,16 @@ def main(
                 for (cfg_ao_ag, (t3, e3)) in ao_ag_list:
                     for (cfg_ao_ar, (t4, e4)) in ao_ar_list:
                         for (cfg_mlp_fwd, (t5, e5)) in mlp_fwd_list:
-                            sum_time = t1 + t2 + t3 + t4 + t5
-                            sum_energy = e1 + e2 + e3 + e4 + e5
+                            sum_time = t1 + t2 + t3 + t4 + t5 * 2  # only double mlp
+                            sum_energy = e1 + e2 + e3 + e4 + e5 * 2  # only double mlp
+                            if scale_time_energy:
+                                sum_time *= 1.2
+                                sum_energy *= 1.2
 
                             for stage in range(pipeline_parallel_size):
                                 # 2 nanobatches per layer
-                                fwd_time = sum_time * layers_per_stage[stage] * 2
-                                fwd_energy = sum_energy * layers_per_stage[stage] * 2
+                                fwd_time = sum_time * layers_per_stage[stage]
+                                fwd_energy = sum_energy * layers_per_stage[stage]
                                 if stage == 0:
                                     fwd_time += prepost_profiling_results[frequency]["forward-embedding"][0]
                                     fwd_energy += prepost_profiling_results[frequency]["forward-embedding"][1]
@@ -471,13 +477,16 @@ def main(
                                                 for (cfg_b_o_ag, (tb5, eb5)) in o_ag_list_b:
                                                     for (cfg_b_o_ar, (tb6, eb6)) in o_ar_list_b:
                                                         for (cfg_b_mlp, (tb7, eb7)) in mlp_bwd_list:
-                                                            sum_time = (t1 + t2 + t3 + t4 + t5 + tb1 + tb2 + tb3 + tb4 + tb5 + tb6 + tb7)
-                                                            sum_energy = (e1 + e2 + e3 + e4 + e5 + eb1 + eb2 + eb3 + eb4 + eb5 + eb6 + eb7)
+                                                            sum_time = (t1 + t2 + t3 + t4 + t5 * 2 + tb1 + tb2 + tb3 + tb4 + tb5 + tb6 + tb7 * 2)  # only double mlp
+                                                            sum_energy = (e1 + e2 + e3 + e4 + e5 * 2 + eb1 + eb2 + eb3 + eb4 + eb5 + eb6 + eb7 * 2)  # only double mlp
+                                                            if scale_time_energy:
+                                                                sum_time *= 1.2
+                                                                sum_energy *= 1.2
 
                                                             for stage in range(pipeline_parallel_size):
                                                                 # 2 nanobatches per layer
-                                                                bwd_time = sum_time * layers_per_stage[stage] * 2
-                                                                bwd_energy = sum_energy * layers_per_stage[stage] * 2
+                                                                bwd_time = sum_time * layers_per_stage[stage]
+                                                                bwd_energy = sum_energy * layers_per_stage[stage]
                                                                 if stage == 0:
                                                                     bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0]
                                                                     bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1]
@@ -517,13 +526,16 @@ def main(
                             for (cfg_b_o_ag, (t5, e5)) in o_ag_list_b:
                                 for (cfg_b_o_ar, (t6, e6)) in o_ar_list_b:
                                     for (cfg_b_mlp, (t7, e7)) in mlp_bwd_list:
-                                        sum_time = t1 + t2 + t3 + t4 + t5 + t6 + t7
-                                        sum_energy = e1 + e2 + e3 + e4 + e5 + e6 + e7
+                                        sum_time = t1 + t2 + t3 + t4 + t5 + t6 + t7 * 2  # only double mlp
+                                        sum_energy = e1 + e2 + e3 + e4 + e5 + e6 + e7 * 2  # only double mlp
+                                        if scale_time_energy:
+                                            sum_time *= 1.2
+                                            sum_energy *= 1.2
 
                                         for stage in range(pipeline_parallel_size):
                                             # 2 nanobatches per layer
-                                            bwd_time = sum_time * layers_per_stage[stage] * 2
-                                            bwd_energy = sum_energy * layers_per_stage[stage] * 2
+                                            bwd_time = sum_time * layers_per_stage[stage]
+                                            bwd_energy = sum_energy * layers_per_stage[stage]
                                             if stage == 0:
                                                 bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0]
                                                 bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1]
@@ -602,6 +614,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpu_type", default=FuserTestConfig.GPU_TYPE, choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--p2p_power", default=None, type=float, help="GPU power while blocking on P2P (W). If omitted, uses FuserTestConfig.")
     parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="When set, generate backward candidates with recompute-forward configs and extended CSV header.")
+    parser.add_argument("--scale_time_energy", default=False, type=bool, help="When set, scale sum_time and sum_energy by 1.2.")
     args = parser.parse_args()
 
     p2p_power = args.p2p_power if args.p2p_power is not None else FuserTestConfig.get_p2p_power(args.gpu_type)
@@ -620,6 +633,7 @@ if __name__ == "__main__":
         p2p_power,
         args.use_activation_checkpointing,
         args.model_name,
+        args.scale_time_energy,
     )
 
 

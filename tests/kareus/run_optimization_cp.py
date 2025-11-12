@@ -45,9 +45,9 @@ logger = logging.getLogger()
 @dataclass
 class Args:
     # Path to instruction profile results
-    inst_profile: str = "profile_llama3.2_3b_cp2_tp4_bs16_seq4096.csv"
+    inst_profile: str = "profile_llama3.2_3b_cp2_tp4_bs8_seq8192.csv"
     # Directory to output results
-    output_dir: str = "llama3.2_3b/cp2_tp4_bs16_seq4096/perseus_results"
+    output_dir: str = "llama3.2_3b/cp2_tp4_bs8_seq8192/perseus_results3"
     # Number of microbatchs
     num_mbs: int = FuserTestConfig.DEFAULT_NUM_MICROBATCHES
     # Number of stages

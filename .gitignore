@@ -15,7 +15,7 @@ dump/
 *.jsonl
 *.pdf
 *.svg
-perseus_results/
+perseus_results*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
