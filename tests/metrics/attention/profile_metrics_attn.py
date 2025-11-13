@@ -163,7 +163,7 @@ if __name__ == "__main__":
     skip = False
     overlap_windows = get_overlap_windows()
     for overlap_start, overlap_end in overlap_windows:
-        for sm_num in range(3, 31, 3):
+        for sm_num in range(1, 21):
             for block_size in [1024]:
                 if sm_num == 11 and block_size == 1024 and overlap_start == 0 and overlap_end == 1:
                     skip = False

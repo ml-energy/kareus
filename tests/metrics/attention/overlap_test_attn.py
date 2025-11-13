@@ -16,7 +16,7 @@ from kareus.megatron.core.extensions.ops import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 # from cfuser.core.utils import nvtx_range
@@ -334,22 +334,20 @@ class AttentionFuserTest:
         if self.rank == 0:
             gpu_indices = list(range(self.world_size))
             monitor = ZeusMonitor(gpu_indices=gpu_indices)
-            # os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
-            # with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
-            #     title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
-            #     for i in range(self.repeat_num):
-            #         title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
-            #     title = title.rstrip(",")
-            #     title += "\n"
-            #     f.write(title)
+            os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}", exist_ok=True)
+            with open(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/energy_results.csv", "w") as f:
+                title = "overlap_start,overlap_end,comm_sm_number,comm_block_size,"
+                for i in range(self.repeat_num):
+                    title += f"{i}:time (s),{i}:total energy (J),{i}:rank0 energy (J),{i}:rank1 energy (J),"
+                title = title.rstrip(",")
+                title += "\n"
+                f.write(title)
         
         # skip = True
         overlap_windows = self.get_overlap_windows()
         for overlap_window in overlap_windows:
-            for sm_num in range(3, 31, 3):
+            for sm_num in range(1, 21):
                 for block_size in [1024]:
-                    if sm_num <= 20:
-                        continue
                     # if sm_num == 17 and block_size == 512 and overlap_window[0] == 4 and overlap_window[1] == 5:
                     #     skip = False
                     # if skip:
