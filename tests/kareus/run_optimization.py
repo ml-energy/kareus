@@ -47,7 +47,7 @@ class Args:
     # Path to instruction profile results
     inst_profile: str = "profile_llama3.2_3b_cp1_tp8_bs8_seq4096.csv"
     # Directory to output results
-    output_dir: str = "llama3.2_3b/cp1_tp8_bs8_seq4096/perseus_results2"
+    output_dir: str = "llama3.2_3b/cp1_tp8_bs8_seq4096/perseus_results4"
     # Number of microbatchs
     num_mbs: int = FuserTestConfig.DEFAULT_NUM_MICROBATCHES
     # Number of stages

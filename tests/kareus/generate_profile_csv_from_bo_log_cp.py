@@ -424,8 +424,8 @@ def main(
                             sum_time = t1 + t2 + t3 + t4 + t5 * 2  # only double mlp
                             sum_energy = e1 + e2 + e3 + e4 + e5 * 2  # only double mlp
                             if scale_time_energy:
-                                sum_time *= 1.2
-                                sum_energy *= 1.2
+                                sum_time *= 1.15
+                                sum_energy *= 1.15
 
                             for stage in range(pipeline_parallel_size):
                                 # 2 nanobatches per layer
@@ -480,8 +480,8 @@ def main(
                                                             sum_time = (t1 + t2 + t3 + t4 + t5 * 2 + tb1 + tb2 + tb3 + tb4 + tb5 + tb6 + tb7 * 2)  # only double mlp
                                                             sum_energy = (e1 + e2 + e3 + e4 + e5 * 2 + eb1 + eb2 + eb3 + eb4 + eb5 + eb6 + eb7 * 2)  # only double mlp
                                                             if scale_time_energy:
-                                                                sum_time *= 1.2
-                                                                sum_energy *= 1.2
+                                                                sum_time *= 1.15
+                                                                sum_energy *= 1.15
 
                                                             for stage in range(pipeline_parallel_size):
                                                                 # 2 nanobatches per layer
@@ -529,8 +529,8 @@ def main(
                                         sum_time = t1 + t2 + t3 + t4 + t5 + t6 + t7 * 2  # only double mlp
                                         sum_energy = e1 + e2 + e3 + e4 + e5 + e6 + e7 * 2  # only double mlp
                                         if scale_time_energy:
-                                            sum_time *= 1.2
-                                            sum_energy *= 1.2
+                                            sum_time *= 1.15
+                                            sum_energy *= 1.15
 
                                         for stage in range(pipeline_parallel_size):
                                             # 2 nanobatches per layer
@@ -614,7 +614,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpu_type", default=FuserTestConfig.GPU_TYPE, choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--p2p_power", default=None, type=float, help="GPU power while blocking on P2P (W). If omitted, uses FuserTestConfig.")
     parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="When set, generate backward candidates with recompute-forward configs and extended CSV header.")
-    parser.add_argument("--scale_time_energy", default=False, type=bool, help="When set, scale sum_time and sum_energy by 1.2.")
+    parser.add_argument("--scale_time_energy", default=True, type=bool, help="When set, scale sum_time and sum_energy by 1.2.")
     args = parser.parse_args()
 
     p2p_power = args.p2p_power if args.p2p_power is not None else FuserTestConfig.get_p2p_power(args.gpu_type)

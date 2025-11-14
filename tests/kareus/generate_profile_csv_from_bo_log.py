@@ -329,8 +329,8 @@ def main(
                 sum_time = (attn_result[0] + mlp_result[0])
                 sum_energy = (attn_result[1] + mlp_result[1])
                 if scale_time_energy:
-                    sum_time *= 1.2
-                    sum_energy *= 1.2
+                    sum_time *= 1.15
+                    sum_energy *= 1.15
 
                 for stage in range(pipeline_parallel_size):
                     # 2 nanobatches per layer
@@ -361,8 +361,8 @@ def main(
                             sum_time = (rec_attn_res[0] + rec_mlp_res[0] + bwd_attn_res[0] + bwd_mlp_res[0])
                             sum_energy = (rec_attn_res[1] + rec_mlp_res[1] + bwd_attn_res[1] + bwd_mlp_res[1])
                             if scale_time_energy:
-                                sum_time *= 1.2
-                                sum_energy *= 1.2
+                                sum_time *= 1.15
+                                sum_energy *= 1.15
 
                             for stage in range(pipeline_parallel_size):
                                 # 2 nanobatches per layer
@@ -386,8 +386,8 @@ def main(
                     sum_time = (attn_result[0] + mlp_result[0])
                     sum_energy = (attn_result[1] + mlp_result[1])
                     if scale_time_energy:
-                        sum_time *= 1.2
-                        sum_energy *= 1.2
+                        sum_time *= 1.15
+                        sum_energy *= 1.15
 
                     for stage in range(pipeline_parallel_size):
                         # 2 nanobatches per layer
@@ -444,7 +444,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpu_type", default=FuserTestConfig.GPU_TYPE, choices=["A40", "A100"], help="Name of the GPU type.")
     parser.add_argument("--p2p_power", default=None, type=float, help="GPU power while blocking on P2P (W). If omitted, uses FuserTestConfig.")
     parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="When set, generate backward candidates with recompute-forward configs and extended CSV header.")
-    parser.add_argument("--scale_time_energy", default=False, type=bool, help="When set, scale sum_time and sum_energy by 1.2.")
+    parser.add_argument("--scale_time_energy", default=True, type=bool, help="When set, scale sum_time and sum_energy by 1.2.")
     args = parser.parse_args()
 
     p2p_power = args.p2p_power if args.p2p_power is not None else FuserTestConfig.get_p2p_power(args.gpu_type)

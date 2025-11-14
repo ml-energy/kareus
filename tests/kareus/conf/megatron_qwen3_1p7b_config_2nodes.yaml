@@ -48,13 +48,15 @@ model:
   # specify micro_batch_size, global_batch_size, and model parallelism
   # gradient accumulation will be done automatically based on data_parallel_size
   micro_batch_size: 16 # Mirror LLaMA 2-nodes setting
-  global_batch_size: 256 # Mirror LLaMA 2-nodes setting
+  global_batch_size: 128 # Mirror LLaMA 2-nodes setting
   tensor_model_parallel_size: 4 # Mirror LLaMA 2-nodes setting
-  pipeline_model_parallel_size: 4 # inter-layer model parallelism
+  pipeline_model_parallel_size: 2 # inter-layer model parallelism
+  context_parallel_size: 2 # context parallelism
+  cp_comm_type: "all_gather"
   virtual_pipeline_model_parallel_size: null # interleaved pipeline
  
-  num_layers_in_first_pipeline_stage: 8
-  num_layers_in_last_pipeline_stage: 4
+  # num_layers_in_first_pipeline_stage: 8
+  # num_layers_in_last_pipeline_stage: 4
 
   # model architecture - Qwen3 ~1.7B
   encoder_seq_length: 4096 # Keep aligned with dataset and LLaMA/Qwen config
@@ -131,7 +133,6 @@ model:
   apply_rope_fusion: True # Use a kernel to add rotary positional embeddings. Only used if position_embedding_type=rope
   cross_entropy_loss_fusion: True # Use a kernel to compute the cross entropy loss.
   cross_entropy_fusion_impl: 'te' # Use a kernel to compute the cross entropy loss.
-
 
   # Miscellaneous
   seed: 1234
@@ -221,13 +222,13 @@ model:
   # Nsys profiling options
   nsys_profile:
     enabled: False
-    start_step: 10  # Global batch to start profiling
-    end_step: 15 # Global batch to end profiling
+    start_step: 5 # Global batch to start profiling
+    end_step: 6 # Global batch to end profiling
     ranks: [0] # Global rank IDs to profile
     gen_shape: False # Generate model and kernel details including input shapes
   
   optim:
-    name: fused_adam
+    name: mcore_distributed_optim
     lr: 2e-4
     weight_decay: 0.01 
     betas: 
@@ -238,6 +239,3 @@ model:
       warmup_steps: 500
       constant_steps: 50000
       min_lr: 2e-5 
-
-
-
