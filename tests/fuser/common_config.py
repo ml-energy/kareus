@@ -13,23 +13,23 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 class FuserTestConfig:
     """Configuration factory for fuser test scripts."""
 
-    MODEL_NAME = "qwen3_4b"
+    MODEL_NAME = "qwen3_1.7b"
     
     # Default model dimensions (Llama-like)
-    HIDDEN_SIZE = 2560
-    NUM_ATTENTION_HEADS = 32
+    HIDDEN_SIZE = 2048
+    NUM_ATTENTION_HEADS = 16
     HEAD_DIM = 128
     NUM_QUERY_GROUPS = 8  # For grouped query attention
-    FFN_HIDDEN_SIZE = 9728
+    FFN_HIDDEN_SIZE = 6144
     VOCAB_SIZE = 151936
     DROP_RATE = 0.5
-    NUM_LAYERS = 36
+    NUM_LAYERS = 28
     
     # Default test parameters
     # DEFAULT_WORLD_SIZE = 2
     DEFAULT_TENSOR_PARALLEL_SIZE = 4
     DEFAULT_CONTEXT_PARALLEL_SIZE = 2
-    DEFAULT_BATCH_SIZE = 16
+    DEFAULT_BATCH_SIZE = 8
     DEFAULT_SEQ_LENGTH = 4096
 
     DEFAULT_STAGES = 2

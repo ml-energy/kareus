@@ -72,7 +72,7 @@ from botorch.utils.multi_objective.hypervolume import Hypervolume
 
 # Editable
 OVERLAP_WINDOWS = [
-    (0, 8), (2, 8), (4, 8), (6, 8), (7, 8),
+    (0, 8), (2, 8), (4, 8), (6, 8), #(7, 8),
 ]
 SM_VALUES = list(range(3, 31, 3))
 
@@ -80,7 +80,7 @@ SM_VALUES = list(range(3, 31, 3))
 FREQ_VALUES = []
 
 BO_DEFAULT_N_INIT = 96
-BO_DEFAULT_BATCHES = 6
+BO_DEFAULT_BATCHES = 4
 BO_DEFAULT_ACQ_BATCH = 32
 
 MASTER_PORT = 9002

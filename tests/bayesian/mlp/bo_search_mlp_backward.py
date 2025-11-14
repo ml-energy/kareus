@@ -61,14 +61,14 @@ from botorch.utils.multi_objective.pareto import is_non_dominated
 
 # Editable (backward-specific windows)
 OVERLAP_WINDOWS = [
-    (0, 6), (2, 6), (3, 6), (5, 6),
+    (0, 6), (2, 6), (3, 6), # (5, 6),
 ]
 SM_VALUES = list(range(3, 31, 3))
 
 FREQ_VALUES = []
 
 BO_DEFAULT_N_INIT = 96
-BO_DEFAULT_BATCHES = 6
+BO_DEFAULT_BATCHES = 4
 BO_DEFAULT_ACQ_BATCH = 32
 
 MASTER_PORT = 9011

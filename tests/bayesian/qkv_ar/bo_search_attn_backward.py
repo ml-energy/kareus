@@ -61,7 +61,7 @@ from botorch.utils.multi_objective.pareto import is_non_dominated
 
 # Editable (backward-specific windows)
 OVERLAP_WINDOWS = [
-    (0, 5), (2, 5), (4, 5),
+    (0, 5), (2, 5), # (4, 5),
 ]
 SM_VALUES = list(range(3, 31, 3))
 

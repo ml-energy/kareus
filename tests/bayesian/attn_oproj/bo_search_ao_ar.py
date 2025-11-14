@@ -58,7 +58,7 @@ from botorch.utils.multi_objective.pareto import is_non_dominated  # noqa: F401
 
 # Editable
 OVERLAP_WINDOWS = [
-    (0, 2), (1, 2),
+    (0, 2), # (1, 2),
 ]
 
 SM_VALUES = list(range(3, 31, 3))
@@ -66,8 +66,8 @@ SM_VALUES = list(range(3, 31, 3))
 # Frequency values are determined at runtime from --gpu_type
 FREQ_VALUES: List[int] = []
 
-BO_DEFAULT_N_INIT = 48
-BO_DEFAULT_BATCHES = 4
+BO_DEFAULT_N_INIT = 36
+BO_DEFAULT_BATCHES = 3
 BO_DEFAULT_ACQ_BATCH = 16
 
 # Use a distinct master port from other BO runners

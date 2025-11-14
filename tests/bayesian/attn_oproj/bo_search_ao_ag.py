@@ -66,8 +66,8 @@ SM_VALUES = list(range(1, 21))
 # Frequency values are determined at runtime from --gpu_type
 FREQ_VALUES: List[int] = []
 
-BO_DEFAULT_N_INIT = 48
-BO_DEFAULT_BATCHES = 4
+BO_DEFAULT_N_INIT = 36
+BO_DEFAULT_BATCHES = 3
 BO_DEFAULT_ACQ_BATCH = 16
 
 # Use a distinct master port from other BO runners

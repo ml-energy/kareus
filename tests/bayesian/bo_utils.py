@@ -167,8 +167,10 @@ def _dist_batch_eval_worker(
         torch.cuda.synchronize()
         dist.barrier()
         for i in range(10):
-            if i == 2:
-                time_start = time.time()
+            partition_test.test_config(overlap_window, (sm_num, block_size))
+        torch.cuda.current_stream().synchronize()
+        time_start = time.time()
+        for i in range(8):
             partition_test.test_config(overlap_window, (sm_num, block_size))
         torch.cuda.synchronize()
         dist.barrier()
@@ -176,8 +178,9 @@ def _dist_batch_eval_worker(
         duration = (time_end - time_start) / 8.0
 
         if rank == 0:
-            iterations = int(max(1, round(6.0 / max(duration, 1e-6))))
+            iterations = int(max(1, round(5.0 / max(duration, 1e-6))))
             obj_list = [iterations]
+            print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
         else:
             obj_list = [None]
         dist.broadcast_object_list(obj_list, src=0, group=partition_test.group)
@@ -231,7 +234,7 @@ def _dist_batch_eval_worker(
                 "energy_j": float(avg_energy_j),
                 "time_s": float(avg_time_s),
             }
-        time.sleep(15)
+        time.sleep(5)
 
     if rank == 0:
         pid = os.getpid()
