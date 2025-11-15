@@ -140,11 +140,13 @@ wget https://github.com/aws/aws-ofi-nccl/releases/download/v1.10.0-aws/aws-ofi-n
 && make install
 
 
-# sudo chown -R ubuntu:ubuntu /home/ubuntu/.ssh
-# sudo chown ubuntu:ubuntu /home/ubuntu
-
-# sudo chmod 700 /home/ubuntu/.ssh
-# sudo chmod 600 /home/ubuntu/.ssh/authorized_keys
+# sudo chown -R ubuntu:ubuntu /home/ubuntu/.ssh && \
+# sudo chown ubuntu:ubuntu /home/ubuntu && \
+# sudo chmod 700 /home/ubuntu/.ssh && \
+# sudo chmod 600 /home/ubuntu/.ssh/authorized_keys && \
 # sudo chmod 755 /home/ubuntu
 
 # sudo apt remove -y unattended-upgrades
+
+# docker exec -it --privileged ruofan-kareus zsh
+# scp -r -i ~/.ssh/ruofanw.pem ubuntu@172.31.33.74:~/workspace/Kareus/tests/simple_test/data/my-gpt_text_document ~/workspace/Kareus/tests/simple_test/data/

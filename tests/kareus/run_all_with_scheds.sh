@@ -62,9 +62,9 @@ fi
 
 # Remote sync settings (used when NODE_RANK=1)
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/workspaces/Kareus/tests/kareus}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/kareus}"
 # MASTER_ADDR should point to node 0; use same default as run.sh if not set
-MASTER_ADDR="${MASTER_ADDR:-172.31.39.81}"
+MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
 
 LOG_DIR="$SCRIPT_DIR/logs_pfo_runs"
 mkdir -p "$LOG_DIR"
@@ -119,7 +119,7 @@ echo "Running ${#FREQ_FILES[@]} selected plans"
 # restore_yaml() { mv -f "$BACKUP_YAML" "$YAML_FILE" || true; }
 # trap restore_yaml EXIT
 
-SLEEP_BEFORE_TRAIN=${SLEEP_BEFORE_TRAIN:-3}
+SLEEP_BEFORE_TRAIN=${SLEEP_BEFORE_TRAIN:-5}
 
 for f in "${FREQ_FILES[@]}"; do
   base=$(basename "$f")
@@ -165,6 +165,17 @@ if not m:
 
 cp, tp, mb, seq = map(int, m.groups())
 
+# Trainer and monitoring settings (align with run_one_config.sh)
+cfg.trainer.max_steps = 30
+cfg.trainer.log_every_n_steps = 40
+cfg.trainer.val_check_interval = 40
+
+cfg.model.enable_megatron_timers = False
+cfg.model.enable_zeus_monitor = True
+cfg.model.enable_power_monitor = True
+cfg.model.enable_perseus_optimizer = True
+cfg.model.enable_kareus_scheduler = True
+
 cfg.model.context_parallel_size = cp
 cfg.model.tensor_model_parallel_size = tp
 cfg.model.micro_batch_size = mb
@@ -207,7 +218,18 @@ PY
 
   if [[ "${NODE_RANK}" == "0" ]]; then
     mkdir -p "${NEMO_DIR}/${plan_id}/timers"
-    mv "${NEMO_ROOT}"/2025* "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
+    chmod a+w "${NEMO_DIR}/${plan_id}"
+    shopt -s nullglob dotglob
+    for d in "${NEMO_ROOT}"/20*; do
+      if [[ -d "$d" ]]; then
+        contents=("$d"/*)
+        if (( ${#contents[@]} )); then
+          mv "${contents[@]}" "${NEMO_DIR}/${plan_id}/"
+        fi
+        rm -rf "$d"
+      fi
+    done
+    shopt -u nullglob dotglob
     mv "${NEMO_ROOT}/timers/"* "${NEMO_DIR}/${plan_id}/timers" 2>/dev/null || true
     mv "${NEMO_ROOT}"/*.txt "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
   else
@@ -245,5 +267,7 @@ if [[ "${NODE_RANK}" == "1" ]]; then
   remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/frontier/"
   echo "Syncing frontier results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
-  scp -i "${SSH_KEY_PATH:-$HOME/.ssh/id_rsa}" -r "${FRONTIER_DIR}/" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
+  ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
+  sleep 5
+  scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${FRONTIER_DIR}/" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
 fi

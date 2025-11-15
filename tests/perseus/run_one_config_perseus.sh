@@ -39,8 +39,7 @@ fi
 
 # Logical model/config identifiers used to locate Kareus solutions
 model_name="llama3.2_3b"
-config="cp1_tp8_bs8_seq4096"
-config_dir="noscale"
+config="cp2_tp4_bs16_seq4096"
 
 # Nemo experiment name (directory under nemo_experiments/)
 # For LLaMA 3.2 3B this is typically "megatron_llama_3_2_3b"
@@ -53,7 +52,7 @@ MASTER_PORT="${MASTER_PORT:-29500}"
 
 # Remote (node 0) path to sync collected results into, from node 1
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/kareus}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/perseus}"
 
 ########################################
 # Derived paths                        #
@@ -63,7 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Directory where freqs/scheds solutions live, e.g.
 #   tests/kareus/llama3.2_3b/cp1_tp8_bs8_seq4096/noscale
-solution_root="${SCRIPT_DIR}/${model_name}/${config}/${config_dir}"
+solution_root="${SCRIPT_DIR}/${model_name}/${config}/"
 
 # YAML config for this model in 2-node setting, e.g.
 #   tests/kareus/conf/megatron_llama3.2_3b_config_2nodes.yaml
@@ -74,7 +73,7 @@ if [[ ! -f "${yaml_file}" ]]; then
 fi
 
 # Directory where we will collect NeMo outputs for this config
-output_dir="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/kareus/${config_dir}"
+output_dir="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/perseus"
 mkdir -p "${output_dir}"
 
 ########################################
@@ -87,23 +86,13 @@ if [[ "${NODE_RANK}" == "0" ]]; then
   freqs_solution_path="$(ls "${solution_root}"/freqs_pipeline_*.py 2>/dev/null | head -n 1 || true)"
 fi
 
-scheds_solution_path="$(ls "${solution_root}"/scheds_pipeline_*.py 2>/dev/null | head -n 1 || true)"
-
 if [[ "${NODE_RANK}" == "0" ]]; then
-  if [[ -z "${freqs_solution_path}" || -z "${scheds_solution_path}" ]]; then
-    echo "ERROR: Could not find freqs/scheds solution in '${solution_root}'." >&2
-    echo "Expected files: freqs_pipeline_*.py and scheds_pipeline_*.py" >&2
+  if [[ -z "${freqs_solution_path}" ]]; then
+    echo "ERROR: Could not find freqs solution in '${solution_root}'." >&2
+    echo "Expected files: freqs_pipeline_*.py" >&2
     exit 1
   fi
   echo "Using freqs_solution_path = ${freqs_solution_path}"
-  echo "Using scheds_solution_path = ${scheds_solution_path}"
-else
-  if [[ -z "${scheds_solution_path}" ]]; then
-    echo "ERROR: Could not find scheds solution in '${solution_root}'." >&2
-    echo "Expected file: scheds_pipeline_*.py" >&2
-    exit 1
-  fi
-  echo "Using scheds_solution_path (node 1) = ${scheds_solution_path}"
 fi
 
 ########################################
@@ -112,25 +101,18 @@ fi
 
 echo "Updating YAML ${yaml_file} with Kareus scheduler path and parallelism/batch settings from config='${config}'"
 
-python - "${yaml_file}" "${scheds_solution_path}" "${config}" <<'PY'
+python - "${yaml_file}" "${config}" <<'PY'
 import re
 import sys
 from omegaconf import OmegaConf
 
-yaml_path, sched_path, cfg_str = sys.argv[1], sys.argv[2], sys.argv[3]
+yaml_path, cfg_str = sys.argv[1], sys.argv[2]
 
 cfg = OmegaConf.load(yaml_path)
 
 # 1) Set Kareus scheduler solution_path
 if "model" not in cfg:
     raise SystemExit(f"'model' section not found in {yaml_path}")
-
-ks = cfg.model.get("kareus_scheduler_kwargs")
-if ks is None:
-    ks = {}
-    cfg.model.kareus_scheduler_kwargs = ks
-
-cfg.model.kareus_scheduler_kwargs["solution_path"] = sched_path
 
 # 2) Parse config string: cp1_tp8_bs8_seq4096
 m = re.match(r"^cp(\d+)_tp(\d+)_bs(\d+)_seq(\d+)$", cfg_str)
@@ -149,7 +131,7 @@ cfg.model.enable_megatron_timers = False
 cfg.model.enable_zeus_monitor = True
 cfg.model.enable_power_monitor = True
 cfg.model.enable_perseus_optimizer = True
-cfg.model.enable_kareus_scheduler = True
+cfg.model.enable_kareus_scheduler = False
 
 cfg.model.context_parallel_size = cp
 cfg.model.tensor_model_parallel_size = tp
@@ -174,9 +156,9 @@ if [[ "${NODE_RANK}" == "0" ]]; then
   # Node 0: start PFO + run + collect  #
   ######################################
 
-  server_log="${output_dir}/pfo_server_${config_dir}.log"
+  server_log="${output_dir}/pfo_server.log"
 
-  echo "Starting PFO server for ${model_name} ${config} (${config_dir}) on ${MASTER_ADDR}:7787"
+  echo "Starting PFO server for ${model_name} ${config} on ${MASTER_ADDR}:7787"
   ZEUS_PFO_SCHEDULER=PointSolution3D \
   ZEUS_PFO_SCHEDULER_ARGS="{\"solution_path\": \"${freqs_solution_path}\"}" \
   uvicorn zeus.optimizer.pipeline_frequency.server.router:app \
@@ -198,7 +180,7 @@ if [[ "${NODE_RANK}" == "0" ]]; then
 
   chmod a+w "${output_dir}"
 
-  # Move time-stamped experiment directories (e.g., 20YY-*) contents, then delete source dirs
+  # Move time-stamped experiment directories (e.g., 20YY-*)
   if compgen -G "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/20*" > /dev/null; then
     shopt -s nullglob dotglob
     for d in "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"/20*; do
@@ -246,11 +228,10 @@ else
     mv "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"/*.txt "${output_dir}/"
   fi
 
-  remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/kareus/${config_dir}"
+  remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/perseus"
   echo "Syncing results from node 1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
-  # Remote directory should exist; if not, attempt to create it
-  ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
+#   ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
   sleep 5
   scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${output_dir}/"* "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
 

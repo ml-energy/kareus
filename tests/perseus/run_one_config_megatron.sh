@@ -39,7 +39,7 @@ fi
 
 # Logical model/config identifiers used to locate Kareus solutions
 model_name="llama3.2_3b"
-config="cp1_tp8_bs8_seq4096"
+config="cp2_tp4_bs16_seq4096"
 
 # Nemo experiment name (directory under nemo_experiments/)
 # For LLaMA 3.2 3B this is typically "megatron_llama_3_2_3b"
@@ -47,12 +47,12 @@ nemo_model_name="megatron_llama_3_2_3b"
 
 # Node-0 address (IP or hostname) that all nodes use as MASTER_ADDR
 # You MUST set this before running (can be overridden from environment)
-MASTER_ADDR="${MASTER_ADDR:-xxx.xxx.xxx.xxx}"
+MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 # Remote (node 0) path to sync collected results into, from node 1
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/workspaces/Kareus/tests/kareus}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/perseus}"
 
 ########################################
 # Derived paths                        #
@@ -73,27 +73,8 @@ if [[ ! -f "${yaml_file}" ]]; then
 fi
 
 # Directory where we will collect NeMo outputs for this config
-output_dir="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/perseus"
+output_dir="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/megatron"
 mkdir -p "${output_dir}"
-
-########################################
-# Locate Kareus solutions              #
-########################################
-
-# freqs needed only on node 0 for PFO server
-freqs_solution_path=""
-if [[ "${NODE_RANK}" == "0" ]]; then
-  freqs_solution_path="$(ls "${solution_root}"/freqs_pipeline_*.py 2>/dev/null | head -n 1 || true)"
-fi
-
-if [[ "${NODE_RANK}" == "0" ]]; then
-  if [[ -z "${freqs_solution_path}" ]]; then
-    echo "ERROR: Could not find freqs solution in '${solution_root}'." >&2
-    echo "Expected files: freqs_pipeline_*.py" >&2
-    exit 1
-  fi
-  echo "Using freqs_solution_path = ${freqs_solution_path}"
-fi
 
 ########################################
 # Update YAML with scheduler + config  #
@@ -120,6 +101,16 @@ if not m:
     raise SystemExit(
         f"Config string '{cfg_str}' is not in expected format 'cp<cp>_tp<tp>_bs<mb>_seq<seq>'"
     )
+  
+cfg.trainer.max_steps = 30
+cfg.trainer.log_every_n_steps = 40
+cfg.trainer.val_check_interval = 40
+
+cfg.model.enable_megatron_timers = False
+cfg.model.enable_zeus_monitor = True
+cfg.model.enable_power_monitor = True
+cfg.model.enable_perseus_optimizer = False
+cfg.model.enable_kareus_scheduler = False
 
 cp, tp, mb, seq = map(int, m.groups())
 
@@ -146,19 +137,6 @@ if [[ "${NODE_RANK}" == "0" ]]; then
   # Node 0: start PFO + run + collect  #
   ######################################
 
-  server_log="${output_dir}/pfo_server.log"
-
-  echo "Starting PFO server for ${model_name} ${config} on ${MASTER_ADDR}:7787"
-  ZEUS_PFO_SCHEDULER=PointSolution3D \
-  ZEUS_PFO_SCHEDULER_ARGS="{\"solution_path\": \"${freqs_solution_path}\"}" \
-  uvicorn zeus.optimizer.pipeline_frequency.server.router:app \
-    --host "${MASTER_ADDR}" \
-    --port 7787 \
-    > "${server_log}" 2>&1 &
-
-  PFO_PID=$!
-  echo "PFO server PID: ${PFO_PID}"
-
   echo "MASTER_ADDR=${MASTER_ADDR}"
   echo "MASTER_PORT=${MASTER_PORT}"
   echo "Launching training via run.sh (node_rank=0)"
@@ -167,9 +145,21 @@ if [[ "${NODE_RANK}" == "0" ]]; then
 
   echo "Moving NeMo experiment outputs into ${output_dir}"
 
-  # Move time-stamped experiment directories (e.g., 2025-*)
-  if compgen -G "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/2025*" > /dev/null; then
-    mv "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"/2025* "${output_dir}/"
+  chmod a+w "${output_dir}"
+
+  # Move time-stamped experiment directories (e.g., 20YY-*)
+  if compgen -G "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/20*" > /dev/null; then
+    shopt -s nullglob dotglob
+    for d in "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"/20*; do
+      if [[ -d "$d" ]]; then
+        contents=("$d"/*)
+        if (( ${#contents[@]} )); then
+          mv "${contents[@]}" "${output_dir}/"
+        fi
+        rm -rf "$d"
+      fi
+    done
+    shopt -u nullglob dotglob
   fi
 
   # Move any text logs from the default experiments dir
@@ -196,11 +186,12 @@ else
     mv "${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"/*.txt "${output_dir}/"
   fi
 
-  remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/config/kareus/${config_dir}"
+  remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/megatron"
   echo "Syncing results from node 1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
-  ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/id_rsa}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
-  scp -i "${SSH_KEY_PATH:-$HOME/.ssh/id_rsa}" -r "${output_dir}/"* "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
+#   ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
+  sleep 5
+  scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${output_dir}/"* "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
 
   echo "Node 1 run finished. Outputs synced to node 0 under: ${remote_dir}"
 fi

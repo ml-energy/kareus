@@ -51,9 +51,9 @@ fi
 
 # Remote sync settings (used when NODE_RANK=1)
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/workspaces/Kareus/tests/kareus}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/kareus}"
 # MASTER_ADDR should point to node 0; use same default as run.sh if not set
-MASTER_ADDR="${MASTER_ADDR:-172.31.39.81}"
+MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
 
 ########################################
 # Update YAML with parsed config       #
@@ -80,6 +80,16 @@ if not m:
         f"Config string '{cfg_str}' is not in expected format 'cp<cp>_tp<tp>_bs<mb>_seq<seq>'"
     )
 
+cfg.trainer.max_steps = 15
+cfg.trainer.log_every_n_steps = 20
+cfg.trainer.val_check_interval = 20
+
+cfg.model.enable_megatron_timers = True
+cfg.model.enable_zeus_monitor = True
+cfg.model.enable_power_monitor = False
+cfg.model.enable_perseus_optimizer = False
+cfg.model.enable_kareus_scheduler = False
+
 cp, tp, mb, seq = map(int, m.groups())
 
 cfg.model.context_parallel_size = cp
@@ -100,15 +110,27 @@ for frequency in $(seq 1410 -30 900); do
     bash "${SCRIPT_DIR}/run.sh" "${NODE_RANK}"
 
     if [[ "${NODE_RANK}" == "0" ]]; then
-        mkdir -p "${NEMO_DIR}/${frequency}/timers"
-        mv "${NEMO_DIR}"/2025* "${NEMO_DIR}/${frequency}/" 2>/dev/null || true
-        mv "${NEMO_DIR}/timers/"* "${NEMO_DIR}/${frequency}/timers" 2>/dev/null || true
-        mv "${NEMO_DIR}"/*.txt "${NEMO_DIR}/${frequency}/" 2>/dev/null || true
+        mkdir -p "${NEMO_DIR}/${config}/profiling/${frequency}/timers"
+        chmod a+w "${NEMO_DIR}/${config}/profiling/${frequency}"
+        shopt -s nullglob dotglob
+        for d in "${NEMO_DIR}"/20*; do
+            if [[ -d "$d" ]]; then
+                contents=("$d"/*)
+                if (( ${#contents[@]} )); then
+                    mv "${contents[@]}" "${NEMO_DIR}/${config}/profiling/${frequency}/"
+                fi
+                rm -rf "$d"
+            fi
+        done
+        shopt -u nullglob dotglob
+        mv "${NEMO_DIR}/timers/"* "${NEMO_DIR}/${config}/profiling/${frequency}/timers" 2>/dev/null || true
+        mv "${NEMO_DIR}"/*.txt "${NEMO_DIR}/${config}/profiling/${frequency}/" 2>/dev/null || true
     else
-        mkdir -p "${NEMO_DIR}/${frequency}"
-        mv "${NEMO_DIR}/timers" "${NEMO_DIR}/${frequency}/" 2>/dev/null || true
-        mv "${NEMO_DIR}"/*.txt "${NEMO_DIR}/${frequency}/" 2>/dev/null || true
+        mkdir -p "${NEMO_DIR}/${config}/profiling/${frequency}"
+        mv "${NEMO_DIR}/timers" "${NEMO_DIR}/${config}/profiling/${frequency}/" 2>/dev/null || true
+        mv "${NEMO_DIR}"/*.txt "${NEMO_DIR}/${config}/profiling/${frequency}/" 2>/dev/null || true
     fi
+    sleep 5
 done
 
 echo "Resetting GPU clocks"
@@ -121,7 +143,22 @@ else
 fi
 
 mkdir -p "${target_dir}"
-mv "${NEMO_DIR}/"* "${target_dir}/" 2>/dev/null || true
+shopt -s nullglob dotglob
+for item in "${NEMO_DIR}/${config}/profiling/"*; do
+  if [[ "$item" == "${target_dir}" ]]; then
+    continue
+  fi
+  mv "$item" "${target_dir}/" 2>/dev/null || true
+done
+shopt -u nullglob dotglob
+
+if [[ "${NODE_RANK}" == "0" ]]; then
+    rm -rf "${target_dir}/timers"
+    # Ensure node1 directory exists locally on node0 and is writable for all
+    node1_dir="${NEMO_DIR}/${config}/profiling/node1"
+    mkdir -p "${node1_dir}"
+    chmod a+rwx "${node1_dir}"
+fi
 
 echo "Profiling complete for node${NODE_RANK}. Results under ${target_dir}"
 
@@ -130,5 +167,8 @@ if [[ "${NODE_RANK}" == "1" ]]; then
     remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/profiling/"
     echo "Syncing profiling results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
-    scp -i "${SSH_KEY_PATH:-$HOME/.ssh/id_rsa}" -r "${target_dir}/" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
+    remote_dir_abs="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/profiling/"
+    sleep 5
+    # Copy the local node1 directory into the remote profiling directory (node0 pre-creates it)
+    scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${target_dir}" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir_abs}"
 fi

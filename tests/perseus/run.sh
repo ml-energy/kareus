@@ -26,7 +26,7 @@ if [[ "${NODE_RANK}" != "0" && "${NODE_RANK}" != "1" ]]; then
 fi
 
 # Set default MASTER_ADDR here; override by exporting MASTER_ADDR before calling if desired.
-MASTER_ADDR="${MASTER_ADDR:-172.31.39.81}"
+MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 echo "Running torchrun with NODE_RANK=${NODE_RANK}, MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"

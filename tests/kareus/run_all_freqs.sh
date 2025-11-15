@@ -51,7 +51,7 @@ NEMO_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
 NEMO_DIR="${NEMO_ROOT}/${config}"
 
 # Default freqs directory is per-config perseus_results; can be overridden by arg2
-DEFAULT_FREQS_DIR="${SCRIPT_DIR}/${model_name}/${config}/perseus_results}"
+DEFAULT_FREQS_DIR="${SCRIPT_DIR}/${model_name}/${config}/perseus_results"
 FREQS_DIR=${2:-$DEFAULT_FREQS_DIR}
 
 HOST=${3:-0.0.0.0}
@@ -59,9 +59,9 @@ PORT=${4:-7787}
 
 # Remote sync settings (used when NODE_RANK=1)
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/workspaces/Kareus/tests/kareus}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/kareus}"
 # MASTER_ADDR should point to node 0; use same default as run.sh if not set
-MASTER_ADDR="${MASTER_ADDR:-172.31.39.81}"
+MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
 
 LOG_DIR="${SCRIPT_DIR}/logs_pfo_runs"
 mkdir -p "$LOG_DIR"
@@ -118,7 +118,8 @@ for f in "${FREQ_FILES[@]}"; do
   server_pid=$!
 
   # Wait briefly for server to become ready
-  sleep 3
+  SLEEP_BEFORE_TRAIN=${SLEEP_BEFORE_TRAIN:-5}
+  sleep "$SLEEP_BEFORE_TRAIN"
 
   train_log="$LOG_DIR/${run_id}_train_${ts}.log"
   echo "Starting training via run.sh (node_rank=${NODE_RANK}) (log: $train_log)"
@@ -137,7 +138,18 @@ for f in "${FREQ_FILES[@]}"; do
 
   if [[ "${NODE_RANK}" == "0" ]]; then
     mkdir -p "${NEMO_DIR}/${plan_id}/timers"
-    mv "${NEMO_ROOT}"/2025* "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
+    chmod a+w "${NEMO_DIR}/${plan_id}"
+    shopt -s nullglob dotglob
+    for d in "${NEMO_ROOT}"/20*; do
+      if [[ -d "$d" ]]; then
+        contents=("$d"/*)
+        if (( ${#contents[@]} )); then
+          mv "${contents[@]}" "${NEMO_DIR}/${plan_id}/"
+        fi
+        rm -rf "$d"
+      fi
+    done
+    shopt -u nullglob dotglob
     mv "${NEMO_ROOT}/timers/"* "${NEMO_DIR}/${plan_id}/timers" 2>/dev/null || true
     mv "${NEMO_ROOT}"/*.txt "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
   else
@@ -175,5 +187,7 @@ if [[ "${NODE_RANK}" == "1" ]]; then
   remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/frontier/"
   echo "Syncing frontier results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
-  scp -i "${SSH_KEY_PATH:-$HOME/.ssh/id_rsa}" -r "${FRONTIER_DIR}/" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
+  ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
+  sleep 5
+  scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${FRONTIER_DIR}/" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
 fi
