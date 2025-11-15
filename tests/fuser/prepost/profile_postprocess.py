@@ -97,7 +97,8 @@ class PostprocessProfiler:
         self.tensor_parallel_size = args.tensor_parallel_size
         self.device = torch.device('cuda', rank)
         self.dtype = torch.bfloat16
-
+        self.model_name = args.model_name
+        
         # Model dims
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len
@@ -170,11 +171,11 @@ class PostprocessProfiler:
         # Logs dir
         if self.rank == 0:
             os.makedirs(
-                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
+                f"logs/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}",
                 exist_ok=True,
             )
             with open(
-                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_energy.csv",
+                f"logs/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_energy.csv",
                 'w',
             ) as f:
                 title = "time (s),total_energy (J)," + ",".join(
@@ -223,7 +224,7 @@ class PostprocessProfiler:
             e_total = result.total_energy / iterations
             ranks_energy = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
             with open(
-                f"logs/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_energy.csv",
+                f"logs/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{self.frequency}/postprocess_energy.csv",
                 'a',
             ) as f:
                 f.write(
@@ -256,6 +257,7 @@ if __name__ == '__main__':
     from torch.multiprocessing import spawn
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('--model_name', '-m', type=str, default=FuserTestConfig.MODEL_NAME)
     parser.add_argument('--world_size', '-w', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument('--context_parallel_size', '-c', type=int, default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
     parser.add_argument('--tensor_parallel_size', '-t', type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
@@ -266,6 +268,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     print('Running postprocess profiling (output projection)')
+    print(f"Model name: {args.model_name}")
     print(f"World size: {args.world_size}")
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
