@@ -24,7 +24,6 @@ class FuserTestConfig:
     VOCAB_SIZE = 151936
     DROP_RATE = 0.5
     NUM_LAYERS = 28
-    NUM_LAYERS = 28
     
     # Default test parameters
     # DEFAULT_WORLD_SIZE = 2

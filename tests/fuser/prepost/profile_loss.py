@@ -173,7 +173,7 @@ class LossProfiler:
         t1 = time.time()
         duration = (t1 - t0) / 8.0
         if self.rank == 0:
-            iterations = max(1, int(6.0 / duration))
+            iterations = max(1, int(5.0 / duration))
             dist_list = [iterations]
         else:
             dist_list = [None]
