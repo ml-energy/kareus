@@ -254,9 +254,9 @@ class AttentionFuserTest:
                 residual=residual,
                 rotary_pos_emb=rotary_pos_emb,
                 attention_mask=attention_mask,
-                allreduce_input=allreduce_inputs,
-                allreduce_overlap_window=overlap_window,
-                allreduce_sm_configs=sm_configs,
+                comm_input=allreduce_inputs,
+                comm_overlap_window=overlap_window,
+                comm_sm_configs=sm_configs,
             )
         torch.cuda.synchronize()
         dist.barrier()
@@ -288,9 +288,9 @@ class AttentionFuserTest:
                     residual=residual,
                     rotary_pos_emb=rotary_pos_emb,
                     attention_mask=attention_mask,
-                    allreduce_input=allreduce_inputs,
-                    allreduce_overlap_window=overlap_window,
-                    allreduce_sm_configs=sm_configs,
+                    comm_input=allreduce_inputs,
+                    comm_overlap_window=overlap_window,
+                    comm_sm_configs=sm_configs,
                 )
             torch.cuda.synchronize()
             dist.barrier()
@@ -330,8 +330,8 @@ class AttentionFuserTest:
 
         attention_fuser = PartitionFuser(
             ops=comp_ops,
-            allreduce_comm_op=allreduce_comm_op,
-            fuse_ops=False
+            comm_op_fwd=allreduce_comm_op,
+            fuse_ops=False,
         )
         print(f"attention_fuser._forward_ops: {attention_fuser._forward_ops}")
         print(f"attention_fuser._backward_ops: {attention_fuser._backward_ops}")
@@ -371,7 +371,7 @@ class AttentionFuserTest:
                         overlap_window, sm_configs
                     )
                     # return
-                    time.sleep(30)
+                    # time.sleep(30)
 
 
 def overlap_test(rank, world_size, args, master_port):
@@ -403,7 +403,7 @@ def overlap_test(rank, world_size, args, master_port):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_WORLD_SIZE)
+    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
     parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument("--frequency", "-f", type=str, default="default")

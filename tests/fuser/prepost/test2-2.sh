@@ -1,38 +1,12 @@
 #!/bin/bash
 
-GPU1=4
-GPU2=5
-GPU3=6
-GPU4=7
+GPU1=0
+GPU2=1
+GPU3=2
+GPU4=3
 
-for frequency in $(seq 1410 -30 900); do
-    echo "Testing frequency: ${frequency}"
-    
-    # Lock GPU clocks to current frequency
-    nvidia-smi -i ${GPU1},${GPU2},${GPU3},${GPU4} --lock-gpu-clocks=${frequency},${frequency}
-    
-    # Create unique output filename
-    output_file="output_${frequency}_8_8192.log"
-    
-    # Run the test
-    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_preprocess.py -b 8 -s 8192 --frequency ${frequency} > ${output_file} 2>&1
-    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_preprocess_backward.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_loss.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_postprocess.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-    CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_postprocess_backward.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-
-    # output_file="output_${frequency}_8_8192.log"
-
-    # # CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_preprocess.py -b 8 -s 8192 --frequency ${frequency} > ${output_file} 2>&1
-    # # CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_preprocess_backward.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-    # # CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_loss.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-    # # CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_postprocess.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-    # CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_postprocess_backward.py -b 8 -s 8192 --frequency ${frequency} >> ${output_file} 2>&1
-    
-    # echo "    Completed: ${output_file}"
-    
-    echo "Completed frequency: ${frequency}"
-    echo "----------------------------------------"
-done
-
-echo "All tests completed!"
+CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_preprocess.py -b 8 -s 8192 > output_preprocess.log 2>&1
+CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_preprocess_backward.py -b 8 -s 8192 > output_preprocess_backward.log 2>&1
+CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_loss.py -b 8 -s 8192 > output_loss.log 2>&1
+CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_postprocess.py -b 8 -s 8192 > output_postprocess.log 2>&1
+CUDA_VISIBLE_DEVICES=${GPU1},${GPU2},${GPU3},${GPU4} python -u profile_postprocess_backward.py -b 8 -s 8192 > output_postprocess_backward.log 2>&1

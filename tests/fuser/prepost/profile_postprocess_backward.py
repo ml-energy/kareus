@@ -8,6 +8,7 @@ import gc
 import torch
 import torch.distributed as dist
 import multiprocessing as mp
+import pynvml
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
@@ -23,6 +24,22 @@ from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from zeus.monitor import ZeusMonitor
 # from cfuser.core.utils import nvtx_range
+
+
+# Frequency sweep configuration (A100-style: 1410, 1380, ..., 930 MHz)
+FREQ_VALUES = list(range(1410, 890, -30))
+
+
+def _set_gpu_frequency(target_freq_mhz, device_indices=None):
+    """Best-effort GPU application clock setter via NVML."""
+    pynvml.nvmlInit()
+    all_indices = list(range(pynvml.nvmlDeviceGetCount()))
+    indices = device_indices if device_indices is not None else all_indices
+    for i in indices:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        pynvml.nvmlDeviceSetGpuLockedClocks(handle, int(target_freq_mhz), int(target_freq_mhz))
+        time.sleep(1)
+    pynvml.nvmlShutdown()
 
 
 def _kill_all_subprocesses(timeout: float = 2.0):
@@ -265,13 +282,35 @@ class PostprocessBackwardProfiler:
         torch.cuda.empty_cache()
 
 
-def _worker(rank: int, world_size: int, args, master_port: int):
+def _freq_sweep_worker(rank: int, world_size: int, args, master_port: int, freq_values):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = str(master_port)
     try:
         init_distributed(rank, world_size)
-        profiler = PostprocessBackwardProfiler(args, rank, world_size)
-        profiler.run()
+        # Sweep all configured frequencies in a single distributed run
+        for freq_mhz in freq_values:
+            if rank == 0:
+                # Set GPU frequency via NVML (all visible devices or CUDA_VISIBLE_DEVICES)
+                visible = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+                if visible is not None and len(visible.strip()) > 0:
+                    vis_list = [int(x) for x in visible.split(',') if x.strip() != '']
+                    target_indices = vis_list
+                else:
+                    target_indices = None
+                print(f'PostprocessBackwardProfiler: profiling at frequency {freq_mhz} MHz')
+                _set_gpu_frequency(freq_mhz, device_indices=target_indices)
+            # Ensure all ranks are synchronized before profiling this frequency
+            dist.barrier()
+
+            # Update args.frequency for logging paths and construct profiler
+            args.frequency = str(freq_mhz)
+            profiler = PostprocessBackwardProfiler(args, rank, world_size)
+            profiler.run()
+
+            # Small pause between frequency changes
+            dist.barrier()
+            if rank == 0:
+                time.sleep(5.0)
     except Exception as e:
         print(f"Error on rank {rank}: {e}")
         traceback.print_exc()
@@ -308,20 +347,21 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', '-b', type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument('--seq_len', '-s', type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument('--vocab_size', '-v', type=int, default=FuserTestConfig.VOCAB_SIZE)
+    # Kept for compatibility but ignored during sweep; per-run frequency is set internally.
     parser.add_argument('--frequency', '-f', type=str, default='default')
     args = parser.parse_args()
 
-    print('Running postprocess backward profiling (output projection)')
+    print('Running postprocess backward profiling (output projection) over frequency sweep')
     print(f"Model name: {args.model_name}")
     print(f"World size: {args.world_size}")
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
     print(f"Vocab size: {args.vocab_size}")
-    print(f"Frequency: {args.frequency}")
+    print(f"Frequencies: {FREQ_VALUES}")
 
     spawn(
-        _worker,
-        args=(args.world_size, args, random.randint(8000, 65535)),
+        _freq_sweep_worker,
+        args=(args.world_size, args, random.randint(8000, 65535), FREQ_VALUES),
         nprocs=args.world_size,
         join=True,
     )

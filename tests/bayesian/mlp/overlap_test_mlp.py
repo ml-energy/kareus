@@ -183,11 +183,11 @@ class MLPFuserTest:
     
     def get_overlap_windows(self):
         overlap_windows = [
-            # (-1, -1),
-            # (0, 1), (2, 3), (4, 4), (5, 6),
-            # (0, 3), (2, 4), (4, 6),
-            # (0, 4), (2, 6),
-            # (0, 6),
+            (-1, -1),
+            (0, 1), (2, 3), (4, 4), (5, 6),
+            (0, 3), (2, 4), (4, 6),
+            (0, 4), (2, 6),
+            (0, 6),
             (0, 6),
         ]
         return overlap_windows
@@ -243,9 +243,9 @@ class MLPFuserTest:
                     hidden_states=hidden_states,
                     bias=bias,
                     residual=residual,
-                    allreduce_input=allreduce_inputs,
-                    allreduce_overlap_window=overlap_window,
-                    allreduce_sm_configs=sm_configs,
+                    comm_input=allreduce_inputs,
+                    comm_overlap_window=overlap_window,
+                    comm_sm_configs=sm_configs,
                 )
             torch.cuda.synchronize()
             dist.barrier()
@@ -326,7 +326,7 @@ class MLPFuserTest:
                         overlap_window, sm_configs
                     )
                     # return
-                    time.sleep(30)
+                    # time.sleep(30)
 
 
 def overlap_test(rank, world_size, args, master_port):
