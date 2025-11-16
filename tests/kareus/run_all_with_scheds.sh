@@ -73,8 +73,8 @@ MASTER_PORT="${MASTER_PORT:-29500}"
 KAREUS_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/kareus/frontier"
 mkdir -p "${KAREUS_ROOT}"
 
-LOG_DIR="$SCRIPT_DIR/logs_pfo_runs"
-mkdir -p "$LOG_DIR"
+# LOG_DIR="$SCRIPT_DIR/logs_pfo_runs"
+# mkdir -p "$LOG_DIR"
 
 # Export for downstream training processes
 export MASTER_ADDR
@@ -283,4 +283,4 @@ PY
 done
 
 echo "All runs completed on node${NODE_RANK}. Per-plan Kareus runs saved under ${KAREUS_ROOT}"
-echo "Logs in $LOG_DIR"
+# echo "Logs in $LOG_DIR"

@@ -2,22 +2,20 @@
 set -euo pipefail
 
 ########################################
-# Run all frequency plans (Kareus)     #
+# Run all freqs+scheds plans (Kareus)  #
 ########################################
 #
 # Usage:
-#   ./run_all_freqs.sh <node_rank> [freqs_dir] [host] [port]
+#   ./run_all_with_scheds.sh <node_rank> [results_dir] [host] [port]
 # Defaults:
-#   freqs_dir: tests/kareus/<model_name>/<config>/perseus_results
+#   results_dir: tests/kareus/<model_name>/<config>/perseus_results
 #   host     : 0.0.0.0
 #   port     : 7787
-#
-# This script:
-#   - iterates over freqs_pipeline_*.py frequency plans
-#   - launches a PFO server for each plan (as in run_one_config.sh)
-#   - runs Kareus Megatron GPT pretraining for each plan
-#   - finally moves frontier NeMo runs to the config-specific frontier dir:
-#       nemo_experiments/<nemo_model_name>/<config>/frontier
+# Env overrides:
+#   NUM_SAMPLES        : number of freqs plans to sample (default 10; use 0 or >= total to disable sampling)
+#   SLEEP_BEFORE_TRAIN : seconds to wait for server readiness (default 3)
+#   MASTER_ADDR        : node-0 address (used by both PFO server and training)
+#   MASTER_PORT        : distributed training port (default 29500)
 ########################################
 
 ########################################
@@ -26,7 +24,7 @@ set -euo pipefail
 
 NODE_RANK="${1:-}"
 if [[ -z "${NODE_RANK}" ]]; then
-  echo "Usage: $0 <node_rank(0|1)> [freqs_dir] [host] [port]" >&2
+  echo "Usage: $0 <node_rank(0|1)> [results_dir] [host] [port]" >&2
   exit 1
 fi
 
@@ -48,132 +46,226 @@ nemo_model_name="megatron_llama_3_2_3b"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 NEMO_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
-NEMO_DIR="${NEMO_ROOT}/${config}"
 
-# Default freqs directory is per-config perseus_results; can be overridden by arg2
-DEFAULT_FREQS_DIR="${SCRIPT_DIR}/${model_name}/${config}/perseus_results}"
-FREQS_DIR=${2:-$DEFAULT_FREQS_DIR}
+# Default results directory is per-config perseus_results; can be overridden by arg2
+DEFAULT_RESULTS_DIR="${SCRIPT_DIR}/${model_name}/${config}/frontier"
+RESULTS_DIR=${2:-$DEFAULT_RESULTS_DIR}
 
 HOST=${3:-0.0.0.0}
 PORT=${4:-7787}
 
+# YAML config for this model in 2-node setting
+YAML_FILE="${SCRIPT_DIR}/conf/${nemo_model_name}_config_2nodes.yaml"
+if [[ ! -f "${YAML_FILE}" ]]; then
+  echo "ERROR: YAML config not found: ${YAML_FILE}" >&2
+  exit 1
+fi
+
 # Remote sync settings (used when NODE_RANK=1)
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/workspaces/Kareus/tests/kareus}"
-# MASTER_ADDR should point to node 0; use same default as run.sh if not set
-MASTER_ADDR="${MASTER_ADDR:-172.31.39.81}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/perseus}"
 
-LOG_DIR="${SCRIPT_DIR}/logs_pfo_runs"
-mkdir -p "$LOG_DIR"
+# Node-0 address and training port (can be overridden from environment)
+MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
+MASTER_PORT="${MASTER_PORT:-29500}"
 
-# Enumerate all freqs files sorted numerically by suffix if possible
-mapfile -t FREQ_FILES < <(ls -1 "$FREQS_DIR"/freqs_pipeline_*.py 2>/dev/null | sort)
+# Kareus output root where per-plan NeMo outputs will be collected
+KAREUS_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/perseus/frontier"
+mkdir -p "${KAREUS_ROOT}"
 
+# LOG_DIR="$SCRIPT_DIR/logs_pfo_runs"
+# mkdir -p "$LOG_DIR"
+
+# Export for downstream training processes
+export MASTER_ADDR
+export MASTER_PORT
+
+# Discover frequency plan files in the frontier directory and run all of them
+mapfile -t FREQ_FILES < <(ls -1 "$RESULTS_DIR"/freqs_pipeline_*.py 2>/dev/null | sort)
 if [[ ${#FREQ_FILES[@]} -eq 0 ]]; then
-  echo "No freqs_pipeline_*.py found under $FREQS_DIR" >&2
+  echo "No freqs_pipeline_*.py found under $RESULTS_DIR" >&2
   exit 1
 fi
 
 TOTAL_FILES=${#FREQ_FILES[@]}
-echo "Found ${TOTAL_FILES} frequency plans under $FREQS_DIR"
+echo "Found ${TOTAL_FILES} frequency plans under $RESULTS_DIR (running all plans; no sampling)"
 
-# Sample plans at a fixed stride from the largest number (default stride=200).
-# Override with SAMPLE_STRIDE env. Always include the lowest-numbered plan.
-SAMPLE_STRIDE=${SAMPLE_STRIDE:-100}
-if (( SAMPLE_STRIDE > 1 )); then
-  echo "Sampling from largest, every ${SAMPLE_STRIDE}th plan (total=${TOTAL_FILES})"
-  declare -a STRIDED_FILES=()
-  # Walk from last to first by stride
-  for ((i=TOTAL_FILES-1; i>=0; i-=SAMPLE_STRIDE)); do
-    STRIDED_FILES+=("${FREQ_FILES[$i]}")
-  done
-  # Ensure lowest-numbered (first) plan is included
-  if [[ ${#STRIDED_FILES[@]} -eq 0 || "${STRIDED_FILES[-1]}" != "${FREQ_FILES[0]}" ]]; then
-    STRIDED_FILES+=("${FREQ_FILES[0]}")
-  fi
-  FREQ_FILES=("${STRIDED_FILES[@]}")
-fi
+## Old sampling logic (now disabled; kept for reference)
+## Optional sampling: pick a fixed number of plans, compute stride automatically,
+## sample from largest to smallest, and ensure we include the smallest plan.
+# NUM_SAMPLES=${NUM_SAMPLES:-10}
+# if (( NUM_SAMPLES > 0 && NUM_SAMPLES < TOTAL_FILES )); then
+#   # Compute stride so that we pick at most NUM_SAMPLES plans
+#   stride=$(( (TOTAL_FILES + NUM_SAMPLES - 1) / NUM_SAMPLES ))
+#   (( stride < 1 )) && stride=1
+#
+#   echo "Sampling ${NUM_SAMPLES} plans from ${TOTAL_FILES} total (computed stride=${stride})"
+#   declare -a STRIDED_FILES=()
+#   for ((i=TOTAL_FILES-1; i>=0; i-=stride)); do
+#     STRIDED_FILES+=("${FREQ_FILES[$i]}")
+#   done
+#
+#   # # Ensure the smallest (first) freqs plan is included
+#   # if [[ ${#STRIDED_FILES[@]} -eq 0 || "${STRIDED_FILES[-1]}" != "${FREQ_FILES[0]}" ]]; then
+#   #   STRIDED_FILES+=("${FREQ_FILES[0]}")
+#   # fi
+#
+#   FREQ_FILES=("${STRIDED_FILES[@]}")
+# fi
 
-echo "Using freqs directory: $FREQS_DIR"
+# # Optionally start from a specific plan (resume). Default to freqs_pipeline_02442.py.
+# # Override with START_AT env var (set to empty to disable).
+# START_AT=${START_AT:-freqs_pipeline_02442.py}
+# if [[ -n "$START_AT" ]]; then
+#   start_idx=-1
+#   for i in "${!FREQ_FILES[@]}"; do
+#     if [[ "$(basename "${FREQ_FILES[$i]}")" == "$START_AT" ]]; then
+#       start_idx=$i; break
+#     fi
+#   done
+#   if (( start_idx >= 0 )); then
+#     echo "Resuming from $START_AT (index $start_idx of ${#FREQ_FILES[@]})"
+#     FREQ_FILES=("${FREQ_FILES[@]:$start_idx}")
+#   else
+#     echo "START_AT '$START_AT' not found in selected plans; running full selection" >&2
+#   fi
+# fi
+
 echo "Running ${#FREQ_FILES[@]} selected plans"
+
+# # Backup YAML and restore on exit
+# BACKUP_YAML="${YAML_FILE}.bak"
+# cp "$YAML_FILE" "$BACKUP_YAML"
+# restore_yaml() { mv -f "$BACKUP_YAML" "$YAML_FILE" || true; }
+# trap restore_yaml EXIT
+
+SLEEP_BEFORE_TRAIN=${SLEEP_BEFORE_TRAIN:-5}
 
 for f in "${FREQ_FILES[@]}"; do
   base=$(basename "$f")
+  iter_id=${base#freqs_pipeline_}
+  iter_id=${iter_id%.py}
   run_id=${base%.py}
   ts=$(date +%Y%m%d_%H%M%S)
 
-  echo "=== Running plan: $base ==="
+  # Extract numeric plan id from freqs_pipeline_<id>.py and create per-plan
+  # Kareus output directory up front (similar to run_one_config_kareus.sh).
+  plan_id="${run_id#freqs_pipeline_}"
+  plan_output_dir="${KAREUS_ROOT}/${plan_id}"
+  mkdir -p "${plan_output_dir}"
 
-  # Start PFO server in background (same style as run_one_config.sh)
+  # Update YAML solution_path and parallelism/batch settings (as in run_one_config.sh)
+  python - "$YAML_FILE" "$config" <<'PY'
+import re
+import sys
+from omegaconf import OmegaConf
+
+yaml_path, cfg_str = sys.argv[1], sys.argv[2]
+
+cfg = OmegaConf.load(yaml_path)
+
+if "model" not in cfg:
+    raise SystemExit(f"'model' section not found in {yaml_path}")
+
+# Parse config string: cp1_tp8_bs8_seq4096
+m = re.match(r"^cp(\d+)_tp(\d+)_bs(\d+)_seq(\d+)$", cfg_str)
+if not m:
+    raise SystemExit(
+        f"Config string '{cfg_str}' is not in expected format 'cp<cp>_tp<tp>_bs<mb>_seq<seq>'"
+    )
+
+cp, tp, mb, seq = map(int, m.groups())
+
+# Trainer and monitoring settings (align with run_one_config.sh)
+cfg.trainer.max_steps = 30
+cfg.trainer.log_every_n_steps = 40
+cfg.trainer.val_check_interval = 40
+
+cfg.model.enable_megatron_timers = False
+cfg.model.enable_zeus_monitor = True
+cfg.model.enable_power_monitor = True
+cfg.model.enable_perseus_optimizer = True
+cfg.model.enable_kareus_scheduler = False
+
+cfg.model.context_parallel_size = cp
+cfg.model.tensor_model_parallel_size = tp
+cfg.model.micro_batch_size = mb
+cfg.model.encoder_seq_length = seq
+
+# global_batch_size = micro_batch_size * 8 (as requested)
+cfg.model.global_batch_size = mb * 8
+
+OmegaConf.save(cfg, yaml_path)
+PY
+
+  # Start server in background for this freqs plan (same style as run_one_config_kareus.sh)
   export ZEUS_PFO_SCHEDULER=PointSolution3D
   export ZEUS_PFO_SCHEDULER_ARGS="{\"solution_path\": \"$f\"}"
-  export MASTER_ADDR="${HOST}"
 
-  server_log="$LOG_DIR/${run_id}_server_${ts}.log"
-  echo "Starting PFO server for $base on ${HOST}:${PORT} (log: $server_log)"
+  # Store server log inside the per-plan Kareus directory
+  server_log="${plan_output_dir}/pfo_server_${ts}.log"
+  echo "Starting PFO server for $base on ${MASTER_ADDR}:${PORT} (log: $server_log)"
   uvicorn zeus.optimizer.pipeline_frequency.server.router:app \
-    --host "$HOST" \
+    --host "${MASTER_ADDR}" \
     --port "$PORT" \
     > "$server_log" 2>&1 &
   server_pid=$!
 
-  # Wait briefly for server to become ready
-  sleep 3
+  # Wait for server to become ready
+  sleep "$SLEEP_BEFORE_TRAIN"
 
-  train_log="$LOG_DIR/${run_id}_train_${ts}.log"
-  echo "Starting training via run.sh (node_rank=${NODE_RANK}) (log: $train_log)"
-  # Run training via unified launcher; hydra config within script controls toggles
-  if ! bash "${SCRIPT_DIR}/run.sh" "${NODE_RANK}" > "$train_log" 2>&1; then
-    echo "Training failed for $base. See $train_log" >&2
+  echo "MASTER_ADDR=${MASTER_ADDR}"
+  echo "MASTER_PORT=${MASTER_PORT}"
+  echo "Starting training via run.sh (node_rank=${NODE_RANK})"
+  # Do not capture training logs to a separate file; let them print to stdout/stderr.
+  if ! bash "$SCRIPT_DIR/run.sh" "${NODE_RANK}"; then
+    echo "Training failed for $base (node_rank=${NODE_RANK})" >&2
   fi
 
   echo "Stopping server PID $server_pid"
   kill $server_pid >/dev/null 2>&1 || true
   wait $server_pid 2>/dev/null || true
 
-  # After training, organize NeMo outputs for this frequency plan
-  # Extract numeric frequency_plan id from freqs_pipeline_<id>.py
-  plan_id="${run_id#freqs_pipeline_}"
-
   if [[ "${NODE_RANK}" == "0" ]]; then
-    mkdir -p "${NEMO_DIR}/${plan_id}/timers"
-    mv "${NEMO_ROOT}"/2025* "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
-    mv "${NEMO_ROOT}/timers/"* "${NEMO_DIR}/${plan_id}/timers" 2>/dev/null || true
-    mv "${NEMO_ROOT}"/*.txt "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
+    chmod a+w "${plan_output_dir}"
+
+    # Move time-stamped experiment directories (e.g., 20YY-*) contents, then delete source dirs
+    if compgen -G "${NEMO_ROOT}/20*" > /dev/null; then
+      shopt -s nullglob dotglob
+      for d in "${NEMO_ROOT}"/20*; do
+        if [[ -d "$d" ]]; then
+          contents=("$d"/*)
+          if (( ${#contents[@]} )); then
+            mv "${contents[@]}" "${plan_output_dir}/"
+          fi
+          rm -rf "$d"
+        fi
+      done
+      shopt -u nullglob dotglob
+    fi
+
+    # Move any text logs from the default experiments dir
+    if compgen -G "${NEMO_ROOT}/*.txt" > /dev/null; then
+      mv "${NEMO_ROOT}"/*.txt "${plan_output_dir}/" 2>/dev/null || true
+    fi
   else
-    mkdir -p "${NEMO_DIR}/${plan_id}"
-    mv "${NEMO_ROOT}/timers" "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
-    mv "${NEMO_ROOT}"/*.txt "${NEMO_DIR}/${plan_id}/" 2>/dev/null || true
+    # On node 1 we only expect text logs under the NeMo root
+    if compgen -G "${NEMO_ROOT}/*.txt" > /dev/null; then
+      mv "${NEMO_ROOT}"/*.txt "${plan_output_dir}/" 2>/dev/null || true
+    fi
+
+    # Sync node 1 results for this plan back to node 0, mirroring run_one_config_kareus.sh
+    remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/perseus/frontier/${plan_id}"
+    echo "Syncing plan ${plan_id} results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
+
+    # ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
+    sleep 5
+    scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${plan_output_dir}/"* "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
   fi
 
-  echo "Completed plan: $base (stored under ${NEMO_DIR}/${plan_id})"
+  echo "Completed plan: $base (stored under ${plan_output_dir})"
   echo
-
 done
 
-if [[ "${NODE_RANK}" == "0" ]]; then
-  FRONTIER_DIR="${NEMO_DIR}/frontier/node0"
-else
-  FRONTIER_DIR="${NEMO_DIR}/frontier/node1"
-fi
-
-mkdir -p "${FRONTIER_DIR}"
-
-# Move all per-plan directories under this config into the frontier dir,
-# keeping the per-plan structure (and leaving 'frontier' itself in place).
-for d in "${NEMO_DIR}"/*; do
-  base_d="$(basename "$d")"
-  [[ "$base_d" == "frontier" ]] && continue
-  mv "$d" "${FRONTIER_DIR}/" 2>/dev/null || true
-done
-
-echo "All runs completed on node${NODE_RANK}. Frontier runs saved under ${FRONTIER_DIR}"
-echo "Logs in $LOG_DIR"
-
-# When running on node 1, sync frontier results back to node 0
-if [[ "${NODE_RANK}" == "1" ]]; then
-  remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/frontier/"
-  echo "Syncing frontier results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
-
-  scp -i "${SSH_KEY_PATH:-$HOME/.ssh/id_rsa}" -r "${FRONTIER_DIR}/" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
-fi
+echo "All runs completed on node${NODE_RANK}. Per-plan Kareus runs saved under ${KAREUS_ROOT}"
+# echo "Logs in $LOG_DIR"
