@@ -39,7 +39,7 @@ fi
 
 # Logical model/config identifiers used to locate Kareus solutions
 model_name="llama3.2_3b"
-config="cp2_tp4_bs16_seq4096"
+config="cp2_tp4_bs8_seq8192"
 
 # Nemo experiment name (directory under nemo_experiments/)
 # For LLaMA 3.2 3B this is typically "megatron_llama_3_2_3b"

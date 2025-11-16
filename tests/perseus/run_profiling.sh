@@ -34,7 +34,7 @@ fi
 
 # Logical model/config identifiers
 model_name="llama3.2_3b"
-config="cp1_tp8_bs8_seq4096"
+config="cp2_tp4_bs8_seq4096"
 
 # Nemo experiment name (directory under nemo_experiments/)
 nemo_model_name="megatron_llama_3_2_3b"
@@ -169,6 +169,6 @@ if [[ "${NODE_RANK}" == "1" ]]; then
 
     remote_dir_abs="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/profiling/"
     sleep 5
-    # Copy the local node1 directory into the remote profiling directory (node0 pre-creates it)
-    scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${target_dir}" "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir_abs}"
+    # Copy contents into the pre-created remote node1 directory to avoid setstat on dir itself
+    scp -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" -r "${target_dir}/." "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir_abs%/}/node1/"
 fi
