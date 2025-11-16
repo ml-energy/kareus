@@ -23,9 +23,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODEL_NAME="llama3.2_3b"
-CONFIG="cp2_tp4_bs16_seq4096"
+CONFIG="cp2_tp4_bs8_seq4096"
 
-DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/${MODEL_NAME}/${CONFIG}/perseus_results"
+# DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/${MODEL_NAME}/${CONFIG}/perseus_results"
+nemo_model_name="megatron_llama_3_2_3b"
+DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${CONFIG}/perseus_results"
 PERSEUS_DIR="${1:-$DEFAULT_PERSEUS_DIR}"
 
 if [[ ! -d "$PERSEUS_DIR" ]]; then
@@ -33,7 +35,7 @@ if [[ ! -d "$PERSEUS_DIR" ]]; then
   exit 1
 fi
 
-NUM_SAMPLES=${NUM_SAMPLES:-10}
+NUM_SAMPLES=${NUM_SAMPLES:-15}
 
 echo "Using perseus results directory: $PERSEUS_DIR"
 echo "NUM_SAMPLES=${NUM_SAMPLES}"
@@ -132,9 +134,9 @@ fi
 TARGET_DIR="${PERSEUS_DIR}/../frontier"
 mkdir -p "${TARGET_DIR}"
 
-echo "Moving ${#FREQ_FILES[@]} freqs plans to ${TARGET_DIR}"
+echo "Copying ${#FREQ_FILES[@]} freqs plans to ${TARGET_DIR}"
 for f in "${FREQ_FILES[@]}"; do
-  mv "$f" "${TARGET_DIR}/"
+  cp "$f" "${TARGET_DIR}/"
 done
 
 # echo "Moving ${#SCHED_FILES[@]} scheds plans to ${TARGET_DIR}"

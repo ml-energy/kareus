@@ -37,8 +37,9 @@ fi
 # User configuration (edit as needed) #
 ########################################
 
-model_name="llama3.2_3b"
-config="cp2_tp4_bs16_seq4096"
+# Logical model/config identifiers used to locate Perseus frontier freqs
+model_name="${MODEL_NAME:-llama3.2_3b}"
+config="${CONFIG:-cp2_tp4_bs16_seq4096}"
 
 # Nemo experiment name (directory under nemo_experiments/)
 nemo_model_name="megatron_llama_3_2_3b"
@@ -47,7 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 NEMO_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
 
-# Default results directory is per-config perseus_results; can be overridden by arg2
+# Default results directory is per-config frontier; can be overridden by arg2
 DEFAULT_RESULTS_DIR="${SCRIPT_DIR}/${model_name}/${config}/frontier"
 RESULTS_DIR=${2:-$DEFAULT_RESULTS_DIR}
 
@@ -70,7 +71,7 @@ MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 # Kareus output root where per-plan NeMo outputs will be collected
-KAREUS_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/perseus/frontier"
+KAREUS_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/frontier"
 mkdir -p "${KAREUS_ROOT}"
 
 # LOG_DIR="$SCRIPT_DIR/logs_pfo_runs"
@@ -183,7 +184,7 @@ cfg.trainer.val_check_interval = 40
 
 cfg.model.enable_megatron_timers = False
 cfg.model.enable_zeus_monitor = True
-cfg.model.enable_power_monitor = True
+cfg.model.enable_power_monitor = False
 cfg.model.enable_perseus_optimizer = True
 cfg.model.enable_kareus_scheduler = False
 
@@ -198,21 +199,28 @@ cfg.model.global_batch_size = mb * 8
 OmegaConf.save(cfg, yaml_path)
 PY
 
-  # Start server in background for this freqs plan (same style as run_one_config_kareus.sh)
+  # Configure PFO scheduler for this freqs plan. The PFO server itself should
+  # only be started on node 0; node 1 simply waits for it and runs training.
   export ZEUS_PFO_SCHEDULER=PointSolution3D
   export ZEUS_PFO_SCHEDULER_ARGS="{\"solution_path\": \"$f\"}"
 
-  # Store server log inside the per-plan Kareus directory
-  server_log="${plan_output_dir}/pfo_server_${ts}.log"
-  echo "Starting PFO server for $base on ${MASTER_ADDR}:${PORT} (log: $server_log)"
-  uvicorn zeus.optimizer.pipeline_frequency.server.router:app \
-    --host "${MASTER_ADDR}" \
-    --port "$PORT" \
-    > "$server_log" 2>&1 &
-  server_pid=$!
+  if [[ "${NODE_RANK}" == "0" ]]; then
+    # Node 0: start PFO server in background (same style as run_one_config_kareus.sh)
+    server_log="${plan_output_dir}/pfo_server_${ts}.log"
+    echo "Starting PFO server for $base on ${MASTER_ADDR}:${PORT} (log: $server_log)"
+    uvicorn zeus.optimizer.pipeline_frequency.server.router:app \
+      --host "${MASTER_ADDR}" \
+      --port "$PORT" \
+      > "$server_log" 2>&1 &
+    server_pid=$!
 
-  # Wait for server to become ready
-  sleep "$SLEEP_BEFORE_TRAIN"
+    # Wait for server to become ready
+    sleep "$SLEEP_BEFORE_TRAIN"
+  else
+    # Node 1: just wait for node 0's PFO server to be ready
+    echo "Node 1 waiting ${SLEEP_BEFORE_TRAIN}s for PFO server on node 0..."
+    sleep "$SLEEP_BEFORE_TRAIN"
+  fi
 
   echo "MASTER_ADDR=${MASTER_ADDR}"
   echo "MASTER_PORT=${MASTER_PORT}"
@@ -222,9 +230,11 @@ PY
     echo "Training failed for $base (node_rank=${NODE_RANK})" >&2
   fi
 
-  echo "Stopping server PID $server_pid"
-  kill $server_pid >/dev/null 2>&1 || true
-  wait $server_pid 2>/dev/null || true
+  if [[ "${NODE_RANK}" == "0" ]]; then
+    echo "Stopping server PID $server_pid"
+    kill $server_pid >/dev/null 2>&1 || true
+    wait $server_pid 2>/dev/null || true
+  fi
 
   if [[ "${NODE_RANK}" == "0" ]]; then
     chmod a+w "${plan_output_dir}"
@@ -255,7 +265,7 @@ PY
     fi
 
     # Sync node 1 results for this plan back to node 0, mirroring run_one_config_kareus.sh
-    remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/perseus/frontier/${plan_id}"
+    remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/frontier/${plan_id}"
     echo "Syncing plan ${plan_id} results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
     # ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
