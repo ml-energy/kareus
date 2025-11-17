@@ -70,7 +70,7 @@ MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 # Kareus output root where per-plan NeMo outputs will be collected
-KAREUS_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/nanobatch/frontier"
+KAREUS_ROOT="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${config}/nanobatch_perseus/frontier"
 mkdir -p "${KAREUS_ROOT}"
 
 # LOG_DIR="$SCRIPT_DIR/logs_pfo_runs"
@@ -151,6 +151,12 @@ for f in "${FREQ_FILES[@]}"; do
   # Extract numeric plan id from freqs_pipeline_<id>.py and create per-plan
   # Kareus output directory up front (similar to run_one_config_kareus.sh).
   plan_id="${run_id#freqs_pipeline_}"
+  # START_PLAN_ID="01338"
+  # if [[ "${plan_id}" < "${START_PLAN_ID}" ]]; then
+  #   echo "Skipping plan ${plan_id} (before START_PLAN_ID=${START_PLAN_ID})"
+  #   continue
+  # fi
+
   plan_output_dir="${KAREUS_ROOT}/${plan_id}"
   mkdir -p "${plan_output_dir}"
 
@@ -264,7 +270,7 @@ PY
     fi
 
     # Sync node 1 results for this plan back to node 0, mirroring run_one_config_kareus.sh
-    remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/nanobatch/frontier/${plan_id}"
+    remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config}/nanobatch_perseus/frontier/${plan_id}"
     echo "Syncing plan ${plan_id} results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
     # ssh -i "${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
@@ -273,7 +279,6 @@ PY
   fi
 
   echo "Completed plan: $base (stored under ${plan_output_dir})"
-  echo
 done
 
 echo "All runs completed on node${NODE_RANK}. Per-plan Kareus runs saved under ${KAREUS_ROOT}"
