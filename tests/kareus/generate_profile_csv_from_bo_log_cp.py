@@ -151,9 +151,9 @@ def _read_bo_jsonl(
                 time_val = float(row["time_s"])
                 energy_val = float(row["energy_j"])  # already averaged per device in writer
 
-                # Filter out specific overlap combination for qkv partitions
-                if partition.startswith("qkv") and overlap_start == 4 and overlap_end == 5:
-                    continue
+                # # Filter out specific overlap combination for qkv partitions
+                # if partition.startswith("qkv") and overlap_start == 4 and overlap_end == 5:
+                #     continue
 
                 key = (overlap_start, overlap_end, sm, block)
                 value = (time_val, energy_val)

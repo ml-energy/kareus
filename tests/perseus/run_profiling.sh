@@ -33,7 +33,7 @@ fi
 ########################################
 
 # Logical model / config identifiers
-MODEL_NAME="${MODEL_NAME:-llama3.2_3b}"
+MODEL_NAME="${MODEL_NAME:-qwen3_1.7b}"
 config="${CONFIG:-cp2_tp4_bs8_seq4096}"
 
 case "${MODEL_NAME}" in

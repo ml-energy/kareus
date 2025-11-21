@@ -414,7 +414,7 @@ def main(
                 profile_csv.write(f"{stage},forward,{frequency},{'-'.join(map(str, attn_config))},{'-'.join(map(str, mlp_config))},{fwd_time},{fwd_energy}\n")
 
         # Backward
-        bwd_pareto = pareto_optimal(backward_points_by_stage[stage], p2p_power, 0.01)
+        bwd_pareto = pareto_optimal(backward_points_by_stage[stage], p2p_power)
         print(f"generated {len(bwd_pareto)}/{len(backward_points_by_stage[stage])} Pareto-optimal backward candidates for stage {stage}")
         if use_activation_checkpointing:
             for (frequency, rec_attn_cfg, rec_mlp_cfg, bwd_attn_cfg, bwd_mlp_cfg), (bwd_time, bwd_energy) in bwd_pareto:
