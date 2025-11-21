@@ -34,9 +34,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 configs=(
-  cp1_tp8_bs8_seq4096
-  cp1_tp8_bs8_seq4096
-  cp1_tp8_bs16_seq4096
+  # cp1_tp8_bs8_seq4096
+  # cp1_tp8_bs8_seq8192
+  # cp1_tp8_bs16_seq4096
   cp2_tp4_bs8_seq4096
   cp2_tp4_bs8_seq8192
   cp2_tp4_bs16_seq4096

@@ -33,11 +33,13 @@ PORT=${3:-7787}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-model_name="llama3.2_3b"
+model_name="${MODEL_NAME:-qwen3_1.7b}"
 
 configs=(
   cp1_tp8_bs8_seq4096
   cp2_tp4_bs8_seq4096
+  cp1_tp8_bs8_seq8192
+  cp1_tp8_bs16_seq4096
   cp2_tp4_bs8_seq8192
   cp2_tp4_bs16_seq4096
 )

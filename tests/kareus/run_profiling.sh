@@ -53,7 +53,7 @@ fi
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/kareus}"
 # MASTER_ADDR should point to node 0; use same default as run.sh if not set
-MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
+MASTER_ADDR="${MASTER_ADDR:-172.31.35.92}"
 
 ########################################
 # Update YAML with parsed config       #

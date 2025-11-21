@@ -38,16 +38,18 @@ fi
 ########################################
 
 # Logical model/config identifiers used to locate Kareus solutions
-model_name="llama3.2_3b"
-config="cp2_tp4_bs8_seq8192"
+# model_name="llama3.2_3b"
+model_name="${MODEL_NAME:-qwen3_1.7b}"
+config="cp1_tp8_bs8_seq4096"
 
 # Nemo experiment name (directory under nemo_experiments/)
 # For LLaMA 3.2 3B this is typically "megatron_llama_3_2_3b"
-nemo_model_name="megatron_llama_3_2_3b"
+# nemo_model_name="megatron_llama_3_2_3b"
+nemo_model_name="megatron_qwen3_1p7b"
 
 # Node-0 address (IP or hostname) that all nodes use as MASTER_ADDR
 # You MUST set this before running (can be overridden from environment)
-MASTER_ADDR="${MASTER_ADDR:-172.31.33.74}"
+MASTER_ADDR="${MASTER_ADDR:-172.31.35.92}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 # Remote (node 0) path to sync collected results into, from node 1
