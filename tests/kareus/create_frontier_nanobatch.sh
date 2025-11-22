@@ -22,10 +22,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-MODEL_NAME="llama3.2_3b"
+MODEL_NAME="qwen3_1.7b"
 CONFIG="cp2_tp4_bs8_seq8192"
 
-DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/${MODEL_NAME}/${CONFIG}/nanobatch/perseus_results"
+# DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/${MODEL_NAME}/${CONFIG}/nanobatch_perserus/perseus_results"
+DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/nemo_experiments/megatron_qwen3_1p7b/${CONFIG}/nanobatch_perseus/perseus_results"
 PERSEUS_DIR="${1:-$DEFAULT_PERSEUS_DIR}"
 
 if [[ ! -d "$PERSEUS_DIR" ]]; then

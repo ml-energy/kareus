@@ -219,10 +219,11 @@ def main() -> None:
     parser.add_argument(
         "--frontier_dir",
         type=str,
-        default=str(
-            Path(__file__).parent
-            / "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/frontier"
-        ),
+        # default=str(
+        #     Path(__file__).parent
+        #     / "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/frontier"
+        # ),
+        default="",
         help="Primary directory containing run subdirectories with Zeus monitor logs",
     )
     parser.add_argument(
@@ -230,7 +231,7 @@ def main() -> None:
         type=str,
         default=str(
             "/workspaces/Kareus/tests/kareus/" \
-            "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/kareus/frontier"
+            "nemo_experiments/megatron_qwen3_1p7b/cp2_tp4_bs16_seq4096/kareus/frontier"
         ),
         # default="",
         help="Optional second directory to plot alongside the first",
@@ -238,11 +239,11 @@ def main() -> None:
     parser.add_argument(
         "--frontier_dir3",
         type=str,
-        default=str(
-            "/workspaces/Kareus/tests/kareus/" \
-            "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/nanobatch_perseus/frontier"
-        ),
-        # default="",
+        # default=str(
+        #     "/workspaces/Kareus/tests/kareus/" \
+        #     "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/nanobatch_perseus/frontier"
+        # ),
+        default="",
         help="Optional third directory to plot alongside the first two",
     )
     parser.add_argument(
@@ -266,18 +267,26 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=str,
+        # default=str(
+        #     Path(__file__).parent
+        #     / "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/frontier/energy_time.png"
+        # ),
         default=str(
-            Path(__file__).parent
-            / "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/frontier/energy_time.png"
+            "/workspaces/Kareus/tests/kareus/" \
+            "nemo_experiments/megatron_qwen3_1p7b/cp2_tp4_bs16_seq4096/kareus/frontier"
         ),
         help="Path to save the Energy vs Time figure",
     )
     parser.add_argument(
         "--output_effective",
         type=str,
+        # default=str(
+        #     Path(__file__).parent
+        #     / "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/frontier/energy_time_effective.png"
+        # ),
         default=str(
-            Path(__file__).parent
-            / "nemo_experiments/megatron_llama_3_2_3b/cp2_tp4_bs8_seq4096/frontier/energy_time_effective.png"
+            "/workspaces/Kareus/tests/kareus/" \
+            "nemo_experiments/megatron_qwen3_1p7b/cp2_tp4_bs16_seq4096/kareus/frontier"
         ),
         help="Path to save the Effective Energy vs Time figure",
     )
@@ -295,12 +304,29 @@ def main() -> None:
     out_path = Path(args.output)
     out_path_eff = Path(args.output_effective)
 
+    # Normalize output paths: if a directory is provided, append default filenames
+    if out_path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+        out_path = out_path / "energy_time.png"
+    if out_path_eff.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+        out_path_eff = out_path_eff / "energy_time_effective.png"
+
     datasets: List[Tuple[str, List[Tuple[str, float, float]]]] = []
     pts1 = collect_points(frontier_dir)
     # pts1_sorted = sorted(filter_pareto(pts1), key=lambda t: t[1])
     pts1_sorted = sorted(pts1, key=lambda t: t[1])
     if len(pts1_sorted) > 0:
         datasets.append((args.label1, pts1_sorted))
+        best = pts1_sorted[0]
+        second = pts1_sorted[1] if len(pts1_sorted) > 1 else None
+        msg = (
+            f"[dir] {args.label1 or str(frontier_dir)} ({frontier_dir}) -> "
+            f"fastest: {best[1]:.4f}s, energy: {best[2]:.2f}J (run: {best[0]})"
+        )
+        if second is not None:
+            msg += (
+                f", second: {second[1]:.4f}s, energy: {second[2]:.2f}J (run: {second[0]})"
+            )
+        print(msg)
     else:
         print(f"No valid runs found under {frontier_dir}")
 
@@ -311,6 +337,17 @@ def main() -> None:
         if len(pts2_sorted) > 0:
             # Append a single (label, points) tuple
             datasets.append((args.label2 or str(frontier_dir2), pts2_sorted))
+            best = pts2_sorted[0]
+            second = pts2_sorted[1] if len(pts2_sorted) > 1 else None
+            msg = (
+                f"[dir] {args.label2 or str(frontier_dir2)} ({frontier_dir2}) -> "
+                f"fastest: {best[1]:.4f}s, energy: {best[2]:.2f}J (run: {best[0]})"
+            )
+            if second is not None:
+                msg += (
+                    f", second: {second[1]:.4f}s, energy: {second[2]:.2f}J (run: {second[0]})"
+                )
+            print(msg)
         else:
             print(f"No valid runs found under {frontier_dir2}")
 
@@ -321,6 +358,17 @@ def main() -> None:
         if len(pts3_sorted) > 0:
             # Append a single (label, points) tuple
             datasets.append((args.label3 or str(frontier_dir3), pts3_sorted))
+            best = pts3_sorted[0]
+            second = pts3_sorted[1] if len(pts3_sorted) > 1 else None
+            msg = (
+                f"[dir] {args.label3 or str(frontier_dir3)} ({frontier_dir3}) -> "
+                f"fastest: {best[1]:.4f}s, energy: {best[2]:.2f}J (run: {best[0]})"
+            )
+            if second is not None:
+                msg += (
+                    f", second: {second[1]:.4f}s, energy: {second[2]:.2f}J (run: {second[0]})"
+                )
+            print(msg)
         else:
             print(f"No valid runs found under {frontier_dir3}")
 
@@ -329,11 +377,11 @@ def main() -> None:
         return
 
     plot_energy_time_multi(datasets, out_path)
-    # Also plot effective energy with provided p2p power
-    try:
-        plot_effective_energy_time_multi(datasets, float(args.p2p_power), out_path_eff)
-    except Exception as e:
-        print(f"[warn] Failed to plot effective energy figure: {e}")
+    # # Also plot effective energy with provided p2p power
+    # try:
+    #     plot_effective_energy_time_multi(datasets, float(args.p2p_power), out_path_eff)
+    # except Exception as e:
+    #     print(f"[warn] Failed to plot effective energy figure: {e}")
 
 
 if __name__ == "__main__":

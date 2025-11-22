@@ -32,12 +32,24 @@ fi
 # User configuration (edit as needed) #
 ########################################
 
-# Logical model/config identifiers
-model_name="llama3.2_3b"
-config="cp1_tp8_bs8_seq4096"
+# Logical model / config identifiers
+MODEL_NAME="${MODEL_NAME:-qwen3_1.7b}"
+config="${CONFIG:-cp2_tp4_bs8_seq4096}"
 
-# Nemo experiment name (directory under nemo_experiments/)
-nemo_model_name="megatron_llama_3_2_3b"
+case "${MODEL_NAME}" in
+  llama3.2_3b)
+    model_name="llama3.2_3b"
+    nemo_model_name="megatron_llama_3_2_3b"
+    ;;
+  qwen3_1.7b)
+    model_name="qwen3_1.7b"
+    nemo_model_name="megatron_qwen3_1p7b"
+    ;;
+  *)
+    echo "ERROR: Unsupported MODEL_NAME='${MODEL_NAME}'. Supported: llama3.2_3b, qwen3_1.7b" >&2
+    exit 1
+    ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"

@@ -201,7 +201,7 @@ cfg.trainer.val_check_interval = 40
 
 cfg.model.enable_megatron_timers = False
 cfg.model.enable_zeus_monitor = True
-cfg.model.enable_power_monitor = False
+cfg.model.enable_power_monitor = True
 cfg.model.enable_perseus_optimizer = True
 cfg.model.enable_kareus_scheduler = False
 

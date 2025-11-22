@@ -38,7 +38,7 @@ fi
 ########################################
 
 # Logical model/config identifiers used to locate Perseus frontier freqs
-MODEL_NAME="${MODEL_NAME:-llama3.2_3b}"
+MODEL_NAME="${MODEL_NAME:-qwen3_1.7b}"
 config="${CONFIG:-cp2_tp4_bs16_seq4096}"
 
 case "${MODEL_NAME}" in
@@ -196,7 +196,7 @@ cfg.trainer.val_check_interval = 40
 
 cfg.model.enable_megatron_timers = False
 cfg.model.enable_zeus_monitor = True
-cfg.model.enable_power_monitor = False
+cfg.model.enable_power_monitor = True
 cfg.model.enable_perseus_optimizer = True
 cfg.model.enable_kareus_scheduler = False
 
