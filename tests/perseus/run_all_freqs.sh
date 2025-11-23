@@ -164,6 +164,12 @@ for f in "${FREQ_FILES[@]}"; do
   # Extract numeric plan id from freqs_pipeline_<id>.py and create per-plan
   # Kareus output directory up front (similar to run_one_config_kareus.sh).
   plan_id="${run_id#freqs_pipeline_}"
+  # START_PLAN_ID="01506"
+  # if [[ "${plan_id}" < "${START_PLAN_ID}" ]]; then
+  #   echo "Skipping plan ${plan_id} (before START_PLAN_ID=${START_PLAN_ID})"
+  #   continue
+  # fi
+
   plan_output_dir="${KAREUS_ROOT}/${plan_id}"
   mkdir -p "${plan_output_dir}"
 

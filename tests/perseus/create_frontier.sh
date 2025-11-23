@@ -22,11 +22,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-MODEL_NAME="llama3.2_3b"
-CONFIG="cp2_tp4_bs8_seq4096"
+MODEL_NAME="qwen3_1.7b"
+CONFIG="cp2_tp4_bs16_seq4096"
 
 # DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/${MODEL_NAME}/${CONFIG}/perseus_results"
-nemo_model_name="megatron_llama_3_2_3b"
+nemo_model_name="megatron_qwen3_1p7b"
 DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}/${CONFIG}/perseus_results"
 PERSEUS_DIR="${1:-$DEFAULT_PERSEUS_DIR}"
 

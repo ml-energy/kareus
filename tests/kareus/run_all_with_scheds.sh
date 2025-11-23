@@ -37,8 +37,8 @@ fi
 # User configuration (edit as needed) #
 ########################################
 
-MODEL_NAME="${MODEL_NAME:-llama3.2_3b}"
-config="${CONFIG:-cp2_tp4_bs16_seq4096}"
+MODEL_NAME="${MODEL_NAME:-qwen3_1.7b}"
+config="${CONFIG:-cp2_tp4_bs8_seq4096}"
 
 case "${MODEL_NAME}" in
   llama3.2_3b)
@@ -163,7 +163,7 @@ for f in "${FREQ_FILES[@]}"; do
   # Extract numeric plan id from freqs_pipeline_<id>.py and create per-plan
   # Kareus output directory up front (similar to run_one_config_kareus.sh).
   plan_id="${run_id#freqs_pipeline_}"
-  # START_PLAN_ID="04695"
+  # START_PLAN_ID="01799"
   # if [[ "${plan_id}" < "${START_PLAN_ID}" ]]; then
   #   echo "Skipping plan ${plan_id} (before START_PLAN_ID=${START_PLAN_ID})"
   #   continue
