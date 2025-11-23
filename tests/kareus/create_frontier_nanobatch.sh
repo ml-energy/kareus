@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODEL_NAME="qwen3_1.7b"
-CONFIG="cp2_tp4_bs8_seq8192"
+CONFIG="cp1_tp8_bs8_seq8192"
 
 # DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/${MODEL_NAME}/${CONFIG}/nanobatch_perserus/perseus_results"
 DEFAULT_PERSEUS_DIR="${SCRIPT_DIR}/nemo_experiments/megatron_qwen3_1p7b/${CONFIG}/nanobatch_perseus/perseus_results"
@@ -130,7 +130,7 @@ fi
 # Move selected plans into perseus_results10  #
 ###############################################
 
-TARGET_DIR="${PERSEUS_DIR}/../nanobatch_frontier"
+TARGET_DIR="${SCRIPT_DIR}/${MODEL_NAME}/${CONFIG}/nanobatch_frontier"
 mkdir -p "${TARGET_DIR}"
 
 echo "Copying ${#FREQ_FILES[@]} freqs plans to ${TARGET_DIR}"
