@@ -1,5 +1,5 @@
 """
-Common configuration for fuser test scripts.
+Common configuration for fuser test scripts (Llama 3.1 70B-style config).
 
 This module provides a centralized way to create TransformerConfig instances
 with consistent parameters across all fuser test scripts.
@@ -13,38 +13,29 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 class FuserTestConfig:
     """Configuration factory for fuser test scripts."""
 
-    MODEL_NAME = "qwen3_1.7b"
+    MODEL_NAME = "llama3.3_70b"
     
-    # Default model dimensions (Llama-like)
-    HIDDEN_SIZE = 2048
-    NUM_ATTENTION_HEADS = 16
-    HEAD_DIM = 128
-    NUM_QUERY_GROUPS = 8  # For grouped query attention
-    FFN_HIDDEN_SIZE = 6144
-    VOCAB_SIZE = 151936
-    DROP_RATE = 0.5
-    NUM_LAYERS = 28
+    # Model dimensions from Llama 3.3 70B config
+    HIDDEN_SIZE = 8192
+    NUM_ATTENTION_HEADS = 64
+    HEAD_DIM = 128  # hidden_size / num_attention_heads
+    NUM_QUERY_GROUPS = 8  # num_key_value_heads (GQA)
+    FFN_HIDDEN_SIZE = 28672  # intermediate_size
+    VOCAB_SIZE = 128256
+    DROP_RATE = 0.0  # attention_dropout from config
+    NUM_LAYERS = 80  # num_hidden_layers
     
     # Default test parameters
-    # DEFAULT_WORLD_SIZE = 2
-    DEFAULT_TENSOR_PARALLEL_SIZE = 4
-    DEFAULT_CONTEXT_PARALLEL_SIZE = 2
-    DEFAULT_BATCH_SIZE = 8
+    DEFAULT_TENSOR_PARALLEL_SIZE = 8
+    DEFAULT_CONTEXT_PARALLEL_SIZE = 1
+    DEFAULT_BATCH_SIZE = 2
     DEFAULT_SEQ_LENGTH = 4096
 
     DEFAULT_STAGES = 2
     DEFAULT_NUM_MICROBATCHES = 8
-    num_layers_in_first_pipeline_stage = 15
-    num_layers_in_last_pipeline_stage = 13
+    num_layers_in_first_pipeline_stage = 40
+    num_layers_in_last_pipeline_stage = 40
     
-    # Default Bayesian Optimization parameters
-    # BO_DEFAULT_N_INIT = 48
-    # BO_DEFAULT_BATCHES = 4
-    # BO_DEFAULT_ACQ_BATCH = 24
-
-    # Default communication SM count candidates for fuser comm kernels
-    # COMM_SM_VALUES = list(range(1, 21))
-
     # GPU p2p power (W) configuration
     P2P_POWER_W_BY_GPU = {
         'A40': 70.0,
@@ -67,7 +58,6 @@ class FuserTestConfig:
     def create_transformer_config(
         context_parallel_size: int = None,
         tensor_parallel_size: int = None,
-        # world_size: int,
         dtype: torch.dtype = torch.bfloat16,
         # Model architecture parameters
         num_layers: int = 1,
@@ -79,7 +69,7 @@ class FuserTestConfig:
         vocab_size: int = None,
         # Training parameters
         drop_rate: float = None,
-        layernorm_epsilon: float = 1e-5,
+        layernorm_epsilon: float = 1e-5,  # rms_norm_eps from config
         # Feature flags
         qk_layernorm: bool = False,
         apply_query_key_layer_scaling: bool = False,
@@ -87,9 +77,9 @@ class FuserTestConfig:
         flash_decode: bool = False,
         apply_rope_fusion: bool = True,
         gated_linear_unit: bool = True,  # Set to True for MLP tests
-        activation_func = F.silu,  # F.silu for MLP tests
+        activation_func = F.silu,  # F.silu for MLP tests (hidden_act: silu)
         bias_activation_fusion: bool = True,  # True for MLP tests
-        add_bias_linear: bool = False,
+        add_bias_linear: bool = False,  # attention_bias and mlp_bias are false
         # Cross entropy parameters (for postprocess tests)
         cross_entropy_loss_fusion: bool = True,
         cross_entropy_fusion_impl: str = 'te',
@@ -100,7 +90,8 @@ class FuserTestConfig:
         Create a TransformerConfig with common defaults for fuser tests.
         
         Args:
-            world_size: Number of processes for tensor parallelism
+            context_parallel_size: Context parallel size
+            tensor_parallel_size: Tensor parallel size
             dtype: Model data type
             **kwargs: Additional parameters to override defaults
             

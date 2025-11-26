@@ -46,7 +46,7 @@ from common_config import FuserTestConfig  # noqa: E402
 from megatron.core.transformer.enums import AttnMaskType  # noqa: E402
 
 # Ops used to construct full-batch attention and MLP fusers
-from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser  # noqa: E402
+from kareus.megatron.core.extensions.partition_fuser import PartitionFuser  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm  # noqa: E402
 from kareus.megatron.core.extensions.ops import QKVPostProcessOp  # noqa: E402
@@ -240,6 +240,7 @@ class TransformerLayerFuserBackwardProfiler:
         self.attn_fuser = PartitionFuser(
             ops=self.attn_comp_ops,
             comm_op_fwd=self.attn_comm_op,
+            comm_op_bwd=self.attn_comm_op,
             fuse_ops=False,
             is_first_attn=True,
             is_last_mlp=False,
@@ -310,6 +311,7 @@ class TransformerLayerFuserBackwardProfiler:
         self.mlp_fuser = PartitionFuser(
             ops=self.mlp_comp_ops,
             comm_op_fwd=self.mlp_comm_op,
+            comm_op_bwd=self.mlp_comm_op,
             fuse_ops=False,
             is_first_attn=False,
             is_last_mlp=True,
@@ -353,6 +355,8 @@ class TransformerLayerFuserBackwardProfiler:
                 comm_input=self.attn_allreduce_inputs,
                 comm_overlap_window=self.overlap_window,
                 comm_sm_configs=self.sm_configs,
+                comm_overlap_window_backward=self.overlap_window,
+                comm_sm_configs_backward=self.sm_configs,
             )
 
             mlp_hidden_states = _attn_allreduce
@@ -367,6 +371,8 @@ class TransformerLayerFuserBackwardProfiler:
                 comm_input=mlp_allreduce_inputs,
                 comm_overlap_window=self.overlap_window,
                 comm_sm_configs=self.sm_configs,
+                comm_overlap_window_backward=self.overlap_window,
+                comm_sm_configs_backward=self.sm_configs,
             )
             self.mlp_out = mlp_out
             self.mlp_out_residual = mlp_out_residual
@@ -478,6 +484,7 @@ def _freq_sweep_worker(rank: int, world_size: int, args: argparse.Namespace, mas
             profiler.profile(monitor)
 
             dist.barrier(group=tp_group)
+            break
             if rank == 0:
                 time.sleep(5.0)
             # # Reduce allocator growth between frequencies
