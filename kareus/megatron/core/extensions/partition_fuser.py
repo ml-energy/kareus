@@ -115,20 +115,6 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 sm_num, block_size = None, None
         else:
             comm_start, comm_end = -1, -1
-
-        if comm_start == -1 and comm_op_fwd is not None:
-            # current_stream.synchronize()
-            comm_op_fwd.event_record(current_stream)
-            comm_op_fwd.event_wait()
-            # current_stream.synchronize()
-            comm_op_fwd.fuser_forward(
-                [None], comm_input,
-                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
-            )
-            # comm_op_fwd.sync()
-            # WAIT_EVENT.record(comm_op_fwd.comm_stream)
-            # current_stream.wait_event(WAIT_EVENT)
-            comm_op_fwd.sync(current_stream)
         
         if comm_start == 0:
             comm_op_fwd.event_record(current_stream)
@@ -217,6 +203,20 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 for y in ys:
                     if y is not None:
                         y.requires_grad_(requires_grad=requires_grad)
+        
+        if comm_start == -1 and comm_op_fwd is not None:
+            # current_stream.synchronize()
+            comm_op_fwd.event_record(current_stream)
+            comm_op_fwd.event_wait()
+            # current_stream.synchronize()
+            comm_op_fwd.fuser_forward(
+                [None], comm_input,
+                basic_op_extra_inputs=[], basic_op_prev_ops=[None], basic_op_next_ops=[None], basic_op_kwargs=[{"sm_num": sm_num, "block_size": block_size}]
+            )
+            # comm_op_fwd.sync()
+            # WAIT_EVENT.record(comm_op_fwd.comm_stream)
+            # current_stream.wait_event(WAIT_EVENT)
+            # comm_op_fwd.sync(current_stream)
 
         # Save context for backward pass
         if is_grad_enabled:
@@ -300,26 +300,6 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 sm_num, block_size = None, None
         else:
             comm_start, comm_end = -1, -1
-
-        if comm_start == -1 and comm_op_bwd is not None:
-            # current_stream.synchronize()
-            comm_op_bwd.event_record(current_stream)
-            comm_op_bwd.event_wait()
-            comm_op_bwd.fuser_forward(
-                [None], grad_comm_input,
-                basic_op_extra_inputs=[], 
-                basic_op_prev_ops=[None], 
-                basic_op_next_ops=[None], 
-                basic_op_kwargs=[{
-                    "sm_num": sm_num, 
-                    "block_size": block_size, 
-                    "backward": True
-                }]
-            )
-            # comm_op_bwd.sync()
-            # WAIT_EVENT.record(comm_op_bwd.comm_stream)
-            # current_stream.wait_event(WAIT_EVENT)
-            comm_op_bwd.sync(current_stream)
     
         if comm_start == 0:
             comm_op_bwd.event_record(current_stream)
@@ -394,6 +374,26 @@ class _PartitionFuserAutogradFunction(torch.autograd.Function):
                 grad_bias = fused_op_grad_extra_inputs[0][0]
             elif isinstance(op, Bias) and op.return_bias:
                 grad_bias = None
+        
+        if comm_start == -1 and comm_op_bwd is not None:
+            # current_stream.synchronize()
+            comm_op_bwd.event_record(current_stream)
+            comm_op_bwd.event_wait()
+            comm_op_bwd.fuser_forward(
+                [None], grad_comm_input,
+                basic_op_extra_inputs=[], 
+                basic_op_prev_ops=[None], 
+                basic_op_next_ops=[None], 
+                basic_op_kwargs=[{
+                    "sm_num": sm_num, 
+                    "block_size": block_size, 
+                    "backward": True
+                }]
+            )
+            # comm_op_bwd.sync()
+            # WAIT_EVENT.record(comm_op_bwd.comm_stream)
+            # current_stream.wait_event(WAIT_EVENT)
+            # comm_op_bwd.sync(current_stream)
 
         # Flatten list of parameter gradients
         grad_params_flat = []

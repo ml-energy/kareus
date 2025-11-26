@@ -6,6 +6,7 @@ import traceback
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 import multiprocessing as mp
 import pynvml
 
@@ -121,6 +122,7 @@ class TransformerLayerProfiler:
         self.device = torch.device('cuda', rank)
         self.dtype = torch.bfloat16
         self.model_name = args.model_name
+        self.num_layers = args.num_layers
         
         # Model dims
         self.batch_size = args.batch_size
@@ -134,7 +136,7 @@ class TransformerLayerProfiler:
         self.config: TransformerConfig = FuserTestConfig.create_transformer_config(
             context_parallel_size=self.context_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
-            num_layers=1,
+            num_layers=self.num_layers,
         )
 
         self.frequency = args.frequency
@@ -157,9 +159,16 @@ class TransformerLayerProfiler:
                 normalization=None,
                 qk_l2_norm=False,
             )
-        self.layer = build_module(layer_spec, config=self.config, layer_number=1)
-        self.layer.to(self.device)
-        self.layer.eval()
+        # Build num_layers transformer layers
+        self.layers = nn.ModuleList(
+            [
+                build_module(layer_spec, config=self.config, layer_number=i + 1)
+                for i in range(self.num_layers)
+            ]
+        )
+        for layer in self.layers:
+            layer.to(self.device)
+            layer.eval()
 
         # Inputs
         torch.manual_seed(1234)
@@ -186,8 +195,10 @@ class TransformerLayerProfiler:
 
     def _forward_step(self):
         # with nvtx_range('transformer_layer_forward'):
-        output, _ = self.layer(self.hidden_states, attention_mask=self.attention_mask)
-        return output
+        x = self.hidden_states
+        for layer in self.layers:
+            x, _ = layer(x, attention_mask=self.attention_mask)
+        return x
 
     def run(self):
         # Logs dir
@@ -312,6 +323,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', '-b', type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
     parser.add_argument('--seq_len', '-s', type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
     parser.add_argument('--vocab_size', '-v', type=int, default=FuserTestConfig.VOCAB_SIZE)
+    parser.add_argument('--num_layers', '-n', type=int, default=FuserTestConfig.NUM_LAYERS)
     # Kept for compatibility but ignored during sweep; per-run frequency is set internally.
     parser.add_argument('--frequency', '-f', type=str, default='default')
     args = parser.parse_args()
