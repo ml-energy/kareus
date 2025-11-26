@@ -24,6 +24,7 @@ import time
 import random
 import argparse
 import json
+import csv
 import numpy as np
 import torch
 from typing import List, Dict, Tuple
@@ -183,7 +184,7 @@ def main() -> None:
     parser.add_argument("--normalize_objectives", action="store_true",
                         help="Normalize energy and time objectives to [0,1] range for balanced hypervolume calculation (default: True)")
 
-    parser.add_argument("--explore_fraction", type=float, default=0.2,
+    parser.add_argument("--explore_fraction", type=float, default=0.25,
                         help="Fraction of each acquisition batch reserved for uncertainty-driven exploration (0..1)")
     parser.add_argument("--ensemble_size", type=int, default=5,
                         help="Size of the XGBoost ensemble used to estimate predictive uncertainty")
@@ -191,7 +192,7 @@ def main() -> None:
                         help="Bootstrap fraction for training each ensemble member")
     parser.add_argument("--uncertainty_metric", type=str, choices=["sum", "max", "energy_std", "time_std"], default="sum",
                         help="How to combine energy/time predictive std into a single uncertainty score")
-    parser.add_argument("--time_fraction", type=float, default=0.2,
+    parser.add_argument("--time_fraction", type=float, default=0.25,
                         help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
 
     args = parser.parse_args()
@@ -248,9 +249,17 @@ def main() -> None:
     print(f"Starting optimization loop ({args.batches} batches, {args.acq_batch} evals/batch)")
     print("===============================================")
 
+    # CSV logging for per-batch timings (forward)
+    timing_csv_path = os.path.join(partition_test.logs_dir, "bo_timing_fwd.csv")
+    if not os.path.exists(timing_csv_path):
+        with open(timing_csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["batch_idx", "train_time_s", "select_time_s"])
+
     total_start = time.time()
     for ib in range(int(start_batch_idx), int(args.batches)):
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
+        train_start = time.time()
         # Train separate models for effective and real energy; share time model
         energy_model_eff, time_model = train_xgb_models(X_train_encoded, y_energy_eff, y_time)
         energy_model_real = train_xgb_energy_only(X_train_encoded, y_energy_real)
@@ -265,6 +274,8 @@ def main() -> None:
             ensemble_size=args.ensemble_size,
             bootstrap_frac=args.bootstrap_frac,
         )
+        train_time_s = time.time() - train_start
+        select_start = time.time()
 
         # Generate candidate pool (all remaining configs)
         candidates = []
@@ -296,6 +307,12 @@ def main() -> None:
             candidates, cand_encoded, ehvi_eff_values, ehvi_real_values,
             ensemble_models, models_eff, args, partition_test,
         )
+        select_time_s = time.time() - select_start
+
+        # Append per-batch timing row
+        with open(timing_csv_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([ib + 1, f"{train_time_s:.6f}", f"{select_time_s:.6f}"])
 
         # Evaluate selected candidates with a single distributed spawn for the whole batch
         print("Evaluating selected candidates on hardware...")

@@ -480,11 +480,11 @@ def _freq_sweep_worker(rank: int, world_size: int, args: argparse.Namespace, mas
             dist.barrier(group=tp_group)
 
             # Update frequency string for logs
-            args.frequency = str(freq_mhz)
+            profiler.frequency = freq_mhz
             profiler.profile(monitor)
 
             dist.barrier(group=tp_group)
-            break
+            # break
             if rank == 0:
                 time.sleep(5.0)
             # # Reduce allocator growth between frequencies
