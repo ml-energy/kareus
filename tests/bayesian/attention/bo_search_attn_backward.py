@@ -183,6 +183,12 @@ class PartitionTestRunner:
             create_graph=False,
         )
 
+    def clean(self):
+        self.output = None
+        self.output_bias = None
+        self.output_residual = None
+        self.allreduce_output = None
+
 
 # -----------------------------
 # Main optimization loop
