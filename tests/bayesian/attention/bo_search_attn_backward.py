@@ -246,6 +246,7 @@ def main() -> None:
     n_init = min(args.n_init, total_configs)
 
     print(f"Total {len(FREQ_VALUES)} frequency values, {len(SM_VALUES)} SMs, {len(OVERLAP_WINDOWS)} overlap values")
+    initial_start = time.time()
 
     # Setup initial data (load from cache or evaluate fresh) using backward runner
     X_train, X_train_encoded, y_energy_eff, y_time, y_energy_real, all_records, start_batch_idx = setup_initial_data(
@@ -256,6 +257,8 @@ def main() -> None:
         all_configs=all_configs,
         n_init=n_init,
     )
+    initial_time_s = time.time() - initial_start
+    print(f"Initial evaluation completed in {initial_time_s:.2f} s")
 
     y_energy_for_training = y_energy_eff if args.use_effective_energy else y_energy_real
     print(f"Using {'effective' if args.use_effective_energy else 'real'} energy for GBT training")
@@ -272,7 +275,7 @@ def main() -> None:
     if not os.path.exists(timing_csv_path):
         with open(timing_csv_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["batch_idx", "train_time_s", "select_time_s"])
+            writer.writerow(["batch_idx", "train_time_s", "select_time_s", "eval_time_s"])
 
     total_start = time.time()
     for ib in range(int(start_batch_idx), int(args.batches)):
@@ -320,12 +323,8 @@ def main() -> None:
             ensemble_models, models_eff, args, partition_test,
         )
         select_time_s = time.time() - select_start
-
-        # Append per-batch timing row
-        with open(timing_csv_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([ib + 1, f"{train_time_s:.6f}", f"{select_time_s:.6f}"])
-
+        eval_start = time.time()
+        
         print("Evaluating selected candidates on hardware (backward)...")
         sel_flags_list: List[Dict[str, bool]] = []
         sel_preds_list: List[Dict[str, float]] = []
@@ -371,6 +370,11 @@ def main() -> None:
         neg_Y = -Y_current
         pareto_mask = is_non_dominated(neg_Y)
         pareto_count = int(torch.sum(pareto_mask).item())
+
+        eval_time_s = time.time() - eval_start
+        with open(timing_csv_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([ib + 1, f"{train_time_s:.6f}", f"{select_time_s:.6f}", f"{eval_time_s:.6f}"])
 
         print(f"  Total evaluations so far: {X_train.shape[0]}")
         print(f"  Current Pareto points count: {pareto_count}")

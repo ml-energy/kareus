@@ -1,10 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Profile backward (autograd) time and energy for a Transformer layer composed of attention and MLP fusers.
-
-- Attention fuser: tests/bayesian/attention/overlap_test_attn.py
-- MLP fuser:       tests/bayesian/mlp/overlap_test_mlp.py
+Profile energy and time of the Attention fuser only.
 
 Execution details:
 - Distributed spawn over tensor-parallel world size.
@@ -45,7 +42,7 @@ from zeus.monitor import ZeusMonitor  # noqa: E402
 from common_config import FuserTestConfig  # noqa: E402
 from megatron.core.transformer.enums import AttnMaskType  # noqa: E402
 
-# Ops used to construct full-batch attention and MLP fusers
+# Ops for attention fuser
 from kareus.megatron.core.extensions.partition_fuser import PartitionFuser  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm  # noqa: E402
@@ -54,7 +51,6 @@ from kareus.megatron.core.extensions.ops import RotaryEmbeddingOp  # noqa: E402
 from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.linear import Linear  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce  # noqa: E402
-from kareus.megatron.core.extensions.ops import BiasSwigluOp  # noqa: E402
 
 
 FREQ_VALUES = list(range(1410, 890, -30))
@@ -90,9 +86,9 @@ def _set_gpu_frequency(target_freq_mhz, device_indices=None):
     pynvml.nvmlShutdown()
 
 
-class TransformerLayerFuserBackwardProfiler:
+class AttentionFuserProfiler:
     """
-    Compose attention and MLP fusers to emulate a full transformer layer forward + backward.
+    Build and profile the attention fuser forward only.
     Measures average step time and energy across iterations.
     """
 
@@ -101,7 +97,6 @@ class TransformerLayerFuserBackwardProfiler:
         self.rank = rank
         self.world_size = world_size
 
-        # Ensure we honor the MLP test's expectations
         assert world_size == args.tensor_parallel_size, \
             "world_size must equal --tensor_parallel_size"
 
@@ -122,21 +117,15 @@ class TransformerLayerFuserBackwardProfiler:
         self.num_attention_heads = FuserTestConfig.NUM_ATTENTION_HEADS
         self.num_query_groups = FuserTestConfig.NUM_QUERY_GROUPS
         self.head_dim = FuserTestConfig.HEAD_DIM
-        self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
 
-        # Create transformer configs
+        # Create attention config
         self.attn_config = FuserTestConfig.create_attention_config(
             context_parallel_size=self.context_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             dtype=self.dtype,
         )
-        self.mlp_config = FuserTestConfig.create_mlp_config(
-            context_parallel_size=self.context_parallel_size,
-            tensor_parallel_size=self.tensor_parallel_size,
-            dtype=self.dtype,
-        )
 
-        # Build attention tensors (full batch)
+        # Build attention tensors
         self.attn_hidden_states = torch.randn(
             self.seq_length, self.batch_size, self.hidden_size,
             dtype=self.dtype, device=self.device, requires_grad=True
@@ -160,7 +149,7 @@ class TransformerLayerFuserBackwardProfiler:
             dtype=self.dtype, device=self.device, requires_grad=True
         )
 
-        # Attention ops (full batch)
+        # Attention ops
         qkv_hidden_size = (
             self.num_attention_heads * self.head_dim
             + self.num_query_groups * self.head_dim
@@ -240,102 +229,13 @@ class TransformerLayerFuserBackwardProfiler:
         self.attn_fuser = PartitionFuser(
             ops=self.attn_comp_ops,
             comm_op_fwd=self.attn_comm_op,
-            comm_op_bwd=self.attn_comm_op,
             fuse_ops=False,
             is_first_attn=True,
             is_last_mlp=False,
         )
 
-        # Build MLP tensors (full batch)
-        self.mlp_bias = None
-        self.mlp_allreduce_inputs = torch.randn(
-            self.seq_length, self.batch_size, self.hidden_size,
-            dtype=self.dtype, device=self.device, requires_grad=True
-        )
-
-        # MLP ops (full batch)
-        mlp_bda = BiasDropoutAddOp(
-            dropout_prob=self.mlp_config.hidden_dropout, training=True
-        )
-        mlp_rms = RMSNorm(
-            normalized_shape=self.hidden_size,
-            eps=self.mlp_config.layernorm_epsilon,
-            device=self.device,
-            dtype=self.dtype,
-        )
-        fc1_hidden = (2 * self.ffn_hidden_size) // self.tensor_parallel_size
-        mlp_fc1 = Linear(
-            in_features=self.hidden_size,
-            out_features=fc1_hidden,
-            device=self.device,
-            dtype=self.dtype,
-            bias=False,
-            return_bias=True,
-            tensor_parallel_mode=None,
-            tensor_parallel_group=None,
-            tensor_parallel_size=None,
-        )
-        mlp_swiglu = BiasSwigluOp(fp8_input_store=self.mlp_config.activation_func_fp8_input_store)
-        fc2_hidden = self.ffn_hidden_size // self.tensor_parallel_size
-        mlp_fc2 = Linear(
-            in_features=fc2_hidden,
-            out_features=self.hidden_size,
-            device=self.device,
-            dtype=self.dtype,
-            bias=False,
-            return_bias=True,
-            tensor_parallel_mode=None,
-            tensor_parallel_group=None,
-            tensor_parallel_size=None,
-        )
-        mlp_allreduce = AllReduce(
-            process_group=self.tp_group,
-            async_op=True,
-            backend="msccl",
-            rank=self.rank,
-            world_size=self.world_size,
-            use_persistent_output=True,
-            input_buffer=self.mlp_allreduce_inputs,
-            tensor_size=[self.seq_length, self.batch_size, self.hidden_size],
-            device=self.device,
-            dtype=self.dtype,
-        )
-        self.mlp_comp_ops = [
-            mlp_bda,
-            mlp_rms,
-            mlp_fc1,
-            mlp_swiglu,
-            mlp_fc2,
-        ]
-        self.mlp_comm_op = mlp_allreduce
-        self.mlp_fuser = PartitionFuser(
-            ops=self.mlp_comp_ops,
-            comm_op_fwd=self.mlp_comm_op,
-            comm_op_bwd=self.mlp_comm_op,
-            fuse_ops=False,
-            is_first_attn=False,
-            is_last_mlp=True,
-        )
-
         self.overlap_window = (-1, -1)
         self.sm_configs = (None, None)
-
-        # Backward gradient tensors (match bo_search_attn_backward style)
-        self.output_grad = torch.randn(
-            self.seq_length, self.batch_size, self.hidden_size,
-            dtype=self.dtype, device=self.device
-        )
-        self.residual_grad = torch.randn(
-            self.seq_length, self.batch_size, self.hidden_size,
-            dtype=self.dtype, device=self.device
-        )
-        self.allreduce_input_grad = torch.randn(
-            self.seq_length, self.batch_size, self.hidden_size,
-            dtype=self.dtype, device=self.device
-        )
-        self.mlp_out = None
-        self.mlp_out_residual = None
-        self.mlp_allreduce_out = None
 
     def _logs_dir(self) -> str:
         logs_dir = f"logs/{self.model_name}/cp{self.context_parallel_size}-tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.args.seq_len}/{self.frequency}"
@@ -343,62 +243,30 @@ class TransformerLayerFuserBackwardProfiler:
             os.makedirs(logs_dir, exist_ok=True)
         return logs_dir
 
-    def _run_one_step_backward(self):
-        if self.mlp_out is None:
-            # Attention forward
-            attn_out, attn_out_bias, attn_out_residual, _attn_allreduce = self.attn_fuser(
-                hidden_states=self.attn_hidden_states,
-                bias=self.attn_bias,
-                residual=self.attn_residual,
-                rotary_pos_emb=self.attn_rotary_pos_emb,
-                attention_mask=self.attn_mask,
-                comm_input=self.attn_allreduce_inputs,
-                comm_overlap_window=self.overlap_window,
-                comm_sm_configs=self.sm_configs,
-                comm_overlap_window_backward=self.overlap_window,
-                comm_sm_configs_backward=self.sm_configs,
-            )
-
-            mlp_hidden_states = _attn_allreduce
-            mlp_residual = attn_out_residual
-            mlp_allreduce_inputs = attn_out
-
-            # MLP forward
-            mlp_out, mlp_out_bias, mlp_out_residual, mlp_allreduce_out = self.mlp_fuser(
-                hidden_states=mlp_hidden_states,
-                bias=self.mlp_bias,
-                residual=mlp_residual,
-                comm_input=mlp_allreduce_inputs,
-                comm_overlap_window=self.overlap_window,
-                comm_sm_configs=self.sm_configs,
-                comm_overlap_window_backward=self.overlap_window,
-                comm_sm_configs_backward=self.sm_configs,
-            )
-            self.mlp_out = mlp_out
-            self.mlp_out_residual = mlp_out_residual
-            self.mlp_allreduce_out = mlp_allreduce_out
-
-        # Backward: provide grads for outputs -> compute grads wrt inputs
-        _ = torch.autograd.grad(
-            outputs=[self.mlp_out, self.mlp_out_residual, self.mlp_allreduce_out],
-            inputs=[self.attn_hidden_states, self.attn_residual, self.attn_allreduce_inputs],
-            grad_outputs=[self.output_grad, self.residual_grad, self.allreduce_input_grad],
-            retain_graph=True,
-            allow_unused=True,
-            create_graph=False,
+    def _run_one_step(self):
+        attn_out, attn_out_bias, attn_out_residual, _attn_allreduce = self.attn_fuser(
+            hidden_states=self.attn_hidden_states,
+            bias=self.attn_bias,
+            residual=self.attn_residual,
+            rotary_pos_emb=self.attn_rotary_pos_emb,
+            attention_mask=self.attn_mask,
+            comm_input=self.attn_allreduce_inputs,
+            comm_overlap_window=self.overlap_window,
+            comm_sm_configs=self.sm_configs,
         )
+        return attn_out
 
     def profile(self, monitor=None):
         if self.rank == 0:
             logs_dir = self._logs_dir()
-            csv_path = os.path.join(logs_dir, "transformer_layer_backward_energy.csv")
+            csv_path = os.path.join(logs_dir, "attention_energy.csv")
             with open(csv_path, "w") as f:
                 title = "time (s),total_energy (J)," + ",".join(
                     [f"rank{i} energy (J)" for i in range(self.world_size)]
                 )
                 f.write(title + "\n")
 
-        # Warmup and rough iteration estimate (fw+bw)
+        # Warmup and rough iteration estimate
         torch.cuda.profiler.start()
         torch.cuda.synchronize()
         dist.barrier()
@@ -406,7 +274,7 @@ class TransformerLayerFuserBackwardProfiler:
             if i == 2:
                 torch.cuda.current_stream().synchronize()
                 time_start = time.time()
-            self._run_one_step_backward()
+            self._run_one_step()
         torch.cuda.synchronize()
         dist.barrier()
         time_end = time.time()
@@ -414,14 +282,14 @@ class TransformerLayerFuserBackwardProfiler:
         torch.cuda.profiler.stop()
 
         if self.rank == 0:
-            iterations = max(1, int(10.0 / max(duration, 1e-6)))
+            iterations = max(1, int(5.0 / max(duration, 1e-6)))
             dist_list = [iterations]
         else:
             dist_list = [None]
         dist.broadcast_object_list(dist_list, src=0, group=self.tp_group)
         iterations = dist_list[0]
         if self.rank == 0:
-            print(f"[TransformerLayerBackward] Per-step duration ~ {duration*1000:.3f} ms -> {iterations} iterations")
+            print(f"[Attention] Per-step duration ~ {duration*1000:.3f} ms -> {iterations} iterations")
 
         torch.cuda.synchronize()
         dist.barrier()
@@ -429,7 +297,7 @@ class TransformerLayerFuserBackwardProfiler:
             monitor.begin_window("step")
 
         for _ in range(iterations):
-            self._run_one_step_backward()
+            self._run_one_step()
 
         torch.cuda.synchronize()
         dist.barrier()
@@ -441,13 +309,13 @@ class TransformerLayerFuserBackwardProfiler:
             per_rank = [result.gpu_energy[i] / iterations for i in range(self.world_size)]
 
             logs_dir = self._logs_dir()
-            csv_path = os.path.join(logs_dir, "transformer_layer_backward_energy.csv")
+            csv_path = os.path.join(logs_dir, "attention_energy.csv")
             with open(csv_path, "a") as f:
                 f.write(
                     f"{avg_time},{avg_total_energy}," + ",".join(map(str, per_rank)) + "\n"
                 )
 
-            print(f"[TransformerLayerBackward] avg_time={avg_time:.6f}s, avg_total_energy={avg_total_energy:.4f}J")
+            print(f"[Attention] avg_time={avg_time:.6f}s, avg_total_energy={avg_total_energy:.4f}J")
 
 
 def _freq_sweep_worker(rank: int, world_size: int, args: argparse.Namespace, master_port: int, freq_values):
@@ -457,15 +325,12 @@ def _freq_sweep_worker(rank: int, world_size: int, args: argparse.Namespace, mas
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = f"{master_port}"
 
-    # Ensure CUDA device is set
     if torch.cuda.is_available():
         torch.cuda.set_device(rank)
 
     try:
-        # Initialize distributed
         tp_group = init_distributed(rank, world_size)
-        # Sweep frequencies (reuse profiler and ZeusMonitor across frequencies)
-        profiler = TransformerLayerFuserBackwardProfiler(args, rank, world_size)
+        profiler = AttentionFuserProfiler(args, rank, world_size)
         monitor = ZeusMonitor(gpu_indices=list(range(world_size))) if rank == 0 else None
         for freq_mhz in freq_values:
             if rank == 0:
@@ -475,21 +340,16 @@ def _freq_sweep_worker(rank: int, world_size: int, args: argparse.Namespace, mas
                     target_indices = vis_list
                 else:
                     target_indices = None
-                print(f"[TransformerLayerFuserBackward] profiling at frequency {freq_mhz} MHz")
+                print(f"[AttentionFuser] profiling at frequency {freq_mhz} MHz")
                 _set_gpu_frequency(freq_mhz, device_indices=target_indices)
             dist.barrier(group=tp_group)
 
-            # Update frequency string for logs
             profiler.frequency = freq_mhz
             profiler.profile(monitor)
 
             dist.barrier(group=tp_group)
             if rank == 0:
                 time.sleep(5.0)
-            # # Reduce allocator growth between frequencies
-            # torch.cuda.synchronize()
-            # torch.cuda.empty_cache()
-            # gc.collect()
     except Exception as e:
         print(f"[rank {rank}] Error: {e}")
         traceback.print_exc()
@@ -514,7 +374,7 @@ def main():
     parser.add_argument("--frequency", "-f", type=str, default="default", help="Initial label; overridden by sweep")
 
     args = parser.parse_args()
-    print("Profiling Transformer Layer Fuser Backward (attention + MLP) over frequency sweep")
+    print("Profiling Attention Fuser over frequency sweep")
     print(f"Model name: {args.model_name}")
     print(f"World size: {args.world_size}")
     print(f"TP size: {args.tensor_parallel_size}, CP size: {args.context_parallel_size}")

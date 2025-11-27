@@ -99,7 +99,7 @@ def _set_gpu_frequency(target_freq_mhz: int, device_indices: List[int] | None = 
     for i in indices:
         handle = pynvml.nvmlDeviceGetHandleByIndex(i)
         pynvml.nvmlDeviceSetGpuLockedClocks(handle, target_freq_mhz, target_freq_mhz)
-        time.sleep(1)
+    time.sleep(2)
     pynvml.nvmlShutdown()
 
 
