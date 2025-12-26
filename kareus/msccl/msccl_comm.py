@@ -25,11 +25,19 @@ from mscclpp._mscclpp import (
 )
 
 # TODO: create different op each request
-# TODO: bf16 support, currently use a dummy tensor
 # TODO: ProxyService start in init? multi-node support
 
 
 def _dlpack_view(t: torch.Tensor) -> cp.ndarray:
+    """Convert torch tensor to CuPy array via DLPack.
+    
+    For bfloat16 tensors, we view them as uint16 since CuPy doesn't have
+    native bfloat16 support. The CUDA kernels will interpret the data correctly.
+    """
+    if t.dtype == torch.bfloat16:
+        # View as uint16 for CuPy (both are 16-bit)
+        t_view = t.view(dtype=torch.uint16)
+        return cp.fromDlpack(torch.utils.dlpack.to_dlpack(t_view))
     return cp.fromDlpack(torch.utils.dlpack.to_dlpack(t))
 
 
@@ -257,16 +265,17 @@ class AllReduceManager:
             SHARED_COMM_STREAM = torch.cuda.Stream()
         self.stream = SHARED_COMM_STREAM
 
-        cast_to_fp16 = False
-        if input_tensor.dtype == torch.bfloat16:
-            cast_to_fp16 = True
+        # cast_to_fp16 = False
+        # if input_tensor.dtype == torch.bfloat16:
+        #     cast_to_fp16 = True
 
         self.subgroup = sub_group
         if need_reinit and self.algo is None:
             group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
-            new_size = list(input_tensor.size())
-            input_work = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
+            # new_size = list(input_tensor.size())
+            # input_work = input_tensor.to(torch.float16)
+            input_work = input_tensor
 
             cp_in = _dlpack_view(input_work)
 
@@ -367,19 +376,21 @@ class AllGatherManager:
             SHARED_COMM_STREAM = torch.cuda.Stream()
         self.stream = SHARED_COMM_STREAM
 
-        cast_to_fp16 = False
-        if input_tensor.dtype == torch.bfloat16:
-            cast_to_fp16 = True
+        # cast_to_fp16 = False
+        # if input_tensor.dtype == torch.bfloat16:
+        #     cast_to_fp16 = True
 
         self.subgroup = sub_group
         group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
-        if cast_to_fp16:
-            work_buf1 = input_tensor.to(torch.float16)
-            work_buf2 = input_tensor.to(torch.float16)
-        else:
-            work_buf1 = input_tensor.clone()
-            work_buf2 = input_tensor.clone()
+        # if cast_to_fp16:
+        #     work_buf1 = input_tensor.to(torch.float16)
+        #     work_buf2 = input_tensor.to(torch.float16)
+        # else:
+        #     work_buf1 = input_tensor.clone()
+        #     work_buf2 = input_tensor.clone()
+        work_buf1 = input_tensor
+        work_buf2 = input_tensor
 
         cp_mem1 = _dlpack_view(work_buf1)
         cp_mem2 = _dlpack_view(work_buf2)
@@ -504,17 +515,19 @@ class ReduceScatterManager:
             SHARED_COMM_STREAM = torch.cuda.Stream()
         self.stream = SHARED_COMM_STREAM
 
-        cast_to_fp16 = False
-        if input_tensor.dtype == torch.bfloat16:
-            cast_to_fp16 = True
+        # cast_to_fp16 = False
+        # if input_tensor.dtype == torch.bfloat16:
+        #     cast_to_fp16 = True
 
         self.subgroup = sub_group
         if need_reinit and self.algo is None:
             group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
-            new_size = list(input_tensor.size())
-            work_buf1 = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
-            work_buf2 = torch.empty(new_size, dtype=torch.float16, device=input_tensor.device)
+            # new_size = list(input_tensor.size())
+            # work_buf1 = input_tensor.to(torch.float16)
+            # work_buf2 = input_tensor.to(torch.float16)
+            work_buf1 = input_tensor
+            work_buf2 = input_tensor
 
             cp_mem1 = _dlpack_view(work_buf1)
             cp_mem2 = _dlpack_view(work_buf2)

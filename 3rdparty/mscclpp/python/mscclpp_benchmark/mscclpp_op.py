@@ -1,9 +1,15 @@
 import os
 import cupy as cp
 import ctypes
+import numpy as np
 from mscclpp import Transport, ProxyService, MemoryDevice2DeviceSemaphore
 import mscclpp.comm as mscclpp_comm
 from mscclpp.utils import KernelBuilder, GpuBuffer, pack
+
+# CuPy doesn't have native bfloat16 support, so we use np.uint16 as a placeholder
+# for memory allocation (both are 16-bit). The actual bfloat16 arithmetic operations
+# happen in the CUDA kernel using CUDA's native __nv_bfloat16 type.
+bfloat16 = np.dtype(np.uint16)
 
 
 IB_TRANSPORTS = [
@@ -25,6 +31,8 @@ def type_to_str(dtype):
         return "float"
     elif dtype == cp.int32:
         return "int"
+    elif dtype == bfloat16:
+        return "__nv_bfloat16"
     else:
         raise RuntimeError("Unknown data type")
 
@@ -469,10 +477,10 @@ class MscclppAllReduce6:
         self.device_handles_cp = cp.asarray(memoryview(b"".join(self.device_handles)), dtype=cp.uint8)
         self.nvls_handle = self.nvls_mem_handle.device_handle().raw
 
-        if self.memory.dtype != cp.float16 and self.memory.dtype != cp.float32:
+        if self.memory.dtype != cp.float16 and self.memory.dtype != cp.float32 and self.memory.dtype != bfloat16:
             raise RuntimeError("Unsupported data type")
 
-        if self.memory.dtype == cp.float16:
+        if self.memory.dtype == cp.float16 or self.memory.dtype == bfloat16:
             vector_size = 8
         elif self.memory.dtype == cp.float32:
             vector_size = 4
@@ -504,7 +512,7 @@ class MscclppAllReduce6:
     def auto_tune(self):
         nblocks_to_try = [8, 12, 16, 24, 32, 48, 64, 72, 96, 108]
         block_size_to_try = [256, 512, 1024]
-        if self.memory.dtype == cp.float16:
+        if self.memory.dtype == cp.float16 or self.memory.dtype == bfloat16:
             vector_size_to_try = [8, 4, 2]
         elif self.memory.dtype == cp.float32:
             vector_size_to_try = [4, 2, 1]

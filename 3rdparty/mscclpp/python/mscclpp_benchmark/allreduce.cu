@@ -5,6 +5,7 @@
 #include <hip/hip_fp16.h>
 #else
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #endif
 
 #include <mscclpp/concurrency_device.hpp>
@@ -45,6 +46,13 @@ __forceinline__ __device__ __half2 add_elements(__half2 a, __half2 b) {
   return __hadd2(a, b);
 }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+template <>
+__forceinline__ __device__ __nv_bfloat162 add_elements(__nv_bfloat162 a, __nv_bfloat162 b) {
+  return __hadd2(a, b);
+}
+#endif
+
 template <typename T>
 __forceinline__ __device__ int4 add_vectors_helper(int4 a, int4 b) {
   int4 ret;
@@ -65,6 +73,13 @@ __forceinline__ __device__ int4 add_vectors<__half>(int4 a, int4 b) {
   return add_vectors_helper<__half2>(a, b);
 }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+template <>
+__forceinline__ __device__ int4 add_vectors<__nv_bfloat16>(int4 a, int4 b) {
+  return add_vectors_helper<__nv_bfloat162>(a, b);
+}
+#endif
+
 template <typename T>
 __forceinline__ __device__ uint2 add_vectors_helper(uint2 a, uint2 b) {
   uint2 ret;
@@ -83,6 +98,13 @@ __forceinline__ __device__ uint2 add_vectors<__half>(uint2 a, uint2 b) {
   return add_vectors_helper<__half2>(a, b);
 }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+template <>
+__forceinline__ __device__ uint2 add_vectors<__nv_bfloat16>(uint2 a, uint2 b) {
+  return add_vectors_helper<__nv_bfloat162>(a, b);
+}
+#endif
+
 template <typename T>
 __forceinline__ __device__ int add_vectors_helper(int a, int b) {
   return bit_cast<int, T>(add_elements(bit_cast<T, int>(a), bit_cast<T, int>(b)));
@@ -97,6 +119,13 @@ template <>
 __forceinline__ __device__ int add_vectors<__half>(int a, int b) {
   return add_vectors_helper<__half2>(a, b);
 }
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+template <>
+__forceinline__ __device__ int add_vectors<__nv_bfloat16>(int a, int b) {
+  return add_vectors_helper<__nv_bfloat162>(a, b);
+}
+#endif
 
 __forceinline__ __device__ void vectorSum(TYPE* dst, TYPE* src, size_t nElem, int blockId, int nBlocks) {
   size_t nInt4 = nElem / 4;

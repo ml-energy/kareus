@@ -19,6 +19,11 @@ from mscclpp.utils import GpuBuffer
 from prettytable import PrettyTable
 import netifaces as ni
 import ipaddress
+import numpy as np
+
+# CuPy doesn't have native bfloat16 support yet, so we use np.uint16 as a placeholder
+# The actual bfloat16 operations happen in the CUDA kernel
+bfloat16 = np.dtype(np.uint16)
 
 data_type = cp.float32
 
@@ -28,6 +33,8 @@ elif data_type == cp.float32:
     dtype_str = "fp32"
 elif data_type == cp.int32:
     dtype_str = "int32"
+elif data_type == bfloat16:
+    dtype_str = "bf16"
 else:
     raise RuntimeError("Unknown data type")
 
@@ -176,7 +183,7 @@ def run_benchmark(
                 MscclppAllReduce1(mscclpp_group, memory),
                 MscclppAllReduce3(mscclpp_group, memory, proxy_service),
             ]
-            if is_nvls_supported() and (data_type == cp.float32 or data_type == cp.float16):
+            if is_nvls_supported() and (data_type == cp.float32 or data_type == cp.float16 or data_type == bfloat16):
                 mscclpp_algos.append(MscclppAllReduce6(mscclpp_group, nelem, data_type))
     else:
         if memory.nbytes < 2**22:
