@@ -19,7 +19,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import AllGatherKV, K_TO_SAVE, V_TO_SAVE, K_AG, V_AG
 from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.attn_oproj_fuser import AttnOprojPartitionFuser as PartitionFuser
+from kareus.megatron.core.extensions.fusers.attn_oproj_fuser import AttnOprojPartitionFuser as PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from kareus.utils.debug import nvtx_range

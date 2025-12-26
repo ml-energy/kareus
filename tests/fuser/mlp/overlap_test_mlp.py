@@ -17,7 +17,7 @@ from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
 from kareus.megatron.core.extensions.bias_swiglu_op import BiasSwigluOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.partition_fuser_profile import PartitionFuser
+from kareus.megatron.core.extensions.fusers.partition_fuser_profile import PartitionFuser
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range
 import pynvml

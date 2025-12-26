@@ -46,7 +46,7 @@ from common_config import FuserTestConfig  # noqa: E402
 from megatron.core.transformer.enums import AttnMaskType  # noqa: E402
 
 # Ops used to construct full-batch attention and MLP fusers
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser  # noqa: E402
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm  # noqa: E402
 from kareus.megatron.core.extensions.ops import QKVPostProcessOp  # noqa: E402

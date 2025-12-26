@@ -28,7 +28,7 @@ if FUSER_DIR not in sys.path:
 
 from overlap_test_ao_ar import AttentionFuserTest  # noqa: E402
 from common_config import FuserTestConfig  # noqa: E402
-from kareus.megatron.core.extensions.attn_oproj_fuser import AttnOprojPartitionFuser as PartitionFuser  # noqa: E402
+from kareus.megatron.core.extensions.fusers.attn_oproj_fuser import AttnOprojPartitionFuser as PartitionFuser  # noqa: E402
 
 from bo_utils import (  # noqa: E402
     one_hot_encode,

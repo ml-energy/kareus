@@ -24,7 +24,7 @@ from megatron.core.parallel_state import (
 )
 
 from kareus.transformer_engine.pytorch.ops import AllReduce
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser
 
 
 def get_fuser_comm_kwargs(config: TransformerConfig):

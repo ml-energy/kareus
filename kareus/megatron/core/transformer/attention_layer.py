@@ -24,10 +24,10 @@ from megatron.core.parallel_state import (
 
 from kareus.utils.debug import save_tensors
 from kareus.transformer_engine.pytorch.ops import AllReduce
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
-from kareus.megatron.core.extensions.attn_oproj_fuser import AttnOprojPartitionFuser
-from kareus.megatron.core.extensions.qkv_fuser import QKVPartitionFuser
-from kareus.megatron.core.extensions.qkv_fuser2 import QKVPartitionFuser2
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.fusers.attn_oproj_fuser import AttnOprojPartitionFuser
+from kareus.megatron.core.extensions.fusers.qkv_fuser import QKVPartitionFuser
+from kareus.megatron.core.extensions.fusers.qkv_fuser2 import QKVPartitionFuser2
 
 @dataclass
 class AttentionLayerSubmodules:

@@ -34,7 +34,7 @@ from kareus.megatron.core.extensions.te_linear import TEFusibleColumnParallelLin
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 
 # Import MLP fuser
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser
 
 # Import configuration
 from megatron.core.transformer.transformer_config import TransformerConfig

@@ -28,7 +28,7 @@ if BO_UTILS_DIR not in sys.path:
 
 from overlap_test_qkv_ar_backward import AttentionFuserTest  # noqa: E402
 from common_config import FuserTestConfig  # noqa: E402
-from kareus.megatron.core.extensions.qkv_fuser import QKVPartitionFuser as PartitionFuser  # noqa: E402
+from kareus.megatron.core.extensions.fusers.qkv_fuser import QKVPartitionFuser as PartitionFuser  # noqa: E402
 
 from bo_utils import (  # noqa: E402
     one_hot_encode,

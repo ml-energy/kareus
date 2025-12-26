@@ -41,7 +41,7 @@ from zeus.monitor import ZeusMonitor  # noqa: E402
 from common_config import FuserTestConfig  # noqa: E402
 
 # Ops used to construct MLP fuser
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser  # noqa: E402
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm  # noqa: E402
 from kareus.transformer_engine.pytorch.ops.linear import Linear  # noqa: E402

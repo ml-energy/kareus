@@ -17,7 +17,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.te_attention import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
 from kareus.megatron.core.extensions.attention_fuser import AttentionFuser
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from cfuser.core.utils import nvtx_range

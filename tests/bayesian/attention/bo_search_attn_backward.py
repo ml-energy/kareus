@@ -30,7 +30,7 @@ if BO_UTILS_DIR not in sys.path:
 
 from overlap_test_attn import AttentionFuserTest  # noqa: E402
 from common_config import FuserTestConfig  # noqa: E402
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser  # noqa: E402
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser  # noqa: E402
 
 from bo_utils import (  # noqa: E402
     one_hot_encode,

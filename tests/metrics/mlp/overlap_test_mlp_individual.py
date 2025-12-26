@@ -8,7 +8,7 @@ import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 from overlap_test_mlp import MLPFuserTest
-from kareus.megatron.core.extensions.partition_fuser import PartitionFuser
+from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuser
 from cuda import cudart
 
 

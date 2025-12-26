@@ -18,7 +18,7 @@ from kareus.megatron.core.extensions.ops import RotaryEmbeddingOp
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
 from kareus.transformer_engine.pytorch.ops.linear import Linear
-from kareus.megatron.core.extensions.qkv_fuser import QKVPartitionFuser as PartitionFuser
+from kareus.megatron.core.extensions.fusers.qkv_fuser import QKVPartitionFuser as PartitionFuser
 from megatron.core.transformer.enums import AttnMaskType
 from zeus.monitor import ZeusMonitor
 from kareus.utils.debug import nvtx_range

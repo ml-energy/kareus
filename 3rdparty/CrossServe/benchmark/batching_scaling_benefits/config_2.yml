@@ -1,4 +1,0 @@
-gpu_configs:
-  - gpus: "2,3"
-    u: 2
-    r: 1
