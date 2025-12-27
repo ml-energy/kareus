@@ -265,19 +265,11 @@ class AllReduceManager:
             SHARED_COMM_STREAM = torch.cuda.Stream()
         self.stream = SHARED_COMM_STREAM
 
-        # cast_to_fp16 = False
-        # if input_tensor.dtype == torch.bfloat16:
-        #     cast_to_fp16 = True
-
         self.subgroup = sub_group
         if need_reinit and self.algo is None:
             group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
-
-            # new_size = list(input_tensor.size())
-            # input_work = input_tensor.to(torch.float16)
-            input_work = input_tensor
-
-            cp_in = _dlpack_view(input_work)
+            
+            cp_in = _dlpack_view(input_tensor)
 
             self.algo = MscclppAllReduce1(group_obj, cp_in)
             self.output_tensor = input_tensor
@@ -324,8 +316,10 @@ class AllGatherManager:
         self.group_size: Optional[int] = None
         self.subgroup: Optional[dist.ProcessGroup] = None
         self.algo: Optional[Any] = None
-        self.output_tensor: Optional[torch.Tensor] = None
-        self.input_tensor: Optional[torch.Tensor] = None
+        self.output_tensor_k: Optional[torch.Tensor] = None
+        self.output_tensor_v: Optional[torch.Tensor] = None
+        self.input_tensor_k: Optional[torch.Tensor] = None
+        self.input_tensor_v: Optional[torch.Tensor] = None
         self.proxy_service: Optional[ProxyService] = None
         self.use_torch_single_node: bool = False
 
@@ -333,7 +327,8 @@ class AllGatherManager:
         self,
         rank: int,
         world_size: int,
-        input_tensor: torch.Tensor,
+        input_tensor_k: torch.Tensor,
+        input_tensor_v: torch.Tensor,
         group: dist.ProcessGroup = None,
         nranks_per_node: int = 0,
     ) -> None:
@@ -376,42 +371,31 @@ class AllGatherManager:
             SHARED_COMM_STREAM = torch.cuda.Stream()
         self.stream = SHARED_COMM_STREAM
 
-        # cast_to_fp16 = False
-        # if input_tensor.dtype == torch.bfloat16:
-        #     cast_to_fp16 = True
-
         self.subgroup = sub_group
         group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
-        # if cast_to_fp16:
-        #     work_buf1 = input_tensor.to(torch.float16)
-        #     work_buf2 = input_tensor.to(torch.float16)
-        # else:
-        #     work_buf1 = input_tensor.clone()
-        #     work_buf2 = input_tensor.clone()
-        work_buf1 = input_tensor
-        work_buf2 = input_tensor
-
-        cp_mem1 = _dlpack_view(work_buf1)
-        cp_mem2 = _dlpack_view(work_buf2)
+        cp_mem_k = _dlpack_view(input_tensor_k)
+        cp_mem_v = _dlpack_view(input_tensor_v)
 
         if nranks_per_node <= 0:
             nranks_per_node = self.group_size if self.group_size is not None else 0
         self.use_torch_single_node = (nranks_per_node == self.group_size)
 
         if self.use_torch_single_node:
-            self.algo = MscclppAllGather(group_obj, cp_mem1, cp_mem2, nranks_per_node, None)
+            self.algo = MscclppAllGather(group_obj, cp_mem_k, cp_mem_v, nranks_per_node, None)
             self.proxy_service = None
         else:
             if self.proxy_service is None:
                 self.proxy_service = ProxyService()
-            self.algo = MscclppAllGather(group_obj, cp_mem1, cp_mem2, nranks_per_node, self.proxy_service)
+            self.algo = MscclppAllGather(group_obj, cp_mem_k, cp_mem_v, nranks_per_node, self.proxy_service)
 
-        self.output_tensor = input_tensor
-        self.input_tensor = input_tensor
+        self.output_tensor_k = input_tensor_k
+        self.output_tensor_v = input_tensor_v
+        self.input_tensor_k = input_tensor_k
+        self.input_tensor_v = input_tensor_v
 
-    def __call__(self, nblocks: int, block_size: int, pipeline_depth: int = 3) -> torch.Tensor:
-        if self.algo is None or self.stream is None or self.output_tensor is None:
+    def __call__(self, nblocks: int, block_size: int, pipeline_depth: int = 3) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.algo is None or self.stream is None or self.output_tensor_k is None or self.output_tensor_v is None:
             raise RuntimeError("Call init(...) before launching AllGather")
         self.algo.set_params(nblocks=nblocks, block_size=block_size, pipeline_depth=pipeline_depth)
         if self.proxy_service is not None:
@@ -420,7 +404,7 @@ class AllGatherManager:
             except Exception:
                 pass
         self.algo(self.stream)
-        return self.output_tensor
+        return self.output_tensor_k, self.output_tensor_v
 
     def sync(self) -> None:
         if self.stream is not None:
@@ -444,8 +428,10 @@ class AllGatherManager:
         self.algo = None
         self.communicator = None
         self.stream = None
-        self.output_tensor = None
-        self.input_tensor = None
+        self.output_tensor_k = None
+        self.output_tensor_v = None
+        self.input_tensor_k = None
+        self.input_tensor_v = None
         self.subgroup = None
         self.group_rank = None
         self.group_size = None
@@ -463,8 +449,10 @@ class ReduceScatterManager:
         self.group_size: Optional[int] = None
         self.subgroup: Optional[dist.ProcessGroup] = None
         self.algo: Optional[Any] = None
-        self.output_tensor: Optional[torch.Tensor] = None
-        self.input_tensor: Optional[torch.Tensor] = None
+        self.output_tensor_k: Optional[torch.Tensor] = None
+        self.output_tensor_v: Optional[torch.Tensor] = None
+        self.input_tensor_k: Optional[torch.Tensor] = None
+        self.input_tensor_v: Optional[torch.Tensor] = None
         self.proxy_service: Optional[ProxyService] = None
         self.use_torch_single_node: bool = False
 
@@ -472,7 +460,8 @@ class ReduceScatterManager:
         self,
         rank: int,
         world_size: int,
-        input_tensor: torch.Tensor,
+        input_tensor_k: torch.Tensor,
+        input_tensor_v: torch.Tensor,
         group: dist.ProcessGroup = None,
         nranks_per_node: int = 0,
     ) -> None:
@@ -515,40 +504,32 @@ class ReduceScatterManager:
             SHARED_COMM_STREAM = torch.cuda.Stream()
         self.stream = SHARED_COMM_STREAM
 
-        # cast_to_fp16 = False
-        # if input_tensor.dtype == torch.bfloat16:
-        #     cast_to_fp16 = True
-
         self.subgroup = sub_group
         if need_reinit and self.algo is None:
             group_obj = _ShimGroup(self.communicator, self.group_rank, self.group_size, self.subgroup)  # type: ignore[arg-type]
 
-            # new_size = list(input_tensor.size())
-            # work_buf1 = input_tensor.to(torch.float16)
-            # work_buf2 = input_tensor.to(torch.float16)
-            work_buf1 = input_tensor
-            work_buf2 = input_tensor
-
-            cp_mem1 = _dlpack_view(work_buf1)
-            cp_mem2 = _dlpack_view(work_buf2)
+            cp_mem_k = _dlpack_view(input_tensor_k)
+            cp_mem_v = _dlpack_view(input_tensor_v)
 
             if nranks_per_node <= 0:
                 nranks_per_node = self.group_size if self.group_size is not None else 0
             self.use_torch_single_node = (nranks_per_node == self.group_size)
 
             if self.use_torch_single_node:
-                self.algo = MscclppReduceScatter(group_obj, cp_mem1, cp_mem2, nranks_per_node, None)
+                self.algo = MscclppReduceScatter(group_obj, cp_mem_k, cp_mem_v, nranks_per_node, None)
                 self.proxy_service = None
             else:
                 if self.proxy_service is None:
                     self.proxy_service = ProxyService()
-                self.algo = MscclppReduceScatter(group_obj, cp_mem1, cp_mem2, nranks_per_node, self.proxy_service)
+                self.algo = MscclppReduceScatter(group_obj, cp_mem_k, cp_mem_v, nranks_per_node, self.proxy_service)
 
-            self.output_tensor = input_tensor
-            self.input_tensor = input_tensor
+            self.output_tensor_k = input_tensor_k
+            self.output_tensor_v = input_tensor_v
+            self.input_tensor_k = input_tensor_k
+            self.input_tensor_v = input_tensor_v
 
-    def __call__(self, nblocks: int, block_size: int, pipeline_depth: int = 3) -> torch.Tensor:
-        if self.algo is None or self.stream is None or self.output_tensor is None:
+    def __call__(self, nblocks: int, block_size: int, pipeline_depth: int = 3) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.algo is None or self.stream is None or self.output_tensor_k is None or self.output_tensor_v is None:
             raise RuntimeError("Call init(...) before launching ReduceScatter")
         self.algo.set_params(nblocks=nblocks, block_size=block_size, pipeline_depth=pipeline_depth)
         if self.proxy_service is not None:
@@ -557,7 +538,7 @@ class ReduceScatterManager:
             except Exception:
                 pass
         self.algo(self.stream)
-        return self.output_tensor
+        return self.output_tensor_k, self.output_tensor_v
 
     def sync(self) -> None:
         if self.stream is not None:
@@ -581,8 +562,10 @@ class ReduceScatterManager:
         self.algo = None
         self.communicator = None
         self.stream = None
-        self.output_tensor = None
-        self.input_tensor = None
+        self.output_tensor_k = None
+        self.output_tensor_v = None
+        self.input_tensor_k = None
+        self.input_tensor_v = None
         self.subgroup = None
         self.group_rank = None
         self.group_size = None
@@ -590,19 +573,8 @@ class ReduceScatterManager:
         self.use_torch_single_node = False
 
 
-# Module-level singletons
-_AR_MANAGER: AllReduceManager = AllReduceManager()
-_AG_MANAGER: AllGatherManager = AllGatherManager()
-_RS_MANAGER: ReduceScatterManager = ReduceScatterManager()
-
-
 # Shared communication stream for all collectives
 SHARED_COMM_STREAM: Optional[torch.cuda.Stream] = None
-
-# Exposed streams for compatibility with callers expecting module attributes
-AR_COMM_STREAM: Optional[torch.cuda.Stream] = None
-AG_COMM_STREAM: Optional[torch.cuda.Stream] = None
-RS_COMM_STREAM: Optional[torch.cuda.Stream] = None
 
 
 def msccl_AllReduce_init(
@@ -611,70 +583,89 @@ def msccl_AllReduce_init(
     input_tensor: torch.Tensor,
     group: dist.ProcessGroup = None,
 ):
-    _AR_MANAGER.init(rank, world_size, input_tensor, group)
-    global AR_COMM_STREAM
-    AR_COMM_STREAM = _AR_MANAGER.stream
-
-
-def msccl_AllReduce(nblocks: int, block_size: int):
-    return _AR_MANAGER(nblocks, block_size)
-
-
-def msccl_AllReduce_sync():
-    _AR_MANAGER.sync()
-
-
-def msccl_AllGather_sync():
-    _AG_MANAGER.sync()
+    """Create and return a new AllReduceManager instance for each init request.
+    
+    Returns
+    -------
+    AllReduceManager
+        A new manager instance initialized with the given parameters
+    """
+    manager = AllReduceManager()
+    manager.init(rank, world_size, input_tensor, group)
+    return manager
 
 
 def msccl_AllGather_init(
     rank: int,
     world_size: int,
-    input_tensor: torch.Tensor,
+    input_tensor_k: torch.Tensor,
+    input_tensor_v: torch.Tensor,
     group: dist.ProcessGroup = None,
     nranks_per_node: int = 0,
 ):
-    _AG_MANAGER.init(rank, world_size, input_tensor, group, nranks_per_node)
-    global AG_COMM_STREAM
-    AG_COMM_STREAM = _AG_MANAGER.stream
-
-
-def msccl_AllGather(nblocks: int, block_size: int, pipeline_depth: int = 3):
-    return _AG_MANAGER(nblocks, block_size, pipeline_depth)
-
+    """Create and return a new AllGatherManager instance for each init request.
+    
+    Parameters
+    ----------
+    rank : int
+        Current process rank
+    world_size : int
+        Total number of processes
+    input_tensor_k : torch.Tensor
+        Input tensor for keys
+    input_tensor_v : torch.Tensor
+        Input tensor for values
+    group : dist.ProcessGroup, optional
+        Process group for communication
+    nranks_per_node : int, default = 0
+        Number of ranks per node
+    
+    Returns
+    -------
+    AllGatherManager
+        A new manager instance initialized with the given parameters
+    """
+    manager = AllGatherManager()
+    manager.init(rank, world_size, input_tensor_k, input_tensor_v, group, nranks_per_node)
+    return manager
 
 def msccl_ReduceScatter_init(
     rank: int,
     world_size: int,
-    input_tensor: torch.Tensor,
+    input_tensor_k: torch.Tensor,
+    input_tensor_v: torch.Tensor,
     group: dist.ProcessGroup = None,
     nranks_per_node: int = 0,
 ):
-    _RS_MANAGER.init(rank, world_size, input_tensor, group, nranks_per_node)
-    global RS_COMM_STREAM
-    RS_COMM_STREAM = _RS_MANAGER.stream
-
-
-def msccl_ReduceScatter(nblocks: int, block_size: int, pipeline_depth: int = 3):
-    return _RS_MANAGER(nblocks, block_size, pipeline_depth)
-
-
-def msccl_ReduceScatter_sync():
-    _RS_MANAGER.sync()
+    """Create and return a new ReduceScatterManager instance for each init request.
+    
+    Parameters
+    ----------
+    rank : int
+        Current process rank
+    world_size : int
+        Total number of processes
+    input_tensor_k : torch.Tensor
+        Input tensor for keys
+    input_tensor_v : torch.Tensor
+        Input tensor for values
+    group : dist.ProcessGroup, optional
+        Process group for communication
+    nranks_per_node : int, default = 0
+        Number of ranks per node
+    
+    Returns
+    -------
+    ReduceScatterManager
+        A new manager instance initialized with the given parameters
+    """
+    manager = ReduceScatterManager()
+    manager.init(rank, world_size, input_tensor_k, input_tensor_v, group, nranks_per_node)
+    return manager
 
 
 def msccl_cleanup():
     """Release manager state to avoid nanobind leak warnings at exit."""
-    _AR_MANAGER.cleanup()
-    _AG_MANAGER.cleanup()
-    _RS_MANAGER.cleanup()
-    # Clear exposed streams
-    global AR_COMM_STREAM, AG_COMM_STREAM, RS_COMM_STREAM, SHARED_COMM_STREAM
-    AR_COMM_STREAM = None
-    AG_COMM_STREAM = None
-    RS_COMM_STREAM = None
-    SHARED_COMM_STREAM = None
     # Free CuPy memory pools to drop device allocations
     try:
         cp.get_default_memory_pool().free_all_blocks()

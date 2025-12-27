@@ -8,7 +8,7 @@ import torch
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 
-import kareus.msccl.msccl_comm as new_msccl_comm
+import kareus.msccl.msccl_comm as msccl_comm
 
 K_AG: list[torch.Tensor | None] = [None, None]
 V_AG: list[torch.Tensor | None] = [None, None]
@@ -58,6 +58,7 @@ class AllGatherKV():
         self.comm_stream: Optional[torch.cuda.Stream] = None
         self._work_handles: List[torch.distributed.Work] = []
         self.wait_event = torch.cuda.Event()
+        self.msccl_op = None
 
         global K_AG, V_AG
         if self.backend == "msccl":
@@ -73,21 +74,15 @@ class AllGatherKV():
             self.input_buffer_v = V_AG[self.batch_idx]
             self.output_buffer_k = K_AG[self.batch_idx]
             self.output_buffer_v = V_AG[self.batch_idx]
-            new_msccl_comm.msccl_AllGather_init(
+            self.msccl_op = msccl_comm.msccl_AllGather_init(
                 self.rank,
                 self.world_size,
                 self.input_buffer_k,
-                self.process_group,
-                self.nranks_per_node,
-            )
-            new_msccl_comm.msccl_AllGather_init(
-                self.rank,
-                self.world_size,
                 self.input_buffer_v,
                 self.process_group,
                 self.nranks_per_node,
             )
-            self.comm_stream = new_msccl_comm.AG_COMM_STREAM
+            self.comm_stream = self.msccl_op.stream
     
     def set_stream(self, stream: torch.cuda.Stream):
         self.comm_stream = stream
@@ -125,8 +120,6 @@ class AllGatherKV():
                 k_out, v_out = self._nccl_all_gather_kv(k, v)
                 # self.backend = "nccl"
                 if not backward:
-                    # K_AG[self.batch_idx] = k_out
-                    # V_AG[self.batch_idx] = v_out
                     K_TO_SAVE[self.batch_idx] = k
                     V_TO_SAVE[self.batch_idx] = v
                 return k_out, v_out
@@ -153,8 +146,7 @@ class AllGatherKV():
 
         self.input_buffer_v[start:end].copy_(v, non_blocking=False)
 
-        new_msccl_comm.msccl_AllGather(sm_num, block_size)
-        # new_msccl_comm.msccl_AllGather(sm_num, block_size)
+        k_out, v_out = self.msccl_op(sm_num, block_size)
         return self.output_buffer_k, self.output_buffer_v
 
     def _nccl_all_gather(self, x):
@@ -186,7 +178,6 @@ class AllGatherKV():
                     handle.wait()
                 self._work_handles = []
             else:
-                # new_msccl_comm.msccl_AllGather_sync()
                 self.wait_event.record(self.comm_stream)
                 current_stream.wait_event(self.wait_event)
         else:

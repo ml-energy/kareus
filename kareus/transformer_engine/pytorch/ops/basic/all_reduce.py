@@ -13,12 +13,7 @@ import torch
 
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
-try:
-    import cfuser.msccl_comm as msccl_comm
-    HAVE_CFUSER = True
-except ImportError:
-    HAVE_CFUSER = False
-import kareus.msccl.msccl_comm as new_msccl_comm
+import kareus.msccl.msccl_comm as msccl_comm
 
 X_AR: list[torch.Tensor | None] = [None, None]
 
@@ -77,6 +72,7 @@ class AllReduce(BasicOperation):
         self.comm_stream: Optional[torch.cuda.Stream] = None
         self._work_handle: Optional[torch.distributed.Work] = None
         self.wait_event = torch.cuda.Event()
+        self.msccl_op = None
 
         if self.backend == "msccl":
             if X_AR[self.batch_idx] is None:
@@ -85,13 +81,13 @@ class AllReduce(BasicOperation):
                 )
             self.input_buffer = X_AR[self.batch_idx]
             self.output_buffer = X_AR[self.batch_idx]
-            new_msccl_comm.msccl_AllReduce_init(
+            self.msccl_op = msccl_comm.msccl_AllReduce_init(
                 self.rank,
                 self.world_size,
                 self.input_buffer,
                 self.process_group,
             )
-            self.comm_stream = new_msccl_comm.AR_COMM_STREAM
+            self.comm_stream = self.msccl_op.stream
     
     def set_stream(self, stream: torch.cuda.Stream):
         self.comm_stream = stream
@@ -137,7 +133,7 @@ class AllReduce(BasicOperation):
                 return x
             else:
                 assert x.shape == self.input_buffer.shape, "input_buffer shape must match x shape"
-                new_msccl_comm.msccl_AllReduce(sm_num, block_size)
+                self.msccl_op(sm_num, block_size)
                 return x
         else:
             assert self.process_group is not None, "process_group must be provided for nccl backend"
@@ -161,10 +157,6 @@ class AllReduce(BasicOperation):
             If no async operation is pending or if the operation was synchronous
         """
         if self.backend == "msccl":
-            # if self.new_backend:
-            # new_msccl_comm.msccl_AllReduce_sync()
-            # else:
-            #     msccl_comm.msccl_sync()
             if self._work_handle is None:
                 self.wait_event.record(self.comm_stream)
                 current_stream.wait_event(self.wait_event)
@@ -174,17 +166,6 @@ class AllReduce(BasicOperation):
         else:
             if self._work_handle is None:
                 raise Warning("No AllReduce operation to sync")
-                # if not self.async_op:
-                #     raise RuntimeError(
-                #         "Cannot sync: AllReduce operation was configured as synchronous. "
-                #         "Set async_op=True to use asynchronous operations."
-                #     )
-                # else:
-                #     raise RuntimeError(
-                #         "Cannot sync: No pending asynchronous all-reduce operation found."
-                #     )
-            
-            # Wait for the async operation to complete
             self._work_handle.wait()
             self._work_handle = None
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Correctness test for AllReduce operation - verifies MSCCL results match PyTorch/NCCL.
+Correctness test for AllGatherKV operation - verifies MSCCL results match PyTorch/NCCL.
 
 Usage:
-    torchrun --nproc_per_node=<N> test_allreduce_correctness.py [options]
+    torchrun --nproc_per_node=<N> test_allgather_correctness.py [options]
 
 Example:
-    torchrun --nproc_per_node=2 test_allreduce_correctness.py --dtype bfloat16
-    torchrun --nproc_per_node=4 test_allreduce_correctness.py --dtype float16 --test-sizes 1024 4096 16384
+    torchrun --nproc_per_node=2 test_allgather_correctness.py --dtype bfloat16
+    torchrun --nproc_per_node=4 test_allgather_correctness.py --dtype float16 --test-sizes 1024 4096 16384
 """
 """
-torchrun --nproc_per_node=2 test_allreduce_correctness.py \
+torchrun --nproc_per_node=2 test_allgather_correctness.py \
         --dtype bfloat16 \
         --test-size 65536 \
         --sm-num 8 \
@@ -29,7 +29,7 @@ import torch.distributed as dist
 # Add the project root to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 
-from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
+from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import AllGatherKV
 from kareus.msccl import msccl_comm
 
 
@@ -61,50 +61,72 @@ def check_tensors_equal(tensor1, tensor2, rtol=1e-3, atol=1e-3, tensor_name="ten
     return True
 
 
-def test_allreduce_correctness(rank, world_size, device, dtype, test_size, args):
-    """Test AllReduce correctness for a specific tensor size."""
+def test_allgather_correctness(rank, world_size, device, dtype, test_size, args):
+    """Test AllGatherKV correctness for a specific tensor size."""
     
-    # Calculate tensor shape
+    # Calculate tensor shape (per rank)
     bytes_per_elem = torch.tensor([], dtype=dtype).element_size()
     total_elements = test_size // bytes_per_elem
     
     # Create a 2D tensor for better memory access
     hidden_size = int(total_elements ** 0.5)
+    # MSCCL++ allgather kernel in this repo operates in 4-byte (int32) units.
+    # For fp16/bf16 that means the per-rank payload must have an even number of elements.
+    # Force an even hidden_size to guarantee seq_len * hidden_size is even.
+    if dtype in (torch.float16, torch.bfloat16) and (hidden_size % 2 == 1):
+        hidden_size = max(2, hidden_size - 1)
     seq_len = total_elements // hidden_size
-    tensor_shape = [seq_len, hidden_size]
+    tensor_shape_per_rank = [seq_len, hidden_size]
+    effective_elements = seq_len * hidden_size
+    effective_bytes = effective_elements * bytes_per_elem
+    
+    # Full tensor shape after all_gather
+    tensor_shape_full = [seq_len * world_size, hidden_size]
     
     if rank == 0:
         print(f"\n{'='*80}")
-        print(f"Testing: {tensor_shape} ({dtype}), Size: {test_size / (1024**2):.2f} MB")
+        print(f"Testing: Per-rank shape {tensor_shape_per_rank} → Full shape {tensor_shape_full}")
+        print(
+            f"         ({dtype}), Requested size/rank: {test_size / (1024**2):.2f} MB "
+            f"(effective: {effective_bytes / (1024**2):.2f} MB)"
+        )
         print(f"{'='*80}")
     
     # Create input tensors - use deterministic values for reproducibility
     torch.manual_seed(42 + rank)
-    input_tensor = torch.randn(tensor_shape, dtype=dtype, device=device, requires_grad=False)
+    input_k = torch.randn(tensor_shape_per_rank, dtype=dtype, device=device, requires_grad=False)
+    input_v = torch.randn(tensor_shape_per_rank, dtype=dtype, device=device, requires_grad=False)
     
-    # Make a copy for PyTorch reference
-    input_tensor_ref = input_tensor.clone()
+    # Make copies for different backends
+    input_k_ref = input_k.clone()
+    input_v_ref = input_v.clone()
     
     # Create process group
     tp_group = dist.new_group(list(range(world_size)))
     
-    # Test 1: PyTorch native AllReduce (reference)
+    # Test 1: PyTorch native AllGather (reference)
     if rank == 0:
-        print("Running PyTorch/NCCL AllReduce (reference)...")
+        print("Running PyTorch/NCCL AllGather (reference)...")
     
-    dist.all_reduce(input_tensor_ref, op=dist.ReduceOp.SUM, group=tp_group)
+    output_k_ref = torch.empty(tensor_shape_full, dtype=dtype, device=device)
+    output_v_ref = torch.empty(tensor_shape_full, dtype=dtype, device=device)
+    
+    dist.all_gather_into_tensor(output_k_ref, input_k_ref, group=tp_group)
+    dist.all_gather_into_tensor(output_v_ref, input_v_ref, group=tp_group)
     torch.cuda.synchronize()
     dist.barrier()
     
     if rank == 0:
-        print("✓ PyTorch AllReduce completed")
+        print("✓ PyTorch AllGather completed")
     
     # Test 2: NCCL backend through our wrapper
     if rank == 0:
         print("Running NCCL backend through wrapper...")
     
-    input_tensor_nccl = input_tensor.clone()
-    allreduce_nccl = AllReduce(
+    input_k_nccl = input_k.clone()
+    input_v_nccl = input_v.clone()
+    
+    allgather_nccl = AllGatherKV(
         process_group=tp_group,
         async_op=args.async_op,
         backend="nccl",
@@ -112,21 +134,30 @@ def test_allreduce_correctness(rank, world_size, device, dtype, test_size, args)
         world_size=world_size,
     )
     
-    output_nccl = allreduce_nccl(input_tensor_nccl)
+    output_k_nccl, output_v_nccl = allgather_nccl.op_forward(
+        None,  # ctx
+        input_k_nccl,
+        input_v_nccl,
+    )
     if args.async_op:
-        allreduce_nccl.sync()
+        allgather_nccl.sync(torch.cuda.current_stream())
     torch.cuda.synchronize()
     dist.barrier()
     
     # Check NCCL results match PyTorch
-    nccl_match = check_tensors_equal(
-        output_nccl, input_tensor_ref, 
+    nccl_k_match = check_tensors_equal(
+        output_k_nccl, output_k_ref, 
         rtol=args.rtol, atol=args.atol,
-        tensor_name="NCCL vs PyTorch"
+        tensor_name="NCCL K vs PyTorch K"
+    )
+    nccl_v_match = check_tensors_equal(
+        output_v_nccl, output_v_ref, 
+        rtol=args.rtol, atol=args.atol,
+        tensor_name="NCCL V vs PyTorch V"
     )
     
     if rank == 0:
-        if nccl_match:
+        if nccl_k_match and nccl_v_match:
             print("✓ NCCL backend matches PyTorch reference")
         else:
             print("✗ NCCL backend DOES NOT match PyTorch reference")
@@ -135,59 +166,74 @@ def test_allreduce_correctness(rank, world_size, device, dtype, test_size, args)
     if rank == 0:
         print("Running MSCCL backend...")
     
-    input_tensor_msccl = input_tensor.clone()
+    input_k_msccl = input_k.clone()
+    input_v_msccl = input_v.clone()
     
-    allreduce_msccl = AllReduce(
+    allgather_msccl = AllGatherKV(
         process_group=tp_group,
         async_op=True,
         backend="msccl",
         rank=rank,
         world_size=world_size,
-        tensor_size=list(tensor_shape),
+        nranks_per_node=world_size,
+        tensor_size=list(tensor_shape_full),
         device=device,
         dtype=dtype,
-        batch_idx=0,  # Use batch_idx 0 for single test
+        batch_idx=0,
     )
     
-    # Run MSCCL AllReduce
-    allreduce_msccl.input_buffer.copy_(input_tensor_msccl)
-    output_msccl = allreduce_msccl(
-        allreduce_msccl.input_buffer, 
-        sm_num=args.sm_num, 
-        block_size=args.block_size
+    # Run MSCCL AllGather
+    output_k_msccl, output_v_msccl = allgather_msccl.op_forward(
+        None,  # ctx
+        input_k_msccl,
+        input_v_msccl,
+        sm_num=args.sm_num,
+        block_size=args.block_size,
     )
-    allreduce_msccl.sync(torch.cuda.current_stream())
+    allgather_msccl.sync(torch.cuda.current_stream())
     torch.cuda.synchronize()
     dist.barrier()
     
     # Check MSCCL results match PyTorch
-    msccl_match = check_tensors_equal(
-        output_msccl, input_tensor_ref,
+    msccl_k_match = check_tensors_equal(
+        output_k_msccl, output_k_ref,
         rtol=args.rtol, atol=args.atol,
-        tensor_name="MSCCL vs PyTorch"
+        tensor_name="MSCCL K vs PyTorch K"
+    )
+    msccl_v_match = check_tensors_equal(
+        output_v_msccl, output_v_ref,
+        rtol=args.rtol, atol=args.atol,
+        tensor_name="MSCCL V vs PyTorch V"
     )
     
     if rank == 0:
-        if msccl_match:
+        if msccl_k_match and msccl_v_match:
             print("✓ MSCCL backend matches PyTorch reference")
         else:
             print("✗ MSCCL backend DOES NOT match PyTorch reference")
     
     # Check MSCCL matches NCCL
-    msccl_nccl_match = check_tensors_equal(
-        output_msccl, output_nccl,
+    msccl_nccl_k_match = check_tensors_equal(
+        output_k_msccl, output_k_nccl,
         rtol=args.rtol, atol=args.atol,
-        tensor_name="MSCCL vs NCCL"
+        tensor_name="MSCCL K vs NCCL K"
+    )
+    msccl_nccl_v_match = check_tensors_equal(
+        output_v_msccl, output_v_nccl,
+        rtol=args.rtol, atol=args.atol,
+        tensor_name="MSCCL V vs NCCL V"
     )
     
     if rank == 0:
-        if msccl_nccl_match:
+        if msccl_nccl_k_match and msccl_nccl_v_match:
             print("✓ MSCCL matches NCCL backend")
         else:
             print("✗ MSCCL DOES NOT match NCCL backend")
     
     # Overall result
-    all_match = nccl_match and msccl_match and msccl_nccl_match
+    all_match = (nccl_k_match and nccl_v_match and 
+                 msccl_k_match and msccl_v_match and 
+                 msccl_nccl_k_match and msccl_nccl_v_match)
     
     if rank == 0:
         print(f"{'='*80}")
@@ -198,19 +244,19 @@ def test_allreduce_correctness(rank, world_size, device, dtype, test_size, args)
         print(f"{'='*80}")
     
     # Cleanup to avoid memory leaks between tests
-    del allreduce_nccl
-    del allreduce_msccl
-    del input_tensor_nccl
-    del input_tensor_msccl
-    del output_nccl
-    del output_msccl
+    del allgather_nccl
+    del allgather_msccl
+    del input_k_nccl, input_v_nccl
+    del input_k_msccl, input_v_msccl
+    del output_k_nccl, output_v_nccl
+    del output_k_msccl, output_v_msccl
     torch.cuda.empty_cache()
     
     return all_match
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test AllReduce correctness")
+    parser = argparse.ArgumentParser(description="Test AllGatherKV correctness")
     
     # Data type
     parser.add_argument(
@@ -225,8 +271,8 @@ def main():
     parser.add_argument(
         "--test-size",
         type=int,
-        default=65536,  # bytes (64KB default)
-        help="Test size in bytes (default: 64KB)",
+        default=65536,  # bytes (64KB default per rank)
+        help="Test size per rank in bytes (default: 64KB)",
     )
     
     parser.add_argument(
@@ -248,7 +294,7 @@ def main():
         "--async-op",
         action="store_true",
         default=True,
-        help="Use async all-reduce for NCCL (default: True)",
+        help="Use async all-gather for NCCL (default: True)",
     )
     
     # MSCCL settings
@@ -290,18 +336,19 @@ def main():
     
     if rank == 0:
         print("=" * 80)
-        print("AllReduce Correctness Test")
+        print("AllGatherKV Correctness Test")
         print("=" * 80)
         print(f"World size:       {world_size}")
         print(f"Data type:        {args.dtype}")
-        print(f"Test size:        {args.test_size} bytes ({args.test_size / 1024:.1f} KB)")
+        print(f"Test size/rank:   {args.test_size} bytes ({args.test_size / 1024:.1f} KB)")
+        print(f"Total size:       {args.test_size * world_size} bytes ({args.test_size * world_size / 1024:.1f} KB)")
         print(f"Tolerance:        rtol={args.rtol}, atol={args.atol}")
         print(f"MSCCL config:     SM={args.sm_num}, BlockSize={args.block_size}")
         print("=" * 80)
     
     # Run single test
     try:
-        all_passed = test_allreduce_correctness(
+        all_passed = test_allgather_correctness(
             rank, world_size, device, dtype, args.test_size, args
         )
     except Exception as e:
