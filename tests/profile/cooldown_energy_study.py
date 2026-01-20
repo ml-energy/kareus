@@ -64,6 +64,7 @@ def _run_study(rank, world_size, args):
     hidden_states, bias, residual, rotary_pos_emb, attention_mask, allreduce_inputs = test_tensors
     overlap_window = (args.overlap_start, args.overlap_end)
     sm_configs = (args.sm_num, args.block_size)
+    current_stream = torch.cuda.current_stream()
 
     # Warmup passes to get iteration time
     torch.cuda.synchronize()
@@ -83,11 +84,12 @@ def _run_study(rank, world_size, args):
         )
     
     # Measure single iteration time
-    torch.cuda.synchronize()
-    dist.barrier()
+    # torch.cuda.synchronize()
+    # dist.barrier()
+    current_stream.synchronize()
     time_start = time.time()
     
-    calibration_iters = 50
+    calibration_iters = 100
     for _ in range(calibration_iters):
         attention_fuser(
             hidden_states=hidden_states,
@@ -100,8 +102,9 @@ def _run_study(rank, world_size, args):
             comm_sm_configs=sm_configs,
         )
     
-    torch.cuda.synchronize()
-    dist.barrier()
+    # torch.cuda.synchronize()
+    # dist.barrier()
+    current_stream.synchronize()
     time_end = time.time()
     
     iter_duration = (time_end - time_start) / calibration_iters
@@ -122,12 +125,19 @@ def _run_study(rank, world_size, args):
 
     # Cooldown study parameters
     target_duration = 5  # Fixed 5s duration
-    cooldown_times_sorted = list(range(1, 11)) + [15, 20, 25, 30]  # 1s-10s, then 15s, 20s, 25s, 30s
+    cooldown_times_sorted = [0.5] + list(range(1, 11)) + [15, 20, 25, 30]  # 1s-10s, then 15s, 20s, 25s, 30s
     cooldown_times = list(reversed(cooldown_times_sorted))  # Measure from large to small cooldown
     repeats_per_cooldown = 10
 
-    # Calculate iterations needed for target duration
-    iterations = max(1, int(target_duration / iter_duration))
+    # Calculate iterations needed for target duration (rank 0 computes and broadcasts)
+    if rank == 0:
+        iterations = max(1, int(target_duration / iter_duration))
+        dist_list = [iterations]
+    else:
+        dist_list = [None]
+    dist.broadcast_object_list(dist_list, src=0)
+    iterations = dist_list[0]
+    
     if rank == 0:
         print(f"Target duration: {target_duration}s")
         print(f"Iterations per measurement: {iterations}")
@@ -135,6 +145,26 @@ def _run_study(rank, world_size, args):
 
     # Results storage
     results = []
+    
+    # Setup CSV file and write header (only rank 0)
+    output_dir = None
+    csv_path = None
+    if rank == 0:
+        output_dir = f"logs/cooldown_study/tp{world_size}-bs{args.batch_size}-seq{args.seq_len}"
+        os.makedirs(output_dir, exist_ok=True)
+        csv_path = os.path.join(output_dir, "cooldown_energy_results.csv")
+        
+        # Write CSV header
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            header = ['cooldown_time', 'repeat', 'iterations', 'actual_time', 
+                      'total_energy', 'energy_per_iter', 'time_per_iter', 'avg_temperature']
+            for i in range(world_size):
+                header.append(f'gpu{i}_energy')
+                header.append(f'gpu{i}_energy_per_iter')
+                header.append(f'gpu{i}_temperature')
+            writer.writerow(header)
+        print(f"CSV initialized: {csv_path}")
 
     for cooldown_time in cooldown_times:
         if rank == 0:
@@ -203,7 +233,7 @@ def _run_study(rank, world_size, args):
                 
                 avg_temperature = sum(gpu_temperatures) / len(gpu_temperatures) if gpu_temperatures else 0
                 
-                results.append({
+                result_entry = {
                     'cooldown_time': cooldown_time,
                     'repeat': repeat,
                     'iterations': iterations,
@@ -215,50 +245,34 @@ def _run_study(rank, world_size, args):
                     'gpu_energy_per_iter': gpu_energy_per_iter,
                     'gpu_temperatures': gpu_temperatures,
                     'avg_temperature': avg_temperature,
-                })
+                }
+                results.append(result_entry)
                 
                 print(f"    -> time={actual_time:.3f}s, energy={total_energy:.3f}J, "
                       f"energy/iter={energy_per_iter*1000:.3f}mJ, avg_temp={avg_temperature:.1f}°C")
+                
+                # Append this result to CSV immediately
+                with open(csv_path, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    row = [
+                        result_entry['cooldown_time'],
+                        result_entry['repeat'],
+                        result_entry['iterations'],
+                        result_entry['actual_time'],
+                        result_entry['total_energy'],
+                        result_entry['energy_per_iter'],
+                        result_entry['time_per_iter'],
+                        result_entry['avg_temperature'],
+                    ]
+                    for i in range(world_size):
+                        row.append(result_entry['gpu_energies'][i])
+                        row.append(result_entry['gpu_energy_per_iter'][i])
+                        row.append(result_entry['gpu_temperatures'][i])
+                    writer.writerow(row)
 
-    # Save results to CSV (only rank 0)
+    # Final summary (only rank 0)
     if rank == 0:
-        # Sort results by cooldown_time (small to large) for CSV and plots
-        results = sorted(results, key=lambda r: (r['cooldown_time'], r['repeat']))
-        
-        output_dir = f"logs/cooldown_study/tp{world_size}-bs{args.batch_size}-seq{args.seq_len}"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        csv_path = os.path.join(output_dir, "cooldown_energy_results.csv")
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            # Header
-            header = ['cooldown_time', 'repeat', 'iterations', 'actual_time', 
-                      'total_energy', 'energy_per_iter', 'time_per_iter', 'avg_temperature']
-            for i in range(world_size):
-                header.append(f'gpu{i}_energy')
-                header.append(f'gpu{i}_energy_per_iter')
-                header.append(f'gpu{i}_temperature')
-            writer.writerow(header)
-            
-            # Data
-            for r in results:
-                row = [
-                    r['cooldown_time'],
-                    r['repeat'],
-                    r['iterations'],
-                    r['actual_time'],
-                    r['total_energy'],
-                    r['energy_per_iter'],
-                    r['time_per_iter'],
-                    r['avg_temperature'],
-                ]
-                for i in range(world_size):
-                    row.append(r['gpu_energies'][i])
-                    row.append(r['gpu_energy_per_iter'][i])
-                    row.append(r['gpu_temperatures'][i])
-                writer.writerow(row)
-        
-        print(f"\nResults saved to: {csv_path}")
+        print(f"\nAll results saved to: {csv_path}")
         
         # Generate plot
         plot_path = os.path.join(output_dir, "cooldown_energy_plot.png")
@@ -488,12 +502,12 @@ def load_results_from_csv(csv_path, world_size):
 
 def main():
     parser = argparse.ArgumentParser(description="Study influence of cooldown time on energy readings")
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
+    parser.add_argument("--world_size", "-w", type=int, default=8)
+    parser.add_argument("--batch_size", "-b", type=int, default=8)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--overlap_start", type=int, default=0)
     parser.add_argument("--overlap_end", type=int, default=-1)
-    parser.add_argument("--sm_num", "-n", type=int, default=6)
+    parser.add_argument("--sm_num", "-n", type=int, default=12)
     parser.add_argument("--block_size", "-t", type=int, default=1024)
     args = parser.parse_args()
 

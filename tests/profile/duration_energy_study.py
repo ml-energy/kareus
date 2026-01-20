@@ -7,6 +7,7 @@ import torch.distributed as dist
 import sys
 import csv
 import traceback
+import pynvml
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 from overlap_test_attn import AttentionFuserTest
@@ -83,11 +84,12 @@ def _run_study(rank, world_size, args):
         )
     
     # Measure single iteration time
-    torch.cuda.synchronize()
-    dist.barrier()
+    # torch.cuda.synchronize()
+    # dist.barrier()
+    current_stream.synchronize()
     time_start = time.time()
     
-    calibration_iters = 50
+    calibration_iters = 100
     for _ in range(calibration_iters):
         attention_fuser(
             hidden_states=hidden_states,
@@ -100,31 +102,66 @@ def _run_study(rank, world_size, args):
             comm_sm_configs=sm_configs,
         )
     
-    torch.cuda.synchronize()
-    dist.barrier()
+    # torch.cuda.synchronize()
+    # dist.barrier()
+    current_stream.synchronize()
     time_end = time.time()
     
     iter_duration = (time_end - time_start) / calibration_iters
     if rank == 0:
         print(f"Single iteration duration: {iter_duration * 1000:.3f} ms")
 
-    # Initialize ZeusMonitor on rank 0
+    # Initialize ZeusMonitor and pynvml on rank 0
     monitor = None
+    nvml_handles = []
     if rank == 0:
         gpu_indices = list(range(world_size))
         monitor = ZeusMonitor(gpu_indices=gpu_indices)
+        # Initialize pynvml for temperature monitoring
+        pynvml.nvmlInit()
+        for i in range(world_size):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            nvml_handles.append(handle)
 
     # Duration study parameters
     target_durations = [0.5] + list(range(1, 11))  # 0.5s to 10s
+    # target_durations = list(range(8, 11))  # 1s to 10s
+    # target_durations = [0.5, 6, 8]
     repeats_per_duration = 10
-    cooldown_time = 30  # 1 minute cooldown
+    cooldown_time = 10  # 1 minute cooldown
 
     # Results storage
     results = []
+    
+    # Setup CSV file and write header (only rank 0)
+    output_dir = None
+    csv_path = None
+    if rank == 0:
+        output_dir = f"logs/duration_study/tp{world_size}-bs{args.batch_size}-seq{args.seq_len}"
+        os.makedirs(output_dir, exist_ok=True)
+        csv_path = os.path.join(output_dir, "duration_energy_results.csv")
+        
+        # Write CSV header
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            header = ['target_duration', 'repeat', 'iterations', 'actual_time', 
+                      'total_energy', 'energy_per_iter', 'time_per_iter', 'avg_temperature']
+            for i in range(world_size):
+                header.append(f'gpu{i}_energy')
+                header.append(f'gpu{i}_energy_per_iter')
+                header.append(f'gpu{i}_temperature')
+            writer.writerow(header)
+        print(f"CSV initialized: {csv_path}")
 
     for target_duration in target_durations:
-        # Calculate iterations needed for this duration
-        iterations = max(1, int(target_duration / iter_duration))
+        # Calculate iterations needed for this duration (rank 0 computes and broadcasts)
+        if rank == 0:
+            iterations = max(1, int(target_duration / iter_duration))
+            dist_list = [iterations]
+        else:
+            dist_list = [None]
+        dist.broadcast_object_list(dist_list, src=0)
+        iterations = dist_list[0]
         
         if rank == 0:
             print(f"\n{'='*60}")
@@ -187,7 +224,14 @@ def _run_study(rank, world_size, args):
                 gpu_energies = [result.gpu_energy[i] for i in range(world_size)]
                 gpu_energy_per_iter = [e / iterations for e in gpu_energies]
                 
-                results.append({
+                # Record temperature after measurement
+                gpu_temperatures = []
+                for handle in nvml_handles:
+                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                    gpu_temperatures.append(temp)
+                avg_temperature = sum(gpu_temperatures) / len(gpu_temperatures) if gpu_temperatures else 0
+                
+                result_entry = {
                     'target_duration': target_duration,
                     'repeat': repeat,
                     'iterations': iterations,
@@ -197,49 +241,50 @@ def _run_study(rank, world_size, args):
                     'time_per_iter': time_per_iter,
                     'gpu_energies': gpu_energies,
                     'gpu_energy_per_iter': gpu_energy_per_iter,
-                })
+                    'gpu_temperatures': gpu_temperatures,
+                    'avg_temperature': avg_temperature,
+                }
+                results.append(result_entry)
                 
                 print(f"    -> time={actual_time:.3f}s, energy={total_energy:.3f}J, "
-                      f"energy/iter={energy_per_iter*1000:.3f}mJ")
+                      f"energy/iter={energy_per_iter*1000:.3f}mJ, avg_temp={avg_temperature:.1f}°C")
+                
+                # Append this result to CSV immediately
+                with open(csv_path, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    row = [
+                        result_entry['target_duration'],
+                        result_entry['repeat'],
+                        result_entry['iterations'],
+                        result_entry['actual_time'],
+                        result_entry['total_energy'],
+                        result_entry['energy_per_iter'],
+                        result_entry['time_per_iter'],
+                        result_entry['avg_temperature'],
+                    ]
+                    for i in range(world_size):
+                        row.append(result_entry['gpu_energies'][i])
+                        row.append(result_entry['gpu_energy_per_iter'][i])
+                        row.append(result_entry['gpu_temperatures'][i])
+                    writer.writerow(row)
+        
+        # # Print progress after each target duration
+        # if rank == 0:
+        #     print(f"  Data for target_duration={target_duration}s saved to CSV")
+        # dist.barrier()
 
-    # Save results to CSV (only rank 0)
+    # Final summary (only rank 0)
     if rank == 0:
-        output_dir = f"logs/duration_study/tp{world_size}-bs{args.batch_size}-seq{args.seq_len}"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        csv_path = os.path.join(output_dir, "duration_energy_results.csv")
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            # Header
-            header = ['target_duration', 'repeat', 'iterations', 'actual_time', 
-                      'total_energy', 'energy_per_iter', 'time_per_iter']
-            for i in range(world_size):
-                header.append(f'gpu{i}_energy')
-                header.append(f'gpu{i}_energy_per_iter')
-            writer.writerow(header)
-            
-            # Data
-            for r in results:
-                row = [
-                    r['target_duration'],
-                    r['repeat'],
-                    r['iterations'],
-                    r['actual_time'],
-                    r['total_energy'],
-                    r['energy_per_iter'],
-                    r['time_per_iter'],
-                ]
-                for i in range(world_size):
-                    row.append(r['gpu_energies'][i])
-                    row.append(r['gpu_energy_per_iter'][i])
-                writer.writerow(row)
-        
-        print(f"\nResults saved to: {csv_path}")
+        print(f"\nAll results saved to: {csv_path}")
         
         # Generate plot
         plot_path = os.path.join(output_dir, "duration_energy_plot.png")
         generate_plot(results, plot_path, world_size)
         print(f"Plot saved to: {plot_path}")
+
+    # Shutdown pynvml
+    if rank == 0:
+        pynvml.nvmlShutdown()
 
     torch.cuda.synchronize()
     dist.barrier()
@@ -426,8 +471,10 @@ def load_results_from_csv(csv_path, world_size):
                 'total_energy': float(row['total_energy']),
                 'energy_per_iter': float(row['energy_per_iter']),
                 'time_per_iter': float(row['time_per_iter']),
+                'avg_temperature': float(row.get('avg_temperature', 0)),
                 'gpu_energies': [float(row[f'gpu{i}_energy']) for i in range(world_size)],
                 'gpu_energy_per_iter': [float(row[f'gpu{i}_energy_per_iter']) for i in range(world_size)],
+                'gpu_temperatures': [float(row.get(f'gpu{i}_temperature', 0)) for i in range(world_size)],
             }
             results.append(result)
     return results
@@ -435,12 +482,12 @@ def load_results_from_csv(csv_path, world_size):
 
 def main():
     parser = argparse.ArgumentParser(description="Study influence of measurement duration on energy readings")
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=4)
+    parser.add_argument("--world_size", "-w", type=int, default=8)
+    parser.add_argument("--batch_size", "-b", type=int, default=8)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--overlap_start", type=int, default=0)
     parser.add_argument("--overlap_end", type=int, default=-1)
-    parser.add_argument("--sm_num", "-n", type=int, default=6)
+    parser.add_argument("--sm_num", "-n", type=int, default=12)
     parser.add_argument("--block_size", "-t", type=int, default=1024)
     args = parser.parse_args()
 
