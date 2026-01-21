@@ -29,44 +29,73 @@ def _spawn_entry(rank, world_size, args, master_port):
 
     tester = AttentionFuserTest(args, rank, world_size)
     # Build tensors and ops once
-    test_tensors = tester.create_test_tensors()
-    operations = tester.create_operations(test_tensors[-1])
-
+    (
+        hidden_states,
+        bias,
+        residual,
+        rotary_pos_emb,
+        attention_mask,
+        allreduce_inputs,
+    ) = tester.create_test_tensors()
+    
+    operations = tester.create_operations(allreduce_inputs)
     comp_ops = operations[:-1]
     allreduce_comm_op = operations[-1]
     
     attention_fuser = PartitionFuser(
         ops=comp_ops,
-        comm_op_fwd=allreduce_comm_op,
+        comm_op_bwd=allreduce_comm_op,
         fuse_ops=False,
     )
+
+    # Create gradient tensors for backward pass
+    nano_batch_size = tester.batch_size // 2
+    output_grad = torch.randn(
+        tester.seq_length, nano_batch_size, tester.hidden_size,
+        dtype=tester.dtype, device=tester.device
+    )
+    residual_grad = torch.randn(
+        tester.seq_length, nano_batch_size, tester.hidden_size,
+        dtype=tester.dtype, device=tester.device
+    )
+    allreduce_input_grad = torch.randn(
+        tester.seq_length, nano_batch_size, tester.hidden_size,
+        dtype=tester.dtype, device=tester.device
+    )
+
+    overlap_window = (args.overlap_start, args.overlap_end)
+    sm_configs = (args.sm_num, args.block_size)
+
+    # Forward pass to get outputs (needed for backward)
+    output, output_bias, output_residual, allreduce_output = attention_fuser(
+        hidden_states=hidden_states,
+        bias=bias,
+        residual=residual,
+        rotary_pos_emb=rotary_pos_emb,
+        attention_mask=attention_mask,
+        comm_input=allreduce_inputs,
+        comm_overlap_window_backward=overlap_window,
+        comm_sm_configs_backward=sm_configs,
+    )
+
+    def run_backward():
+        _ = torch.autograd.grad(
+            outputs=[output, output_residual, allreduce_output],
+            inputs=[hidden_states, residual, allreduce_inputs],
+            grad_outputs=[output_grad, residual_grad, allreduce_input_grad],
+            retain_graph=True,
+            allow_unused=True,
+            create_graph=False,
+        )
 
     # Warmup passes
     torch.cuda.synchronize()
     dist.barrier()
     for _ in range(10):
-        attention_fuser(
-            hidden_states=test_tensors[0],
-            bias=test_tensors[1],
-            residual=test_tensors[2],
-            rotary_pos_emb=test_tensors[3],
-            attention_mask=test_tensors[4],
-            comm_input=test_tensors[5],
-            comm_overlap_window=(args.overlap_start, args.overlap_end),
-            comm_sm_configs=(args.sm_num, args.block_size),
-        )
+        run_backward()
 
     cudart.cudaProfilerStart()
-    attention_fuser(
-        hidden_states=test_tensors[0],
-        bias=test_tensors[1],
-        residual=test_tensors[2],
-        rotary_pos_emb=test_tensors[3],
-        attention_mask=test_tensors[4],
-        comm_input=test_tensors[5],
-        comm_overlap_window=(args.overlap_start, args.overlap_end),
-        comm_sm_configs=(args.sm_num, args.block_size),
-    )
+    run_backward()
     cudart.cudaProfilerStop()
 
     torch.cuda.synchronize()
@@ -91,7 +120,7 @@ def main():
     from torch.multiprocessing import spawn
     spawn(
         _spawn_entry,
-        args=(args.world_size, args, 9002),
+        args=(args.world_size, args, 9003),
         nprocs=args.world_size,
         join=True,
     )
@@ -99,5 +128,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

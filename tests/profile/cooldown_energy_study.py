@@ -14,6 +14,26 @@ from overlap_test_attn import AttentionFuserTest
 from kareus.megatron.core.extensions.fusers.partition_fuser_profile import PartitionFuser
 from zeus.monitor import ZeusMonitor
 
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import numpy as np
+
+from pathlib import Path
+script_dir = Path("/workspaces/osdi/Kareus/")
+style_file = script_dir / "paper.mplstyle"
+if not style_file.exists():
+    raise FileNotFoundError(f"Style file not found at: {style_file}")
+plt.style.use(str(style_file))
+
+AXIS_LABEL_FONT_SIZE = 50
+TICK_FONT_SIZE = 40
+LEGEND_FONT_SIZE = 28
+mpl.rcParams["axes.labelsize"] = AXIS_LABEL_FONT_SIZE
+mpl.rcParams["xtick.labelsize"] = TICK_FONT_SIZE
+mpl.rcParams["ytick.labelsize"] = TICK_FONT_SIZE
+mpl.rcParams["legend.fontsize"] = LEGEND_FONT_SIZE
+
 
 def init_env(rank, world_size, master_port):
     os.environ["RANK"] = str(rank)
@@ -125,7 +145,8 @@ def _run_study(rank, world_size, args):
 
     # Cooldown study parameters
     target_duration = 5  # Fixed 5s duration
-    cooldown_times_sorted = [0.5] + list(range(1, 11)) + [15, 20, 25, 30]  # 1s-10s, then 15s, 20s, 25s, 30s
+    # cooldown_times_sorted = [0.5] + list(range(1, 11)) + [15, 20, 25, 30]  # 1s-10s, then 15s, 20s, 25s, 30s
+    cooldown_times_sorted = [0,]
     cooldown_times = list(reversed(cooldown_times_sorted))  # Measure from large to small cooldown
     repeats_per_cooldown = 10
 
@@ -178,7 +199,8 @@ def _run_study(rank, world_size, args):
             # Cooldown before each measurement
             torch.cuda.synchronize()
             dist.barrier()
-            time.sleep(cooldown_time)
+            if cooldown_time > 0:
+                time.sleep(cooldown_time)
 
             # Record temperature before measurement
             gpu_temperatures = []
@@ -288,109 +310,38 @@ def _run_study(rank, world_size, args):
 
 
 def generate_plot(results, output_path, world_size):
-    """Generate a plot showing energy vs cooldown time with error ranges."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    # Organize data by cooldown time
-    cooldown_times = sorted(set(r['cooldown_time'] for r in results))
+    """Generate a plot showing energy vs cooldown time with error ranges and temperature."""
+    # Organize data by cooldown time - only include integer cooldowns from 1 to 10
+    all_cooldowns = sorted(set(r['cooldown_time'] for r in results))
+    cooldown_times = [c for c in all_cooldowns if c >= 1 and c <= 10 and c == int(c)]
     
     # Collect energy per iteration and temperature for each cooldown time
     energy_per_iter_by_cooldown = {c: [] for c in cooldown_times}
-    total_energy_by_cooldown = {c: [] for c in cooldown_times}
     temperature_by_cooldown = {c: [] for c in cooldown_times}
     
     for r in results:
         c = r['cooldown_time']
-        energy_per_iter_by_cooldown[c].append(r['energy_per_iter'] * 1000)  # Convert to mJ
-        total_energy_by_cooldown[c].append(r['total_energy'])
+        if c not in cooldown_times:
+            continue
+        energy_per_iter_by_cooldown[c].append(r['energy_per_iter'])
         temperature_by_cooldown[c].append(r.get('avg_temperature', 0))
     
-    # Calculate statistics
+    # Calculate energy statistics
     means_per_iter = [np.mean(energy_per_iter_by_cooldown[c]) for c in cooldown_times]
     stds_per_iter = [np.std(energy_per_iter_by_cooldown[c]) for c in cooldown_times]
     mins_per_iter = [np.min(energy_per_iter_by_cooldown[c]) for c in cooldown_times]
     maxs_per_iter = [np.max(energy_per_iter_by_cooldown[c]) for c in cooldown_times]
     
-    means_total = [np.mean(total_energy_by_cooldown[c]) for c in cooldown_times]
-    stds_total = [np.std(total_energy_by_cooldown[c]) for c in cooldown_times]
-    mins_total = [np.min(total_energy_by_cooldown[c]) for c in cooldown_times]
-    maxs_total = [np.max(total_energy_by_cooldown[c]) for c in cooldown_times]
-    
-    # Temperature statistics
+    # Calculate temperature statistics (only average)
     means_temp = [np.mean(temperature_by_cooldown[c]) for c in cooldown_times]
-    stds_temp = [np.std(temperature_by_cooldown[c]) for c in cooldown_times]
     
-    # Get number of repeats for legend
-    num_repeats = len([r for r in results if r['cooldown_time'] == cooldown_times[0]])
+    # Create single figure with dual y-axes
+    fig, ax1 = plt.subplots(figsize=(12, 7.5))
+    ax2 = ax1.twinx()
     
-    # Create figure with two subplots
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Plot 1: Energy per iteration vs Cooldown Time (with temperature on secondary y-axis)
-    ax1 = axes[0]
-    ax1.errorbar(cooldown_times, means_per_iter, yerr=stds_per_iter, 
-                 fmt='o-', capsize=5, capthick=2, linewidth=2, markersize=8,
-                 color='#2E86AB', ecolor='#A23B72', label=f'Energy: Mean ± Std (n={num_repeats})')
-    ax1.fill_between(cooldown_times, mins_per_iter, maxs_per_iter, 
-                     alpha=0.2, color='#2E86AB', label='Energy: Min-Max Range')
-    ax1.set_xlabel('Cooldown Time (seconds)', fontsize=12)
-    ax1.set_ylabel('Energy per Iteration (mJ)', fontsize=12, color='#2E86AB')
-    ax1.tick_params(axis='y', labelcolor='#2E86AB')
-    ax1.set_title('Energy per Iteration & Temperature vs Cooldown Time', fontsize=14)
-    ax1.grid(True, alpha=0.3)
-    ax1.set_xticks(cooldown_times)
-    
-    # Secondary y-axis for temperature
-    ax1_temp = ax1.twinx()
-    ax1_temp.plot(cooldown_times, means_temp, 's--', color='#E74C3C', linewidth=2, markersize=6, label='Avg Temperature')
-    ax1_temp.fill_between(cooldown_times, 
-                          [m - s for m, s in zip(means_temp, stds_temp)],
-                          [m + s for m, s in zip(means_temp, stds_temp)],
-                          alpha=0.15, color='#E74C3C')
-    ax1_temp.set_ylabel('Temperature (°C)', fontsize=12, color='#E74C3C')
-    ax1_temp.tick_params(axis='y', labelcolor='#E74C3C')
-    
-    # Combined legend
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax1_temp.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=9)
-    
-    # Add annotation explaining the plot
-    ax1.text(0.02, 0.98, 'Blue: energy per iteration\nRed: avg GPU temperature\nShaded: ±1 std',
-             transform=ax1.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    # Plot 2: Total Energy vs Cooldown Time
-    ax2 = axes[1]
-    ax2.errorbar(cooldown_times, means_total, yerr=stds_total,
-                 fmt='s-', capsize=5, capthick=2, linewidth=2, markersize=8,
-                 color='#F18F01', ecolor='#C73E1D', label=f'Mean ± Std (n={num_repeats})')
-    ax2.fill_between(cooldown_times, mins_total, maxs_total,
-                     alpha=0.2, color='#F18F01', label='Min-Max Range')
-    ax2.set_xlabel('Cooldown Time (seconds)', fontsize=12)
-    ax2.set_ylabel('Total Energy (J)', fontsize=12)
-    ax2.set_title('Total Energy vs Cooldown Time', fontsize=14)
-    ax2.legend(loc='best', title='Legend', fontsize=10, title_fontsize=11)
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xticks(cooldown_times)
-    # Add annotation explaining the plot
-    ax2.text(0.02, 0.98, 'Points: mean total energy\nError bars: ±1 standard deviation\nShaded: min-max range across repeats',
-             transform=ax2.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    fig.suptitle('Impact of Cooldown Time on Energy Reading Stability', fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # Create additional plot with custom box style (mean±std box, min-max line)
-    box_plot_path = output_path.replace('.png', '_boxplot.png')
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Custom box plot 1: Energy per iteration
-    ax1 = axes[0]
     box_width = 0.6
+    
+    # Plot energy per iteration (left y-axis) with custom box style
     for i, c in enumerate(cooldown_times):
         x = i + 1  # 1-indexed position
         mean_val = means_per_iter[i]
@@ -399,82 +350,60 @@ def generate_plot(results, output_path, world_size):
         max_val = maxs_per_iter[i]
         
         # Draw min-max vertical line
-        ax1.plot([x, x], [min_val, max_val], color='#2E86AB', linewidth=2, zorder=1)
+        ax1.plot([x, x], [min_val, max_val], color='black', linewidth=3, zorder=1)
         # Draw min/max caps
-        ax1.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='#2E86AB', linewidth=2, zorder=1)
-        ax1.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='#2E86AB', linewidth=2, zorder=1)
+        ax1.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='black', linewidth=3, zorder=1)
+        ax1.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='black', linewidth=3, zorder=1)
         # Draw mean±std box
-        from matplotlib.patches import Rectangle
         rect = Rectangle((x - box_width/2, mean_val - std_val), box_width, 2 * std_val,
-                         facecolor='#2E86AB', edgecolor='#1a5276', alpha=0.6, linewidth=1.5, zorder=2)
+                         facecolor='gray', edgecolor='black', alpha=0.6, linewidth=2.5, zorder=2)
         ax1.add_patch(rect)
         # Draw mean line
-        ax1.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='#E74C3C', linewidth=2, zorder=3)
+        ax1.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='black', linewidth=3, zorder=3)
     
-    ax1.set_xlabel('Cooldown Time (seconds)', fontsize=12)
-    ax1.set_ylabel('Energy per Iteration (mJ)', fontsize=12)
-    ax1.set_title('Distribution of Energy per Iteration', fontsize=14)
-    ax1.set_xticks(range(1, len(cooldown_times) + 1))
-    ax1.set_xticklabels([str(c) for c in cooldown_times])
+    # Plot temperature (right y-axis) - average only
+    x_positions = list(range(1, len(cooldown_times) + 1))
+    ax2.plot(x_positions, means_temp, 's-', linewidth=3, markersize=10,
+             color='#F18F01', label='Avg Temperature', zorder=4)
+    
+    # Configure left y-axis (Energy)
+    ax1.set_xlabel('Cooldown Duration (s)')
+    ax1.set_ylabel('Energy (J)')
+    ax1.tick_params(axis='y', labelcolor='black')
+    ax1.set_xticks(x_positions)
+    ax1.set_xticklabels([str(int(c)) for c in cooldown_times])
     ax1.set_xlim(0.5, len(cooldown_times) + 0.5)
     ax1.grid(True, alpha=0.3, axis='y')
-    # Add annotation
-    ax1.text(0.02, 0.98, f'Box: mean ± std (n={num_repeats})\nRed line: mean\nVertical line: min-max range',
-             transform=ax1.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
-    # Custom box plot 2: Total Energy
-    ax2 = axes[1]
-    for i, c in enumerate(cooldown_times):
-        x = i + 1
-        mean_val = means_total[i]
-        std_val = stds_total[i]
-        min_val = mins_total[i]
-        max_val = maxs_total[i]
-        
-        # Draw min-max vertical line
-        ax2.plot([x, x], [min_val, max_val], color='#F18F01', linewidth=2, zorder=1)
-        # Draw min/max caps
-        ax2.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='#F18F01', linewidth=2, zorder=1)
-        ax2.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='#F18F01', linewidth=2, zorder=1)
-        # Draw mean±std box
-        rect = Rectangle((x - box_width/2, mean_val - std_val), box_width, 2 * std_val,
-                         facecolor='#F18F01', edgecolor='#c76d00', alpha=0.6, linewidth=1.5, zorder=2)
-        ax2.add_patch(rect)
-        # Draw mean line
-        ax2.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='#E74C3C', linewidth=2, zorder=3)
+    # Configure right y-axis (Temperature)
+    ax2.set_ylabel('Pre-Measurement\nGPU Temperature (°C)')
+    ax2.yaxis.set_label_coords(1.11, 0.42)  # Move label down
+    ax2.tick_params(axis='y', labelcolor='black')
     
-    ax2.set_xlabel('Cooldown Time (seconds)', fontsize=12)
-    ax2.set_ylabel('Total Energy (J)', fontsize=12)
-    ax2.set_title('Distribution of Total Energy', fontsize=14)
-    ax2.set_xticks(range(1, len(cooldown_times) + 1))
-    ax2.set_xticklabels([str(c) for c in cooldown_times])
-    ax2.set_xlim(0.5, len(cooldown_times) + 0.5)
-    ax2.grid(True, alpha=0.3, axis='y')
-    # Add annotation
-    ax2.text(0.02, 0.98, f'Box: mean ± std (n={num_repeats})\nRed line: mean\nVertical line: min-max range',
-             transform=ax2.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    # Set spine linewidths
+    ax1.spines["left"].set_linewidth(1.2)
+    ax1.spines["bottom"].set_linewidth(1.2)
+    ax2.spines["right"].set_linewidth(1.2)
+    ax2.spines["top"].set_linewidth(1.2)
     
-    fig.suptitle('Energy Distribution by Cooldown Time', fontsize=14, fontweight='bold', y=1.02)
+    # No legend on main plot
     plt.tight_layout()
-    plt.savefig(box_plot_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path.replace('.png', '.pdf'), bbox_inches='tight')
+    plt.savefig(output_path.replace('.png', '.svg'), bbox_inches='tight')
     plt.close()
     
-    print(f"Box plot saved to: {box_plot_path}")
-    
     # Print summary statistics
-    print("\n" + "="*95)
+    print("\n" + "="*80)
     print("SUMMARY STATISTICS")
-    print("="*95)
-    print(f"{'Cooldown':>10} | {'Mean (mJ)':>12} | {'Std (mJ)':>10} | {'CV (%)':>8} | {'Range (mJ)':>15} | {'Temp (°C)':>10}")
-    print("-"*95)
+    print("="*80)
+    print(f"{'Cooldown':>10} | {'Mean (J)':>12} | {'Std (J)':>10} | {'CV (%)':>8} | {'Range (J)':>15}")
+    print("-"*80)
     for i, c in enumerate(cooldown_times):
         cv = (stds_per_iter[i] / means_per_iter[i]) * 100 if means_per_iter[i] > 0 else 0
-        range_str = f"{mins_per_iter[i]:.2f}-{maxs_per_iter[i]:.2f}"
-        temp_str = f"{means_temp[i]:.1f}±{stds_temp[i]:.1f}"
-        print(f"{c:>10} | {means_per_iter[i]:>12.3f} | {stds_per_iter[i]:>10.3f} | {cv:>8.2f} | {range_str:>15} | {temp_str:>10}")
-    print("="*95)
+        range_str = f"{mins_per_iter[i]:.4f}-{maxs_per_iter[i]:.4f}"
+        print(f"{c:>10} | {means_per_iter[i]:>12.5f} | {stds_per_iter[i]:>10.5f} | {cv:>8.2f} | {range_str:>15}")
+    print("="*80)
 
 
 def load_results_from_csv(csv_path, world_size):
@@ -484,7 +413,7 @@ def load_results_from_csv(csv_path, world_size):
         reader = csv.DictReader(f)
         for row in reader:
             result = {
-                'cooldown_time': int(row['cooldown_time']),
+                'cooldown_time': float(row['cooldown_time']),
                 'repeat': int(row['repeat']),
                 'iterations': int(row['iterations']),
                 'actual_time': float(row['actual_time']),

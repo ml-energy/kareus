@@ -14,6 +14,26 @@ from overlap_test_attn import AttentionFuserTest
 from kareus.megatron.core.extensions.fusers.partition_fuser_profile import PartitionFuser
 from zeus.monitor import ZeusMonitor
 
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import numpy as np
+
+from pathlib import Path
+script_dir = Path("/workspaces/osdi/Kareus/")
+style_file = script_dir / "paper.mplstyle"
+if not style_file.exists():
+    raise FileNotFoundError(f"Style file not found at: {style_file}")
+plt.style.use(str(style_file))
+
+AXIS_LABEL_FONT_SIZE = 50
+TICK_FONT_SIZE = 40
+LEGEND_FONT_SIZE = 28
+mpl.rcParams["axes.labelsize"] = AXIS_LABEL_FONT_SIZE
+mpl.rcParams["xtick.labelsize"] = TICK_FONT_SIZE
+mpl.rcParams["ytick.labelsize"] = TICK_FONT_SIZE
+mpl.rcParams["legend.fontsize"] = LEGEND_FONT_SIZE
+
 
 def init_env(rank, world_size, master_port):
     os.environ["RANK"] = str(rank)
@@ -291,87 +311,41 @@ def _run_study(rank, world_size, args):
 
 
 def generate_plot(results, output_path, world_size):
-    """Generate a plot showing energy vs duration with error ranges."""
-    import matplotlib.pyplot as plt
-    import numpy as np
+    """Generate a plot showing energy vs duration with error ranges and temperature."""
+    # Organize data by duration - only include integer durations from 1 to 10
+    all_durations = sorted(set(r['target_duration'] for r in results))
+    durations = [d for d in all_durations if d >= 1 and d == int(d)]
     
-    # Organize data by duration
-    durations = sorted(set(r['target_duration'] for r in results))
-    
-    # Collect energy per iteration for each duration
+    # Collect energy per iteration and temperature for each duration
     energy_per_iter_by_duration = {d: [] for d in durations}
-    total_energy_by_duration = {d: [] for d in durations}
+    temperature_by_duration = {d: [] for d in durations}
     
     for r in results:
         d = r['target_duration']
-        energy_per_iter_by_duration[d].append(r['energy_per_iter'] * 1000)  # Convert to mJ
-        total_energy_by_duration[d].append(r['total_energy'])
+        if d not in durations:
+            continue
+        energy_per_iter_by_duration[d].append(r['energy_per_iter'])
+        temperature_by_duration[d].append(r['avg_temperature'])
     
-    # Calculate statistics
+    # Calculate energy statistics
     means_per_iter = [np.mean(energy_per_iter_by_duration[d]) for d in durations]
     stds_per_iter = [np.std(energy_per_iter_by_duration[d]) for d in durations]
     mins_per_iter = [np.min(energy_per_iter_by_duration[d]) for d in durations]
     maxs_per_iter = [np.max(energy_per_iter_by_duration[d]) for d in durations]
     
-    means_total = [np.mean(total_energy_by_duration[d]) for d in durations]
-    stds_total = [np.std(total_energy_by_duration[d]) for d in durations]
-    mins_total = [np.min(total_energy_by_duration[d]) for d in durations]
-    maxs_total = [np.max(total_energy_by_duration[d]) for d in durations]
+    # Calculate temperature statistics (only average)
+    means_temp = [np.mean(temperature_by_duration[d]) for d in durations]
     
     # Get number of repeats for legend
     num_repeats = len([r for r in results if r['target_duration'] == durations[0]])
     
-    # Create figure with two subplots
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    # Create single figure with dual y-axes
+    fig, ax1 = plt.subplots(figsize=(12, 7.5))
+    ax2 = ax1.twinx()
     
-    # Plot 1: Energy per iteration vs Duration
-    ax1 = axes[0]
-    ax1.errorbar(durations, means_per_iter, yerr=stds_per_iter, 
-                 fmt='o-', capsize=5, capthick=2, linewidth=2, markersize=8,
-                 color='#2E86AB', ecolor='#A23B72', label=f'Mean ± Std (n={num_repeats})')
-    ax1.fill_between(durations, mins_per_iter, maxs_per_iter, 
-                     alpha=0.2, color='#2E86AB', label='Min-Max Range')
-    ax1.set_xlabel('Measurement Duration (seconds)', fontsize=12)
-    ax1.set_ylabel('Energy per Iteration (mJ)', fontsize=12)
-    ax1.set_title('Energy per Iteration vs Measurement Duration', fontsize=14)
-    ax1.legend(loc='best', title='Legend', fontsize=10, title_fontsize=11)
-    ax1.grid(True, alpha=0.3)
-    ax1.set_xticks(durations)
-    # Add annotation explaining the plot
-    ax1.text(0.02, 0.98, 'Points: mean energy per iteration\nError bars: ±1 standard deviation\nShaded: min-max range across repeats',
-             transform=ax1.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    # Plot 2: Total Energy vs Duration
-    ax2 = axes[1]
-    ax2.errorbar(durations, means_total, yerr=stds_total,
-                 fmt='s-', capsize=5, capthick=2, linewidth=2, markersize=8,
-                 color='#F18F01', ecolor='#C73E1D', label=f'Mean ± Std (n={num_repeats})')
-    ax2.fill_between(durations, mins_total, maxs_total,
-                     alpha=0.2, color='#F18F01', label='Min-Max Range')
-    ax2.set_xlabel('Measurement Duration (seconds)', fontsize=12)
-    ax2.set_ylabel('Total Energy (J)', fontsize=12)
-    ax2.set_title('Total Energy vs Measurement Duration', fontsize=14)
-    ax2.legend(loc='best', title='Legend', fontsize=10, title_fontsize=11)
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xticks(durations)
-    # Add annotation explaining the plot
-    ax2.text(0.02, 0.98, 'Points: mean total energy\nError bars: ±1 standard deviation\nShaded: min-max range across repeats',
-             transform=ax2.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    fig.suptitle('Impact of Measurement Duration on Energy Reading Stability', fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # Create additional plot with custom box style (mean±std box, min-max line)
-    box_plot_path = output_path.replace('.png', '_boxplot.png')
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Custom box plot 1: Energy per iteration
-    ax1 = axes[0]
     box_width = 0.6
+    
+    # Plot energy per iteration (left y-axis) with custom box style
     for i, d in enumerate(durations):
         x = i + 1  # 1-indexed position
         mean_val = means_per_iter[i]
@@ -380,69 +354,98 @@ def generate_plot(results, output_path, world_size):
         max_val = maxs_per_iter[i]
         
         # Draw min-max vertical line
-        ax1.plot([x, x], [min_val, max_val], color='#2E86AB', linewidth=2, zorder=1)
+        ax1.plot([x, x], [min_val, max_val], color='black', linewidth=3, zorder=1)
         # Draw min/max caps
-        ax1.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='#2E86AB', linewidth=2, zorder=1)
-        ax1.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='#2E86AB', linewidth=2, zorder=1)
+        ax1.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='black', linewidth=3, zorder=1)
+        ax1.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='black', linewidth=3, zorder=1)
         # Draw mean±std box
-        from matplotlib.patches import Rectangle
         rect = Rectangle((x - box_width/2, mean_val - std_val), box_width, 2 * std_val,
-                         facecolor='#2E86AB', edgecolor='#1a5276', alpha=0.6, linewidth=1.5, zorder=2)
+                         facecolor='gray', edgecolor='black', alpha=0.6, linewidth=2.5, zorder=2)
         ax1.add_patch(rect)
         # Draw mean line
-        ax1.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='#E74C3C', linewidth=2, zorder=3)
+        ax1.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='black', linewidth=3, zorder=3)
     
-    ax1.set_xlabel('Measurement Duration (seconds)', fontsize=12)
-    ax1.set_ylabel('Energy per Iteration (mJ)', fontsize=12)
-    ax1.set_title('Distribution of Energy per Iteration', fontsize=14)
-    ax1.set_xticks(range(1, len(durations) + 1))
-    ax1.set_xticklabels([str(d) for d in durations])
+    # Plot temperature (right y-axis) - average only
+    x_positions = list(range(1, len(durations) + 1))
+    ax2.plot(x_positions, means_temp, 's-', linewidth=3, markersize=10,
+             color='#F18F01', label='Avg Temperature', zorder=4)
+    
+    # Configure left y-axis (Energy)
+    ax1.set_xlabel('Measurement Window (s)')
+    ax1.set_ylabel('Energy (J)')
+    ax1.tick_params(axis='y', labelcolor='black')
+    ax1.set_xticks(x_positions)
+    ax1.set_xticklabels([str(int(d)) for d in durations])
     ax1.set_xlim(0.5, len(durations) + 0.5)
     ax1.grid(True, alpha=0.3, axis='y')
-    # Add annotation
-    ax1.text(0.02, 0.98, f'Box: mean ± std (n={num_repeats})\nRed line: mean\nVertical line: min-max range',
-             transform=ax1.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
-    # Custom box plot 2: Total Energy
-    ax2 = axes[1]
-    for i, d in enumerate(durations):
-        x = i + 1
-        mean_val = means_total[i]
-        std_val = stds_total[i]
-        min_val = mins_total[i]
-        max_val = maxs_total[i]
-        
-        # Draw min-max vertical line
-        ax2.plot([x, x], [min_val, max_val], color='#F18F01', linewidth=2, zorder=1)
-        # Draw min/max caps
-        ax2.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='#F18F01', linewidth=2, zorder=1)
-        ax2.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='#F18F01', linewidth=2, zorder=1)
-        # Draw mean±std box
-        rect = Rectangle((x - box_width/2, mean_val - std_val), box_width, 2 * std_val,
-                         facecolor='#F18F01', edgecolor='#c76d00', alpha=0.6, linewidth=1.5, zorder=2)
-        ax2.add_patch(rect)
-        # Draw mean line
-        ax2.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='#E74C3C', linewidth=2, zorder=3)
+    # Configure right y-axis (Temperature)
+    ax2.set_ylabel('Post-Measurement\nGPU Temperature (°C)')
+    ax2.yaxis.set_label_coords(1.11, 0.42)  # Move label down
+    ax2.tick_params(axis='y', labelcolor='black')
     
-    ax2.set_xlabel('Measurement Duration (seconds)', fontsize=12)
-    ax2.set_ylabel('Total Energy (J)', fontsize=12)
-    ax2.set_title('Distribution of Total Energy', fontsize=14)
-    ax2.set_xticks(range(1, len(durations) + 1))
-    ax2.set_xticklabels([str(d) for d in durations])
-    ax2.set_xlim(0.5, len(durations) + 0.5)
-    ax2.grid(True, alpha=0.3, axis='y')
-    # Add annotation
-    ax2.text(0.02, 0.98, f'Box: mean ± std (n={num_repeats})\nRed line: mean\nVertical line: min-max range',
-             transform=ax2.transAxes, fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    # Set spine linewidths
+    ax1.spines["left"].set_linewidth(1.2)
+    ax1.spines["bottom"].set_linewidth(1.2)
+    ax2.spines["right"].set_linewidth(1.2)
+    ax2.spines["top"].set_linewidth(1.2)
     
-    fig.suptitle('Energy Distribution by Measurement Duration', fontsize=14, fontweight='bold', y=1.02)
+    # No legend on main plot
     plt.tight_layout()
-    plt.savefig(box_plot_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path.replace('.png', '.pdf'), bbox_inches='tight')
+    plt.savefig(output_path.replace('.png', '.svg'), bbox_inches='tight')
     plt.close()
     
-    print(f"Box plot saved to: {box_plot_path}")
+    # Create separate legend figure
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    
+    # Custom handler for min-max with caps
+    class MinMaxHandler:
+        def legend_artist(self, legend, orig_handle, fontsize, handlebox):
+            x0, y0 = handlebox.xdescent, handlebox.ydescent
+            width, height = handlebox.width, handlebox.height
+            # Vertical line
+            vline = Line2D([x0 + width/2, x0 + width/2], [y0, y0 + height],
+                          color='black', linewidth=3)
+            # Top cap
+            top_cap = Line2D([x0 + width/4, x0 + 3*width/4], [y0 + height, y0 + height],
+                            color='black', linewidth=3)
+            # Bottom cap
+            bottom_cap = Line2D([x0 + width/4, x0 + 3*width/4], [y0, y0],
+                               color='black', linewidth=3)
+            handlebox.add_artist(vline)
+            handlebox.add_artist(top_cap)
+            handlebox.add_artist(bottom_cap)
+            return vline
+    
+    legend_elements = [
+        Patch(facecolor='gray', edgecolor='black', alpha=0.6, label='Energy mean ± std'),
+        Line2D([0], [0], color='black', linewidth=3, label='mean'),
+        Line2D([0], [0], color='black', linewidth=3, marker='_', markersize=12, label='min-max'),
+        Line2D([0], [0], color='#F18F01', marker='s', markersize=10, linewidth=3, label='Temperature'),
+    ]
+    
+    # Create legend-only figure
+    fig_legend = plt.figure(figsize=(10, 0.5))
+    ax_legend = fig_legend.add_subplot(111)
+    ax_legend.axis('off')
+    
+    legend = ax_legend.legend(
+        handles=legend_elements,
+        loc='center',
+        ncol=4,
+        frameon=False,
+        handler_map={legend_elements[2]: MinMaxHandler()}
+    )
+    
+    legend_path = output_path.replace('.png', '_legend.png')
+    fig_legend.savefig(legend_path, dpi=150, bbox_inches='tight')
+    fig_legend.savefig(legend_path.replace('.png', '.pdf'), bbox_inches='tight')
+    fig_legend.savefig(legend_path.replace('.png', '.svg'), bbox_inches='tight')
+    plt.close(fig_legend)
+    print(f"Legend saved to: {legend_path}")
     
     # Print summary statistics
     print("\n" + "="*80)

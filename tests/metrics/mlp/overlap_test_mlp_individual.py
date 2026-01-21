@@ -37,7 +37,7 @@ def _spawn_entry(rank, world_size, args, master_port):
     
     mlp_fuser = PartitionFuser(
         ops=comp_ops,
-        allreduce_comm_op=allreduce_comm_op,
+        comm_op_fwd=allreduce_comm_op,
         fuse_ops=False,
     )
 
@@ -49,9 +49,9 @@ def _spawn_entry(rank, world_size, args, master_port):
             hidden_states=test_tensors[0],
             bias=test_tensors[1],
             residual=test_tensors[2],
-            allreduce_input=test_tensors[3],
-            allreduce_overlap_window=(args.overlap_start, args.overlap_end),
-            allreduce_sm_configs=(args.sm_num, args.block_size),
+            comm_input=test_tensors[3],
+            comm_overlap_window=(args.overlap_start, args.overlap_end),
+            comm_sm_configs=(args.sm_num, args.block_size),
         )
 
     cudart.cudaProfilerStart()
@@ -59,9 +59,9 @@ def _spawn_entry(rank, world_size, args, master_port):
         hidden_states=test_tensors[0],
         bias=test_tensors[1],
         residual=test_tensors[2],
-        allreduce_input=test_tensors[3],
-        allreduce_overlap_window=(args.overlap_start, args.overlap_end),
-        allreduce_sm_configs=(args.sm_num, args.block_size),
+        comm_input=test_tensors[3],
+        comm_overlap_window=(args.overlap_start, args.overlap_end),
+        comm_sm_configs=(args.sm_num, args.block_size),
     )
     cudart.cudaProfilerStop()
 
@@ -74,8 +74,8 @@ def _spawn_entry(rank, world_size, args, master_port):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=2)
-    parser.add_argument("--batch_size", "-b", type=int, default=8)
+    parser.add_argument("--world_size", "-w", type=int, default=4)
+    parser.add_argument("--batch_size", "-b", type=int, default=16)
     parser.add_argument("--seq_len", "-s", type=int, default=4096)
     parser.add_argument("--frequency", "-f", type=str, default="default")
     parser.add_argument("--overlap_start", type=int, default=0)
@@ -84,17 +84,10 @@ def main():
     parser.add_argument("--block_size", "-t", type=int, default=1024)
     args = parser.parse_args()
 
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    if visible is not None and len(visible.strip()) > 0:
-        vis_list = [int(x) for x in visible.split(",") if x.strip() != ""]
-        target_indices = vis_list
-    else:
-        raise ValueError("CUDA_VISIBLE_DEVICES is not set")
-
     from torch.multiprocessing import spawn
     spawn(
         _spawn_entry,
-        args=(args.world_size, args, 9000 + target_indices[0]),
+        args=(args.world_size, args, 9002),
         nprocs=args.world_size,
         join=True,
     )

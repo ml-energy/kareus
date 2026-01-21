@@ -60,11 +60,16 @@ class AttentionFuserTest:
         # Test configuration
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len
-        self.hidden_size = 3072
-        self.num_attention_heads = 24
+        # self.hidden_size = 3072
+        # self.num_attention_heads = 24
+        # self.num_query_groups = 8  # For grouped query attention
+        # self.head_dim = self.hidden_size // self.num_attention_heads
+        # self.ffn_hidden_size = 8192
+        self.hidden_size = 2048
+        self.num_attention_heads = 16
         self.num_query_groups = 8  # For grouped query attention
-        self.head_dim = self.hidden_size // self.num_attention_heads
-        self.ffn_hidden_size = 8192
+        self.head_dim = 128
+        self.ffn_hidden_size = 6144
         
         # Create transformer config
         self.config = TransformerConfig(
