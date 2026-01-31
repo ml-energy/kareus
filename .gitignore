@@ -16,6 +16,7 @@ dump/
 *.pdf
 *.svg
 perseus_results*/
+profile_result/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

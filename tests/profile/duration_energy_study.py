@@ -9,14 +9,13 @@ import csv
 import traceback
 import pynvml
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
-from overlap_test_attn import AttentionFuserTest
-from kareus.megatron.core.extensions.fusers.partition_fuser_profile import PartitionFuser
+# sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
+# from overlap_test_attn import AttentionFuserTest
+# from kareus.megatron.core.extensions.fusers.partition_fuser_profile import PartitionFuser
 from zeus.monitor import ZeusMonitor
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 import numpy as np
 
 from pathlib import Path
@@ -26,8 +25,8 @@ if not style_file.exists():
     raise FileNotFoundError(f"Style file not found at: {style_file}")
 plt.style.use(str(style_file))
 
-AXIS_LABEL_FONT_SIZE = 50
-TICK_FONT_SIZE = 40
+AXIS_LABEL_FONT_SIZE = 44
+TICK_FONT_SIZE = 36
 LEGEND_FONT_SIZE = 28
 mpl.rcParams["axes.labelsize"] = AXIS_LABEL_FONT_SIZE
 mpl.rcParams["xtick.labelsize"] = TICK_FONT_SIZE
@@ -336,37 +335,36 @@ def generate_plot(results, output_path, world_size):
     # Calculate temperature statistics (only average)
     means_temp = [np.mean(temperature_by_duration[d]) for d in durations]
     
-    # Get number of repeats for legend
-    num_repeats = len([r for r in results if r['target_duration'] == durations[0]])
-    
     # Create single figure with dual y-axes
     fig, ax1 = plt.subplots(figsize=(12, 7.5))
     ax2 = ax1.twinx()
     
-    box_width = 0.6
+    # Prepare data for violin plot
+    violin_data = [energy_per_iter_by_duration[d] for d in durations]
+    x_positions = list(range(1, len(durations) + 1))
     
-    # Plot energy per iteration (left y-axis) with custom box style
-    for i, d in enumerate(durations):
-        x = i + 1  # 1-indexed position
-        mean_val = means_per_iter[i]
-        std_val = stds_per_iter[i]
-        min_val = mins_per_iter[i]
-        max_val = maxs_per_iter[i]
-        
-        # Draw min-max vertical line
-        ax1.plot([x, x], [min_val, max_val], color='black', linewidth=3, zorder=1)
-        # Draw min/max caps
-        ax1.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='black', linewidth=3, zorder=1)
-        ax1.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='black', linewidth=3, zorder=1)
-        # Draw mean±std box
-        rect = Rectangle((x - box_width/2, mean_val - std_val), box_width, 2 * std_val,
-                         facecolor='gray', edgecolor='black', alpha=0.6, linewidth=2.5, zorder=2)
-        ax1.add_patch(rect)
-        # Draw mean line
-        ax1.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='black', linewidth=3, zorder=3)
+    # Plot energy per iteration (left y-axis) with violin plot
+    parts = ax1.violinplot(violin_data, positions=x_positions, widths=0.7,
+                           showmeans=True, showmedians=False, showextrema=True)
+    
+    # Style the violin plot
+    for pc in parts['bodies']:
+        pc.set_facecolor('gray')
+        pc.set_edgecolor('black')
+        pc.set_alpha(0.6)
+        pc.set_linewidth(1.5)
+    
+    # Style the mean and extrema lines
+    parts['cmeans'].set_color('black')
+    parts['cmeans'].set_linewidth(1.5)
+    parts['cmins'].set_color('black')
+    parts['cmins'].set_linewidth(1.5)
+    parts['cmaxes'].set_color('black')
+    parts['cmaxes'].set_linewidth(1.5)
+    parts['cbars'].set_color('black')
+    parts['cbars'].set_linewidth(1.2)
     
     # Plot temperature (right y-axis) - average only
-    x_positions = list(range(1, len(durations) + 1))
     ax2.plot(x_positions, means_temp, 's-', linewidth=3, markersize=10,
              color='#F18F01', label='Avg Temperature', zorder=4)
     
@@ -377,18 +375,20 @@ def generate_plot(results, output_path, world_size):
     ax1.set_xticks(x_positions)
     ax1.set_xticklabels([str(int(d)) for d in durations])
     ax1.set_xlim(0.5, len(durations) + 0.5)
+    ax1.set_ylim(4.19, 4.81)
     ax1.grid(True, alpha=0.3, axis='y')
     
-    # Configure right y-axis (Temperature)
-    ax2.set_ylabel('Post-Measurement\nGPU Temperature (°C)')
-    ax2.yaxis.set_label_coords(1.11, 0.42)  # Move label down
-    ax2.tick_params(axis='y', labelcolor='black')
+    # Configure right y-axis (Temperature) - use orange
+    ax2.set_ylabel('Post-Measurement\nGPU Temperature (°C)', color='#F18F01')
+    ax2.tick_params(axis='y', labelcolor='#F18F01', colors='#F18F01')
     
-    # Set spine linewidths
+    # Set spine linewidths and colors
     ax1.spines["left"].set_linewidth(1.2)
     ax1.spines["bottom"].set_linewidth(1.2)
     ax2.spines["right"].set_linewidth(1.2)
+    ax2.spines["right"].set_color('#F18F01')
     ax2.spines["top"].set_linewidth(1.2)
+    ax2.set_ylim(30, 50)
     
     # No legend on main plot
     plt.tight_layout()
@@ -396,56 +396,6 @@ def generate_plot(results, output_path, world_size):
     plt.savefig(output_path.replace('.png', '.pdf'), bbox_inches='tight')
     plt.savefig(output_path.replace('.png', '.svg'), bbox_inches='tight')
     plt.close()
-    
-    # Create separate legend figure
-    from matplotlib.lines import Line2D
-    from matplotlib.patches import Patch
-    
-    # Custom handler for min-max with caps
-    class MinMaxHandler:
-        def legend_artist(self, legend, orig_handle, fontsize, handlebox):
-            x0, y0 = handlebox.xdescent, handlebox.ydescent
-            width, height = handlebox.width, handlebox.height
-            # Vertical line
-            vline = Line2D([x0 + width/2, x0 + width/2], [y0, y0 + height],
-                          color='black', linewidth=3)
-            # Top cap
-            top_cap = Line2D([x0 + width/4, x0 + 3*width/4], [y0 + height, y0 + height],
-                            color='black', linewidth=3)
-            # Bottom cap
-            bottom_cap = Line2D([x0 + width/4, x0 + 3*width/4], [y0, y0],
-                               color='black', linewidth=3)
-            handlebox.add_artist(vline)
-            handlebox.add_artist(top_cap)
-            handlebox.add_artist(bottom_cap)
-            return vline
-    
-    legend_elements = [
-        Patch(facecolor='gray', edgecolor='black', alpha=0.6, label='Energy mean ± std'),
-        Line2D([0], [0], color='black', linewidth=3, label='mean'),
-        Line2D([0], [0], color='black', linewidth=3, marker='_', markersize=12, label='min-max'),
-        Line2D([0], [0], color='#F18F01', marker='s', markersize=10, linewidth=3, label='Temperature'),
-    ]
-    
-    # Create legend-only figure
-    fig_legend = plt.figure(figsize=(10, 0.5))
-    ax_legend = fig_legend.add_subplot(111)
-    ax_legend.axis('off')
-    
-    legend = ax_legend.legend(
-        handles=legend_elements,
-        loc='center',
-        ncol=4,
-        frameon=False,
-        handler_map={legend_elements[2]: MinMaxHandler()}
-    )
-    
-    legend_path = output_path.replace('.png', '_legend.png')
-    fig_legend.savefig(legend_path, dpi=150, bbox_inches='tight')
-    fig_legend.savefig(legend_path.replace('.png', '.pdf'), bbox_inches='tight')
-    fig_legend.savefig(legend_path.replace('.png', '.svg'), bbox_inches='tight')
-    plt.close(fig_legend)
-    print(f"Legend saved to: {legend_path}")
     
     # Print summary statistics
     print("\n" + "="*80)

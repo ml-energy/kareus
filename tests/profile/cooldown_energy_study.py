@@ -9,14 +9,13 @@ import csv
 import traceback
 import pynvml
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
-from overlap_test_attn import AttentionFuserTest
-from kareus.megatron.core.extensions.fusers.partition_fuser_profile import PartitionFuser
+# sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
+# from overlap_test_attn import AttentionFuserTest
+# from kareus.megatron.core.extensions.fusers.partition_fuser_profile import PartitionFuser
 from zeus.monitor import ZeusMonitor
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 import numpy as np
 
 from pathlib import Path
@@ -26,8 +25,8 @@ if not style_file.exists():
     raise FileNotFoundError(f"Style file not found at: {style_file}")
 plt.style.use(str(style_file))
 
-AXIS_LABEL_FONT_SIZE = 50
-TICK_FONT_SIZE = 40
+AXIS_LABEL_FONT_SIZE = 44
+TICK_FONT_SIZE = 36
 LEGEND_FONT_SIZE = 28
 mpl.rcParams["axes.labelsize"] = AXIS_LABEL_FONT_SIZE
 mpl.rcParams["xtick.labelsize"] = TICK_FONT_SIZE
@@ -313,7 +312,7 @@ def generate_plot(results, output_path, world_size):
     """Generate a plot showing energy vs cooldown time with error ranges and temperature."""
     # Organize data by cooldown time - only include integer cooldowns from 1 to 10
     all_cooldowns = sorted(set(r['cooldown_time'] for r in results))
-    cooldown_times = [c for c in all_cooldowns if c >= 1 and c <= 10 and c == int(c)]
+    cooldown_times = [c for c in all_cooldowns if c >= 0 and c <= 10 and c == int(c)]
     
     # Collect energy per iteration and temperature for each cooldown time
     energy_per_iter_by_cooldown = {c: [] for c in cooldown_times}
@@ -326,7 +325,7 @@ def generate_plot(results, output_path, world_size):
         energy_per_iter_by_cooldown[c].append(r['energy_per_iter'])
         temperature_by_cooldown[c].append(r.get('avg_temperature', 0))
     
-    # Calculate energy statistics
+    # Calculate energy statistics (for summary)
     means_per_iter = [np.mean(energy_per_iter_by_cooldown[c]) for c in cooldown_times]
     stds_per_iter = [np.std(energy_per_iter_by_cooldown[c]) for c in cooldown_times]
     mins_per_iter = [np.min(energy_per_iter_by_cooldown[c]) for c in cooldown_times]
@@ -339,30 +338,32 @@ def generate_plot(results, output_path, world_size):
     fig, ax1 = plt.subplots(figsize=(12, 7.5))
     ax2 = ax1.twinx()
     
-    box_width = 0.6
+    # Prepare data for violin plot
+    violin_data = [energy_per_iter_by_cooldown[c] for c in cooldown_times]
+    x_positions = list(range(1, len(cooldown_times) + 1))
     
-    # Plot energy per iteration (left y-axis) with custom box style
-    for i, c in enumerate(cooldown_times):
-        x = i + 1  # 1-indexed position
-        mean_val = means_per_iter[i]
-        std_val = stds_per_iter[i]
-        min_val = mins_per_iter[i]
-        max_val = maxs_per_iter[i]
-        
-        # Draw min-max vertical line
-        ax1.plot([x, x], [min_val, max_val], color='black', linewidth=3, zorder=1)
-        # Draw min/max caps
-        ax1.plot([x - box_width/4, x + box_width/4], [min_val, min_val], color='black', linewidth=3, zorder=1)
-        ax1.plot([x - box_width/4, x + box_width/4], [max_val, max_val], color='black', linewidth=3, zorder=1)
-        # Draw mean±std box
-        rect = Rectangle((x - box_width/2, mean_val - std_val), box_width, 2 * std_val,
-                         facecolor='gray', edgecolor='black', alpha=0.6, linewidth=2.5, zorder=2)
-        ax1.add_patch(rect)
-        # Draw mean line
-        ax1.plot([x - box_width/2, x + box_width/2], [mean_val, mean_val], color='black', linewidth=3, zorder=3)
+    # Plot energy per iteration (left y-axis) with violin plot
+    parts = ax1.violinplot(violin_data, positions=x_positions, widths=0.7,
+                           showmeans=True, showmedians=False, showextrema=True)
+    
+    # Style the violin plot
+    for pc in parts['bodies']:
+        pc.set_facecolor('gray')
+        pc.set_edgecolor('black')
+        pc.set_alpha(0.6)
+        pc.set_linewidth(1.5)
+    
+    # Style the mean and extrema lines
+    parts['cmeans'].set_color('black')
+    parts['cmeans'].set_linewidth(1.5)
+    parts['cmins'].set_color('black')
+    parts['cmins'].set_linewidth(1.5)
+    parts['cmaxes'].set_color('black')
+    parts['cmaxes'].set_linewidth(1.5)
+    parts['cbars'].set_color('black')
+    parts['cbars'].set_linewidth(1.2)
     
     # Plot temperature (right y-axis) - average only
-    x_positions = list(range(1, len(cooldown_times) + 1))
     ax2.plot(x_positions, means_temp, 's-', linewidth=3, markersize=10,
              color='#F18F01', label='Avg Temperature', zorder=4)
     
@@ -373,17 +374,19 @@ def generate_plot(results, output_path, world_size):
     ax1.set_xticks(x_positions)
     ax1.set_xticklabels([str(int(c)) for c in cooldown_times])
     ax1.set_xlim(0.5, len(cooldown_times) + 0.5)
+    ax1.set_ylim(4.19, 4.81)
     ax1.grid(True, alpha=0.3, axis='y')
     
-    # Configure right y-axis (Temperature)
-    ax2.set_ylabel('Pre-Measurement\nGPU Temperature (°C)')
-    ax2.yaxis.set_label_coords(1.11, 0.42)  # Move label down
-    ax2.tick_params(axis='y', labelcolor='black')
+    # Configure right y-axis (Temperature) - use orange
+    ax2.set_ylabel('Pre-Measurement\nGPU Temperature (°C)', color='#F18F01')
+    # ax2.yaxis.set_label_coords(1.11, 0.5)  # Move label down
+    ax2.tick_params(axis='y', labelcolor='#F18F01', colors='#F18F01')
     
-    # Set spine linewidths
+    # Set spine linewidths and colors
     ax1.spines["left"].set_linewidth(1.2)
     ax1.spines["bottom"].set_linewidth(1.2)
     ax2.spines["right"].set_linewidth(1.2)
+    ax2.spines["right"].set_color('#F18F01')
     ax2.spines["top"].set_linewidth(1.2)
     
     # No legend on main plot
