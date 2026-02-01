@@ -40,7 +40,7 @@ def _get_cuda_rng_tracker_fn():
     return None
 
 
-class TEFusibleLinear(Linear):
+class TELinearOp(Linear):
     """
     Wrapper for the Transformer-Engine's FusedOperation-based `Linear` layer.
     
@@ -289,16 +289,16 @@ class TEFusibleLinear(Linear):
 
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
         """Replicate cross TP/DP for checkpointing."""
-        # Provide the dist-ckpt support when TEFusibleLinear is directly used
+        # Provide the dist-ckpt support when TELinearOp is directly used
         # It can only happen with duplicated parallel mode
         assert (
             self.parallel_mode is None or self.parallel_mode == "duplicated"
-        ), "TEFusibleLinear sharded_state_dict can only be used with duplicated parallel mode"
+        ), "TELinearOp sharded_state_dict can only be used with duplicated parallel mode"
         state_dict = self.state_dict(prefix='', keep_vars=True)
         return make_sharded_tensors_for_checkpoint(state_dict, prefix, None, sharded_offsets)
 
 
-class TEFusibleColumnParallelLinear(TEFusibleLinear):
+class TEColumnParallelLinearOp(TELinearOp):
     """
     Wrapper for the FusedOperation-based `Linear` layer specialized similar
     to megatron's `ColumnParallelLinear` layer.
@@ -348,7 +348,7 @@ class TEFusibleColumnParallelLinear(TEFusibleLinear):
         )
 
 
-class TEFusibleRowParallelLinear(TEFusibleLinear):
+class TERowParallelLinearOp(TELinearOp):
     """
     Wrapper for the FusedOperation-based `Linear` layer specialized similar
     to megatron's `RowParallelLinear` layer.
@@ -403,7 +403,7 @@ class TEFusibleRowParallelLinear(TEFusibleLinear):
 def check_te_fused_operation_availability():
     """Check if TransformerEngine FusedOperation Linear is available."""
     try:
-        from transformer_engine.pytorch.ops.linear import Linear as TEFusibleLinear
+        from transformer_engine.pytorch.ops.linear import Linear as TELinearOp
         return True
     except ImportError:
         return False
@@ -417,7 +417,7 @@ def get_fused_linear_class():
             "This API is subject to change and may not have all features of the stable API.",
             UserWarning
         )
-        return TEFusibleLinear
+        return TELinearOp
     else:
         # Fallback to traditional implementation
         from megatron.core.extensions.transformer_engine import TELinear
@@ -441,7 +441,7 @@ def create_te_linear_layer(
 ):
     """Create a linear layer using either FusedOperation or traditional approach."""
     if use_fused_operation and check_te_fused_operation_availability():
-        return TEFusibleLinear(
+        return TELinearOp(
             input_size=input_size,
             output_size=output_size,
             parallel_mode=parallel_mode,

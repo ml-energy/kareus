@@ -272,4 +272,4 @@ def create_rotary_embedding_op(
     """
     return RotaryEmbeddingOp(
         config=config,
-    ) 
+    )

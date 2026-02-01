@@ -2,7 +2,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs
 from kareus.transformer_engine.pytorch.ops import LayerNorm, RMSNorm
 
-class TEFusibleNorm:
+class TENormOp:
     """
     A conditional wrapper to initialize an instance of Transformer-Engine's
     `LayerNorm` or `RMSNorm` based on input

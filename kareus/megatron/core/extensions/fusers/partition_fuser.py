@@ -19,10 +19,10 @@ from transformer_engine.pytorch.ops.op import (
 from kareus.transformer_engine.pytorch.ops.fused import (
     fuse_forward_linear_bias_activation,
 )
-from kareus.transformer_engine.pytorch.ops.basic.bias_dropout_add import BiasDropoutAddOp
+from kareus.megatron.core.extensions.ops.bias_dropout_add import BiasDropoutAddOp
 from kareus.transformer_engine.pytorch.ops.basic.layer_norm import LayerNorm
 from kareus.transformer_engine.pytorch.ops.basic.rmsnorm import RMSNorm
-from kareus.megatron.core.extensions.ops import TEFusibleRowParallelLinear, TEFusibleColumnParallelLinear
+from kareus.megatron.core.extensions.ops import TERowParallelLinearOp, TEColumnParallelLinearOp
 from kareus.transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from kareus.transformer_engine.pytorch.ops.basic.bias import Bias
 from kareus.megatron.core.extensions.ops import QKVPostProcessOp

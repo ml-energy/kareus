@@ -1,4 +1,4 @@
-"""Bias GeLU operation following the BasicOperation pattern."""
+"""Bias GeGLU operation following the BasicOperation pattern."""
 
 import torch
 from typing import Optional
@@ -8,64 +8,74 @@ from transformer_engine.pytorch.utils import clear_tensor_data
 
 
 @torch.compile
-def fused_gelu_forward(
+def fused_geglu_forward(
     x: torch.Tensor,
 ) -> torch.Tensor:
-    """Compiled forward function for GeLU (tanh approximation), no bias.
+    """Compiled forward function for fused GeGLU operation (no bias).
 
-    gelu_tanh(z) = z * 0.5 * (1 + tanh(0.79788456 * z * (1 + 0.044715 * z^2)))
+    GeGLU(x) = GeLU_tanh(x1) * x2, where x1, x2 = split(x, 2, dim=-1)
+    and GeLU_tanh approximation is:
+        gelu_tanh(z) = z * 0.5 * (1 + tanh(0.79788456 * z * (1 + 0.044715 * z^2)))
     """
-    return x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))
+    # Apply GeGLU: split tensor in half along last dimension
+    x1, x2 = torch.chunk(x, 2, -1)
+    tanh_arg = 0.79788456 * x1 * (1 + 0.044715 * x1 * x1)
+    gelu_tanh_x1 = x1 * 0.5 * (1.0 + torch.tanh(tanh_arg))
+    return gelu_tanh_x1 * x2
 
 
 @torch.compile
-def fused_bias_gelu_forward(
+def fused_bias_geglu_forward(
     x: torch.Tensor,
     bias: torch.Tensor,
 ) -> torch.Tensor:
-    """Compiled forward function for bias GeLU (with bias)."""
+    """Compiled forward function for fused bias GeGLU operation (with bias)."""
     x_plus_bias = x + bias
-    return x_plus_bias * 0.5 * (
-        1.0 + torch.tanh(0.79788456 * x_plus_bias * (1 + 0.044715 * x_plus_bias * x_plus_bias))
-    )
+    x1, x2 = torch.chunk(x_plus_bias, 2, -1)
+    tanh_arg = 0.79788456 * x1 * (1 + 0.044715 * x1 * x1)
+    gelu_tanh_x1 = x1 * 0.5 * (1.0 + torch.tanh(tanh_arg))
+    return gelu_tanh_x1 * x2
 
 
 @torch.compile
-def fused_gelu_backward(
+def fused_geglu_backward(
     grad_output: torch.Tensor,
     x: torch.Tensor,
 ) -> torch.Tensor:
-    """Compiled backward for GeLU (no bias). Returns grad_input only."""
-    tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
-    ff = 0.5 * x * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)) + 0.5 * (
-        1 + tanh_out
-    )
-    grad_input = ff * grad_output
+    """Compiled backward for GeGLU (no bias). Returns grad_input only."""
+    x1, x2 = torch.chunk(x, 2, -1)
+    tanh_out = torch.tanh(0.79788456 * x1 * (1 + 0.044715 * x1 * x1))
+    ff = 0.5 * x1 * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x1 * x1)) + 0.5 * (1 + tanh_out)
+    grad_x1 = grad_output * x2 * ff
+    grad_x2 = grad_output * (x1 * 0.5 * (1.0 + tanh_out))
+    grad_input = torch.cat([grad_x1, grad_x2], dim=-1)
     return grad_input
 
 
 @torch.compile
-def fused_bias_gelu_backward(
+def fused_bias_geglu_backward(
     grad_output: torch.Tensor,
     x: torch.Tensor,
     bias: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compiled backward for bias GeLU (with bias). Returns (grad_input, grad_bias)."""
+    """Compiled backward for bias GeGLU (with bias). Returns (grad_input, grad_bias)."""
     x_plus_bias = x + bias
-    tanh_out = torch.tanh(0.79788456 * x_plus_bias * (1 + 0.044715 * x_plus_bias * x_plus_bias))
-    ff = 0.5 * x_plus_bias * (
-        (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x_plus_bias * x_plus_bias)
-    ) + 0.5 * (1 + tanh_out)
-    grad = ff * grad_output
-    grad_input = grad
-    grad_bias = grad
+    x1, x2 = torch.chunk(x_plus_bias, 2, -1)
+    tanh_out = torch.tanh(0.79788456 * x1 * (1 + 0.044715 * x1 * x1))
+    ff = 0.5 * x1 * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x1 * x1)) + 0.5 * (1 + tanh_out)
+    grad_x1 = grad_output * x2 * ff
+    grad_x2 = grad_output * (x1 * 0.5 * (1.0 + tanh_out))
+    grad_x_plus_bias = torch.cat([grad_x1, grad_x2], dim=-1)
+    grad_input = grad_x_plus_bias
+    grad_bias = grad_x_plus_bias
     return grad_input, grad_bias
 
 
-class BiasGeluOp(BasicOperation):
-    """Bias GeLU as a BasicOperation.
+class BiasGegluOp(BasicOperation):
+    """Bias GeGLU as a BasicOperation
 
-    Applies GeLU tanh approximation to `input + bias` if bias is provided, otherwise to `input`.
+    This operation performs: GeGLU(input + bias) = GeLU_tanh(x1) * x2
+    where x1, x2 = split(input + bias, 2, dim=-1)
 
     Parameters
     ----------
@@ -73,7 +83,7 @@ class BiasGeluOp(BasicOperation):
                      whether to store input in FP8 format for backward pass.
     """
 
-    # BiasGeLU has 1 extra input: bias
+    # BiasGeGLU has 1 extra input: bias
     num_extra_inputs: int = 1
 
     def __init__(
@@ -86,15 +96,16 @@ class BiasGeluOp(BasicOperation):
     def op_forward(
         self,
         ctx: OperationContext,
-        input_: torch.Tensor,
+        input_: torch.Tensor,  # x
         *,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
         bias: Optional[torch.Tensor] = None,
         fp8_input_store: Optional[bool] = None,
     ) -> torch.Tensor:
-        """Forward pass for bias GeLU."""
+        """Forward pass for bias GeGLU."""
 
+        # Use instance defaults if not provided
         if fp8_input_store is None:
             fp8_input_store = self.fp8_input_store
 
@@ -108,17 +119,18 @@ class BiasGeluOp(BasicOperation):
 
         # Enable gradients for proper JIT compilation and mixed precision compatibility
         with torch.enable_grad():
+            # Call compiled forward function (bias or no-bias variant)
             if bias is not None:
-                output = fused_bias_gelu_forward(
+                output = fused_bias_geglu_forward(
                     x=input_reshaped,
                     bias=bias,
                 )
             else:
-                output = fused_gelu_forward(
+                output = fused_geglu_forward(
                     x=input_reshaped,
                 )
 
-        # Reshape output back to original shape
+        # Reshape output back to original shape (with half the last dimension due to GeGLU)
         output = output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 
         # Save context for backward pass
@@ -139,7 +151,7 @@ class BiasGeluOp(BasicOperation):
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor]]]:
-        """Backward pass for bias GeLU."""
+        """Backward pass for bias GeGLU."""
 
         # Retrieve saved context
         has_bias = ctx.has_bias
@@ -158,15 +170,15 @@ class BiasGeluOp(BasicOperation):
         # Restore input dtype if it was stored in FP8
         input_ = input_for_backward.to(ori_input_dtype) if fp8_input_store else input_for_backward
 
-        # Call compiled backward function
+        # Call compiled backward function (bias or no-bias variant)
         if has_bias:
-            grad_input, grad_bias = fused_bias_gelu_backward(
+            grad_input, grad_bias = fused_bias_geglu_backward(
                 grad_output=grad_output_reshaped,
                 x=input_,
                 bias=bias,
             )
         else:
-            grad_input = fused_gelu_backward(
+            grad_input = fused_geglu_backward(
                 grad_output=grad_output_reshaped,
                 x=input_,
             )
@@ -224,5 +236,4 @@ class BiasGeluOp(BasicOperation):
 
         grad_input, grad_extra_inputs = self.op_backward(basic_op_ctxs[0], grad_output)
         return grad_input, [()], [grad_extra_inputs]
-
 

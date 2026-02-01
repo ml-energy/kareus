@@ -38,12 +38,12 @@ from megatron.core.utils import is_te_min_version
 from kareus.megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from kareus.megatron.core.transformer.mlp import MLP, MLPSubmodules
 from kareus.megatron.core.extensions.ops import (
-    TEFusibleColumnParallelLinear,
-    TEFusibleRowParallelLinear,
+    TEColumnParallelLinearOp,
+    TERowParallelLinearOp,
 )
-from kareus.megatron.core.extensions.ops import TEFusibleDotProductAttention
-from kareus.megatron.core.extensions.ops import TEFusibleNorm
-from kareus.transformer_engine.pytorch.ops import BiasDropoutAddOp as TEFusibleBiasDropoutAdd
+from kareus.megatron.core.extensions.ops import TEDotProductAttentionOp
+from kareus.megatron.core.extensions.ops import TENormOp
+from kareus.megatron.core.extensions.ops import BiasDropoutAddOp
 
 HAVE_TE = True
 # except ImportError:
@@ -145,20 +145,20 @@ def get_gpt_layer_with_transformer_engine_spec(
         # TENorm significantly harms convergence when used
         # for QKLayerNorm if TE Version < 1.9;
         # we instead use the Apex implementation.
-        qk_norm = TEFusibleNorm if is_te_min_version("1.9.0") else FusedLayerNorm
+        qk_norm = TENormOp if is_te_min_version("1.9.0") else FusedLayerNorm
         if qk_l2_norm or qk_layernorm:
             raise NotImplementedError("qk_l2_norm and qk_layernorm not supported")
         return ModuleSpec(
             module=TransformerLayer,
             submodules=TransformerLayerSubmodules(
-                input_layernorm=TEFusibleNorm,
+                input_layernorm=TENormOp,
                 self_attention=ModuleSpec(
                     module=SelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=SelfAttentionSubmodules(
-                        linear_qkv=TEFusibleColumnParallelLinear,
-                        core_attention=TEFusibleDotProductAttention,
-                        linear_proj=TEFusibleRowParallelLinear,
+                        linear_qkv=TEColumnParallelLinearOp,
+                        core_attention=TEDotProductAttentionOp,
+                        linear_proj=TERowParallelLinearOp,
                         # q_layernorm=(
                         #     L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
                         # ),
@@ -167,10 +167,10 @@ def get_gpt_layer_with_transformer_engine_spec(
                         # ),
                     ),
                 ),
-                self_attn_bda=TEFusibleBiasDropoutAdd,
-                pre_mlp_layernorm=TEFusibleNorm,
+                self_attn_bda=BiasDropoutAddOp,
+                pre_mlp_layernorm=TENormOp,
                 mlp=mlp,
-                mlp_bda=TEFusibleBiasDropoutAdd,
+                mlp_bda=BiasDropoutAddOp,
             ),
         )
 
@@ -318,8 +318,8 @@ def get_mlp_module_spec(
         return ModuleSpec(
             module=MLP,
             submodules=MLPSubmodules(
-                linear_fc1=TEFusibleColumnParallelLinear,
-                linear_fc2=TEFusibleRowParallelLinear
+                linear_fc1=TEColumnParallelLinearOp,
+                linear_fc2=TERowParallelLinearOp
             ),
         )
     else:

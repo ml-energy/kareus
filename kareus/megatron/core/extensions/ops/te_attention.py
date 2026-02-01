@@ -51,7 +51,7 @@ from transformer_engine.pytorch.ops.fuser import OperationFuser
 from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttentionOp
 from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import K_TO_SAVE, V_TO_SAVE
 
-class TEFusibleDotProductAttention(DotProductAttentionOp):
+class TEDotProductAttentionOp(DotProductAttentionOp):
     """
     Wrapper for the Transformer-Engine's `DotProductAttentionOp` layer that also
     has "flash attention" enabled.
@@ -113,13 +113,13 @@ class TEFusibleDotProductAttention(DotProductAttentionOp):
             assert is_te_min_version(
                 "1.0.0"
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
-            if getattr(TEFusibleDotProductAttention, "cp_stream") is None:
-                TEFusibleDotProductAttention.cp_stream = torch.cuda.Stream()
+            if getattr(TEDotProductAttentionOp, "cp_stream") is None:
+                TEDotProductAttentionOp.cp_stream = torch.cuda.Stream()
             extra_kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
             extra_kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(
                 check_initialized=False
             )
-            extra_kwargs["cp_stream"] = TEFusibleDotProductAttention.cp_stream
+            extra_kwargs["cp_stream"] = TEDotProductAttentionOp.cp_stream
             if is_te_min_version("1.10.0"):
                 if cp_comm_type is None:
                     extra_kwargs["cp_comm_type"] = "p2p"
