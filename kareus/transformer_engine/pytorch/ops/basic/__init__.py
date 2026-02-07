@@ -6,7 +6,6 @@
 
 from .basic_linear import BasicLinear
 from .bias import Bias
-from kareus.megatron.core.extensions.ops.bias_dropout_add import BiasDropoutAddOp
 from .all_reduce import AllReduce
 from .all_gather_kv import AllGatherKV, K_AG, V_AG
 from .reduce_scatter_kv import ReduceScatterKV
