@@ -24,6 +24,7 @@ from kareus.megatron.core.extensions.fusers.partition_fuser import PartitionFuse
 from kareus.megatron.core.extensions.fusers.attn_oproj_fuser import AttnOprojPartitionFuser
 from kareus.megatron.core.extensions.fusers.qkv_fuser import QKVPartitionFuser
 from kareus.megatron.core.extensions.fusers.qkv_fuser2 import QKVPartitionFuser2
+from kareus.megatron.core.extensions.ops.residual_fork import ResidualForkOp
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +272,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # Attention submodules
         # =================================================================
 
+        self.attn_residual_fork = ResidualForkOp()
+
         # [Module 1: Input Layernorm]
         self.input_layernorm = build_module(
             submodules.input_layernorm,
@@ -302,6 +305,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # =================================================================
         # MLP submodules
         # =================================================================
+
+        self.mlp_residual_fork = ResidualForkOp()
 
         # [Module 4: Pre-MLP Layernorm]
         self.pre_mlp_layernorm = build_module(
@@ -685,16 +690,24 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
     def get_all_operators(self) -> List:
         """Return all operators in execution order.
 
-        Order: [attn_bda, input_ln, qkv, qkv_post, rotary, core_attn, proj,
-                mlp_bda, pre_mlp_ln, fc1, activation, fc2]
+        Order: [attn_bda, attn_residual_fork, input_ln,
+                qkv, qkv_post, rotary, core_attn, proj,
+                mlp_bda, mlp_residual_fork, pre_mlp_ln,
+                fc1, activation, fc2]
+
+        ResidualForkOp sits before each LayerNorm so that:
+          Forward:  fork x into (x_main→LN, x_copy→residual for next BDA)
+          Backward: accumulate grad_main + grad_residual at the fork point
         """
         ops: List = []
         # Attention partition
         ops.append(self.self_attn_bda)
+        ops.append(self.attn_residual_fork)
         ops.append(self.input_layernorm)
         ops.extend(self.self_attention.get_compute_ops())
         # MLP partition
         ops.append(self.mlp_bda)
+        ops.append(self.mlp_residual_fork)
         ops.append(self.pre_mlp_layernorm)
         ops.extend(self.mlp.get_compute_ops())
         return ops

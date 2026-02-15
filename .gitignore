@@ -17,6 +17,8 @@ dump/
 *.svg
 perseus_results*/
 profile_result/
+CLAUDE.md
+.claude/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

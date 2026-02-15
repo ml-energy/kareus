@@ -1,6 +1,6 @@
 
 from contextlib import nullcontext
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import torch
 from torch import Tensor
@@ -138,9 +138,6 @@ class TransformerBlock(MegatronModule):
 
         self.layers = torch.nn.ModuleList(layers)
 
-        # @TODO: add back account_for_embedding_in_pipeline_split (see issue #293)
-        # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
-        # self.post_process and self.post_layer_norm guide this behavior
         if self.submodules.layer_norm and self.post_process and self.post_layer_norm:
             self.final_layernorm = build_module(
                 self.submodules.layer_norm,
@@ -151,6 +148,7 @@ class TransformerBlock(MegatronModule):
         else:
             self.final_layernorm = None  # Either this or nn.Identity
     
+    # TODO: assign to the CommOp
     def _init_layer_tensor_parallel_comm(self):
         nano_batch_size = get_micro_batch_size() // 2
         local_seq_length = self.config.max_sequence_length // self.config.context_parallel_size
@@ -180,6 +178,7 @@ class TransformerBlock(MegatronModule):
             layer.init_tensor_parallel_comm(self.allreduce_comm_ops)
             layer.build_fusers()
     
+    # TODO: assign to the CommOp
     def _init_context_parallel_comm(self):
         nano_batch_size = get_micro_batch_size() // 2
         local_seq_length = self.config.max_sequence_length // self.config.context_parallel_size
