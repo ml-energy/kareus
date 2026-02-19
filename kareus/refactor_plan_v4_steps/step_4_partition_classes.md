@@ -51,7 +51,7 @@ The core execution method. Replaces the logic from `partition_fuser.py`.
    - If comm_start == 0: event_record(current_stream)
 
 2. For each comp_op (indexed by fused_idx):
-   a. Create OperationContext via ctx.create_op_context(op.operator.op_id)
+   a. Create OperationContext via ctx.create_op_context(op.op_id)
    b. Read input tensors from ctx.tensor_store using op.input_ports[*].tensor_id
       - Port 0 = main tensor (x)
       - Port 1+ = extra inputs (bias, residual, key, value, rotary, etc.)
@@ -101,7 +101,7 @@ Returns `grad_params: Dict[int, List]` — parameter gradients keyed by op_id.
 1. Communication overlap setup (same as forward)
 
 2. For each comp_op (indexed by fused_idx):
-   a. Retrieve OperationContext via ctx.get_op_context(op.operator.op_id)
+   a. Retrieve OperationContext via ctx.get_op_context(op.op_id)
       - Contains saved_tensors from forward
    b. If not op_ctx.requires_grad: break
    c. Read grad input tensors from ctx.tensor_store using op.input_ports[*].tensor_id
@@ -109,7 +109,7 @@ Returns `grad_params: Dict[int, List]` — parameter gradients keyed by op_id.
       - Port 1+ = grad of extra forward outputs (grad_key, grad_value, etc.)
    d. If fused_idx == comm_start: launch backward comm on pre_ctx
    e. Execute: dx, grad_params, grad_extra = op.operator.fuser_backward(...)
-   f. Store grad_params[op.operator.op_id] = grad_params
+   f. Store grad_params[op.op_id] = grad_params
    g. Free saved_tensors (op_ctx.saved_tensors = None)
    h. Write grad output tensors to ctx.tensor_store using op.output_ports[*].tensor_id
 
@@ -145,6 +145,17 @@ Both partition classes share:
 
 Consider extracting a `_PartitionBase` or common mixin for shared logic, though the plan keeps them separate for clarity.
 
+## FusedOperation Decomposition
+
+ComputeOps may wrap either a `PartitionableOperator` (simple ops like LayerNorm,
+RotaryEmbedding) or a `BasicOperation` (from a decomposed `FusedOperation` like
+Linear → BasicLinear + Bias). The execute loop treats both uniformly via
+`op.operator.fuser_forward()` / `op.operator.fuser_backward()`.
+
+Each ComputeOp carries its own `op_id` (assigned by `TensorGraphBuilder`),
+decoupled from `operator.op_id`, since `BasicOperation` doesn't have an `op_id`.
+The execute code uses `op.op_id` for context management.
+
 ## Verification Criteria
 
 - ForwardPartition correctly routes tensors through comp_ops via TensorStore
@@ -152,6 +163,7 @@ Consider extracting a `_PartitionBase` or common mixin for shared logic, though 
 - BackwardPartition retrieves correct OperationContext from forward
 - Backward produces grad_params dict with correct op_id keys
 - Comm ops read from pre_ctx and write to pre_ctx (OTHER nanobatch)
+- FusedOperation decomposition: each basic_op gets its own OperationContext
 
 ## Code Reference (from plan)
 

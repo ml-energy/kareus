@@ -50,18 +50,24 @@ class TensorPort:
 
 ### 4. `ComputeOp` (Dataclass)
 
-A computation node in the graph.
+A computation node in the graph. The operator may be a `PartitionableOperator`
+(simple ops) or a `BasicOperation` (from a decomposed `FusedOperation`).
 
 ```python
 @dataclass
 class ComputeOp:
-    operator: 'PartitionableOperator'
+    operator: 'FusibleOperation'  # PartitionableOperator or BasicOperation
+    op_id: int = -1  # Unique ID for NanoBatchContext.create/get_op_context
     input_ports: List[TensorPort]
     output_ports: List[TensorPort]
 
     def get_input_tensor_ids(self) -> List[str]: ...
     def get_output_tensor_ids(self) -> List[str]: ...
 ```
+
+`op_id` is decoupled from `operator.op_id` because `BasicOperation` (from
+TransformerEngine) doesn't have an `op_id` attribute. The `TensorGraphBuilder`
+assigns sequential `op_id` values when building `ComputeOp` instances.
 
 ### 5. `CommunicationOp` (Dataclass)
 
@@ -85,12 +91,8 @@ Base interface for operators that participate in partitioning.
 
 ```python
 class PartitionableOperator(ABC):
-    op_id: int = -1  # Assigned by _build_partitions Step 1
-
-    @abstractmethod
     def get_forward_ops(self) -> List[Union['ComputeOpSpec', 'CommunicationOpSpec']]: ...
 
-    @abstractmethod
     def get_backward_ops(self) -> List[Union['ComputeOpSpec', 'CommunicationOpSpec']]: ...
 
     def get_input_channels(self) -> List[Channel]:
@@ -103,31 +105,57 @@ class PartitionableOperator(ABC):
 Design principles:
 - Operators declare FORWARD channels only
 - Backward channels are auto-derived by `ComputeOpSpec(is_backward=True)`
-- `op_id` is shared between forward and backward ComputeOps (same operator instance)
+- `op_id` lives on `ComputeOp`, assigned by `TensorGraphBuilder` — not on the operator
 
 ### 7. `ComputeOpSpec` (Dataclass)
 
 Specification for creating a ComputeOp. Handles automatic backward channel derivation.
 
+When the operator is a `BasicOperation` (from a decomposed `FusedOperation`),
+use `input_channels` / `output_channels` to provide channel info explicitly.
+
 ```python
 @dataclass
 class ComputeOpSpec:
-    operator: PartitionableOperator
+    operator: 'FusibleOperation'  # PartitionableOperator or BasicOperation
     is_backward: bool = False
+    op_id: Optional[int] = None  # Propagated to ComputeOp.op_id
+    input_channels: Optional[List[Channel]] = None   # Override for BasicOperations
+    output_channels: Optional[List[Channel]] = None   # Override for BasicOperations
 
     def get_input_channels(self) -> List[Channel]:
         if self.is_backward:
-            # Backward input = grad of forward output
+            fwd_out = self.output_channels or self.operator.get_output_channels()
             return [Channel(i, f"grad_{ch.name}")
-                    for i, ch in enumerate(self.operator.get_output_channels())]
-        return self.operator.get_input_channels()
+                    for i, ch in enumerate(fwd_out)]
+        return self.input_channels or self.operator.get_input_channels()
 
     def get_output_channels(self) -> List[Channel]:
         if self.is_backward:
-            # Backward output = grad of forward input
+            fwd_in = self.input_channels or self.operator.get_input_channels()
             return [Channel(i, f"grad_{ch.name}")
-                    for i, ch in enumerate(self.operator.get_input_channels())]
-        return self.operator.get_output_channels()
+                    for i, ch in enumerate(fwd_in)]
+        return self.output_channels or self.operator.get_output_channels()
+```
+
+FusedOperation decomposition example (Linear = BasicLinear + Bias):
+```python
+def get_forward_ops(self):
+    return [
+        ComputeOpSpec(operator=self.basic_ops[0],  # BasicLinear
+                      input_channels=[Channel(0, "main")],
+                      output_channels=[Channel(0, "main")]),
+        ComputeOpSpec(operator=self.basic_ops[1],  # Bias
+                      input_channels=[Channel(0, "main")],
+                      output_channels=[Channel(0, "main"), Channel(1, "bias")]),
+    ]
+
+def get_backward_ops(self):
+    # Reversed order
+    return [
+        ComputeOpSpec(operator=self.basic_ops[1], is_backward=True, ...),  # Bias
+        ComputeOpSpec(operator=self.basic_ops[0], is_backward=True, ...),  # BasicLinear
+    ]
 ```
 
 ### 8. `CommunicationOpSpec` (Dataclass)

@@ -316,10 +316,10 @@ class TransformerBlock(MegatronModule):
         3. Communication patterns differ (e.g., RowParallel AllReduce in forward,
            ColumnParallel AllReduce in backward)
         """
-        # Step 1: Collect all operators from all layers and assign op_id.
-        # op_id is a stable identifier on PartitionableOperator, shared by
-        # both forward and backward ComputeOps that reference the same operator.
-        # Used as key in NanoBatchContext.op_contexts.
+        # Step 1: Collect all operators from all layers.
+        # op_id is assigned by TensorGraphBuilder to each ComputeOp.
+        # Forward and backward ComputeOps that reference the same operator
+        # share the same op_id. Used as key in NanoBatchContext.op_contexts.
         all_ops = []
         for layer in self.layers:
             all_ops.extend(layer.get_all_operators())
@@ -833,15 +833,24 @@ class TensorPort:
 class ComputeOp:
     """
     Represents a computation operation in the graph.
+
+    The operator may be a PartitionableOperator (simple ops like LayerNorm,
+    RotaryEmbedding) or a BasicOperation (from a decomposed FusedOperation
+    like Linear → BasicLinear + Bias).
+
+    op_id: unique identifier for context management. Decoupled from
+    operator.op_id because BasicOperations don't have op_id attributes.
+    Assigned by _build_partitions when collecting operators.
     """
-    operator: 'PartitionableOperator'
+    operator: 'FusibleOperation'  # PartitionableOperator or BasicOperation
+    op_id: int = -1  # Unique ID for NanoBatchContext.create/get_op_context
     input_ports: List[TensorPort] = field(default_factory=list)
     output_ports: List[TensorPort] = field(default_factory=list)
-    
+
     def get_input_tensor_ids(self) -> List[str]:
         """Get tensor IDs for all input ports"""
         return [p.tensor_id for p in self.input_ports]
-    
+
     def get_output_tensor_ids(self) -> List[str]:
         """Get tensor IDs for all output ports"""
         return [p.tensor_id for p in self.output_ports]
@@ -877,38 +886,36 @@ class PartitionableOperator(ABC):
     Backward channels are auto-derived by ComputeOpSpec(is_backward=True):
       - Input channels  = [grad_{ch} for ch in forward output_channels]
       - Output channels = [grad_{ch} for ch in forward input_channels]
-    
+
     The TensorGraphBuilder routes tensors by channel NAME (not port index).
     Channels persist in the registry until overwritten, enabling non-adjacent
     connections (e.g., "value" from QKVPostProcess skipping RotaryEmbed to
     reach DotProductAttention).
-    
-    op_id: Unique identifier assigned by TransformerBlock._build_partitions()
-    during Step 1 (operator collection). Used as key in NanoBatchContext.op_contexts
-    for saving/restoring OperationContext across forward and backward passes.
-    Since both forward and backward ComputeOps reference the same operator
-    instance, they share the same op_id automatically.
     """
     
-    op_id: int = -1  # Assigned by _build_partitions Step 1
-    
-    @abstractmethod
-    def get_forward_ops(self) -> List[Union['ComputeOpSpec', 'CommunicationOpSpec']]:
-        """
-        Return operation specifications for forward pass.
+    # @abstractmethod
+    # def get_forward_ops(self) -> List[Union['ComputeOpSpec', 'CommunicationOpSpec']]:
+    #     """
+    #     Return operation specifications for forward pass.
         
-        Returns list of ComputeOpSpec or CommunicationOpSpec.
-        The graph builder will instantiate actual ComputeOp/CommunicationOp
-        with proper channel connections.
-        """
-        pass
+    #     Returns list of ComputeOpSpec or CommunicationOpSpec.
+    #     The graph builder will instantiate actual ComputeOp/CommunicationOp
+    #     with proper channel connections.
+    #     """
+    #     pass
     
-    @abstractmethod
-    def get_backward_ops(self) -> List[Union['ComputeOpSpec', 'CommunicationOpSpec']]:
-        """
-        Return operation specifications for backward pass.
-        """
-        pass
+    # @abstractmethod
+    # def get_backward_ops(self) -> List[Union['ComputeOpSpec', 'CommunicationOpSpec']]:
+    #     """
+    #     Return operation specifications for backward pass.
+    #     """
+    #     pass
+
+    def get_forward_ops(self):
+        return [ComputeOpSpec(operator=self)]
+    
+    def get_backward_ops(self):
+        return [ComputeOpSpec(operator=self, is_backward=True)]
     
     def get_input_channels(self) -> List['Channel']:
         """
@@ -937,32 +944,40 @@ class PartitionableOperator(ABC):
 class ComputeOpSpec:
     """
     Specification for creating a ComputeOp.
-    
+
     IMPORTANT: For backward ops, set is_backward=True.
     This automatically reverses the channel semantics:
     - Input channels  = grad of forward output channels (prefixed with "grad_")
     - Output channels = grad of forward input channels (prefixed with "grad_")
-    
-    This mirrors the mathematical structure of backpropagation:
-    - Backward "input"  = gradient of forward output
-    - Backward "output" = gradient of forward input
+
+    When operator is a BasicOperation (from a decomposed FusedOperation),
+    use input_channels / output_channels to provide channel info explicitly,
+    since BasicOperations don't implement PartitionableOperator.
+
+    op_id: unique identifier propagated to ComputeOp.op_id. If None, the
+    TensorGraphBuilder assigns one automatically.
     """
-    operator: PartitionableOperator
+    operator: 'FusibleOperation'  # PartitionableOperator or BasicOperation
     is_backward: bool = False
-    
+    op_id: Optional[int] = None
+    input_channels: Optional[List[Channel]] = None   # Override for BasicOperations
+    output_channels: Optional[List[Channel]] = None   # Override for BasicOperations
+
     def get_input_channels(self) -> List[Channel]:
         if self.is_backward:
             # Backward input = grad of forward output
+            fwd_out = self.output_channels or self.operator.get_output_channels()
             return [Channel(i, f"grad_{ch.name}")
-                    for i, ch in enumerate(self.operator.get_output_channels())]
-        return self.operator.get_input_channels()
-    
+                    for i, ch in enumerate(fwd_out)]
+        return self.input_channels or self.operator.get_input_channels()
+
     def get_output_channels(self) -> List[Channel]:
         if self.is_backward:
             # Backward output = grad of forward input
+            fwd_in = self.input_channels or self.operator.get_input_channels()
             return [Channel(i, f"grad_{ch.name}")
-                    for i, ch in enumerate(self.operator.get_input_channels())]
-        return self.operator.get_output_channels()
+                    for i, ch in enumerate(fwd_in)]
+        return self.output_channels or self.operator.get_output_channels()
 
 
 @dataclass
@@ -1127,40 +1142,81 @@ class TensorGraph:
 class TEColumnParallelLinearOp(TELinearOp, PartitionableOperator):
     """
     Column parallel linear with communication interface.
-    
+
     Used by: QKV projection (linear_qkv), MLP first layer (linear_fc1).
-    
+
     Forward:  compute only (input is replicated, output is partitioned — no comm needed)
     Backward: compute → AllReduce (gradient of replicated input is partial sum → needs AllReduce)
-    
+
     Channels: reads "main", writes "main" and optionally "bias" (if return_bias=True).
-    
+
+    IMPORTANT — FusedOperation decomposition:
+    TEColumnParallelLinearOp wraps a FusedOperation (Linear = BasicLinear + Bias).
+    get_forward_ops / get_backward_ops decompose into per-basic_op specs so that
+    each BasicOperation gets its own OperationContext and can call fuser_forward /
+    fuser_backward with a single context (matching the TransformerEngine contract).
+
     The backward AllReduce is CRITICAL for correctness in tensor parallelism:
       Forward:  y_partitioned = x_replicated @ W_partitioned^T  (no comm)
       Backward: grad_x = AllReduce(grad_y @ W_partitioned)      (partial sum → AllReduce)
-    
-    Without this backward AllReduce, backward partitions would have NO communication
-    boundaries, preventing nano-batch overlap in the backward pass.
     """
-    
+
     def get_input_channels(self) -> List[Channel]:
         return [Channel(0, "main")]
-    
+
     def get_output_channels(self) -> List[Channel]:
         if self.return_bias:
             return [Channel(0, "main"), Channel(1, "bias")]
         return [Channel(0, "main")]
-    
+
     def get_forward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
-        # No communication in forward — output is partitioned, consumed locally
-        return [ComputeOpSpec(operator=self)]
-    
+        # Decompose FusedOperation into basic_ops:
+        #   self.basic_ops[0] = BasicLinear  (main → main)
+        #   self.basic_ops[1] = Bias         (main → main, bias)
+        basic_linear = self.basic_ops[0]  # BasicLinear
+        bias_op = self.basic_ops[1]       # Bias
+        ops = [
+            ComputeOpSpec(
+                operator=basic_linear,
+                input_channels=[Channel(0, "main")],
+                output_channels=[Channel(0, "main")],
+            ),
+        ]
+        if self.return_bias:
+            ops.append(ComputeOpSpec(
+                operator=bias_op,
+                input_channels=[Channel(0, "main")],
+                output_channels=[Channel(0, "main"), Channel(1, "bias")],
+            ))
+        else:
+            ops.append(ComputeOpSpec(
+                operator=bias_op,
+                input_channels=[Channel(0, "main")],
+                output_channels=[Channel(0, "main")],
+            ))
+        return ops
+
     def get_backward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
-        # Backward: compute produces partial-sum gradient → AllReduce to get full gradient
-        # This AllReduce is the partition boundary in backward (mirrors forward's
-        # RowParallel AllReduce partition boundary).
+        # Reversed basic_ops for backward, then AllReduce
+        basic_linear = self.basic_ops[0]
+        bias_op = self.basic_ops[1]
+        if self.return_bias:
+            bias_out_channels = [Channel(0, "main"), Channel(1, "bias")]
+        else:
+            bias_out_channels = [Channel(0, "main")]
         return [
-            ComputeOpSpec(operator=self, is_backward=True),
+            ComputeOpSpec(
+                operator=bias_op,
+                is_backward=True,
+                input_channels=[Channel(0, "main")],
+                output_channels=bias_out_channels,
+            ),
+            ComputeOpSpec(
+                operator=basic_linear,
+                is_backward=True,
+                input_channels=[Channel(0, "main")],
+                output_channels=[Channel(0, "main")],
+            ),
             CommunicationOpSpec(
                 comm_type=CommunicationType.ALL_REDUCE,
                 channels=[Channel(0, "grad_main")],
@@ -1171,41 +1227,72 @@ class TEColumnParallelLinearOp(TELinearOp, PartitionableOperator):
 class TERowParallelLinearOp(TELinearOp, PartitionableOperator):
     """
     Row parallel linear with communication interface.
-    
+
     Used by: output projection (linear_proj), MLP second layer (linear_fc2).
-    
+
     Forward: compute → AllReduce (output is partial sum → needs AllReduce)
     Backward: compute only (gradient is partitioned, feeds into ColumnParallel backward)
-    
-    Channels: reads "main", writes "main" and optionally "bias" (if return_bias=True).
-    The "bias" channel persists in the registry until consumed by the next
-    BiasDropoutAddOp (which may be many operators later, possibly in the next layer).
+
+    IMPORTANT — FusedOperation decomposition:
+    Same as TEColumnParallelLinearOp: Linear = BasicLinear + Bias.
+    get_forward_ops / get_backward_ops return per-basic_op specs.
     """
-    
+
     def get_input_channels(self) -> List[Channel]:
         return [Channel(0, "main")]
-    
+
     def get_output_channels(self) -> List[Channel]:
         if self.return_bias:
             return [Channel(0, "main"), Channel(1, "bias")]
         return [Channel(0, "main")]
-    
+
     def get_forward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
+        # Decompose FusedOperation into basic_ops, then AllReduce
+        basic_linear = self.basic_ops[0]  # BasicLinear
+        bias_op = self.basic_ops[1]       # Bias
+        if self.return_bias:
+            bias_out_channels = [Channel(0, "main"), Channel(1, "bias")]
+        else:
+            bias_out_channels = [Channel(0, "main")]
         return [
-            ComputeOpSpec(operator=self),  # is_backward=False (default)
+            ComputeOpSpec(
+                operator=basic_linear,
+                input_channels=[Channel(0, "main")],
+                output_channels=[Channel(0, "main")],
+            ),
+            ComputeOpSpec(
+                operator=bias_op,
+                input_channels=[Channel(0, "main")],
+                output_channels=bias_out_channels,
+            ),
             CommunicationOpSpec(
                 comm_type=CommunicationType.ALL_REDUCE,
                 channels=[Channel(0, "main")],
             ),
         ]
-    
+
     def get_backward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
-        # No communication in backward — gradient is partitioned and feeds
-        # directly into ColumnParallel backward (which will AllReduce)
-        # is_backward=True auto-derives backward channels:
-        #   input:  [Channel(0, "grad_main")]  (from forward output "main")
-        #   output: [Channel(0, "grad_main")]  (from forward input "main")
-        return [ComputeOpSpec(operator=self, is_backward=True)]
+        # Reversed basic_ops, no communication in backward
+        basic_linear = self.basic_ops[0]
+        bias_op = self.basic_ops[1]
+        if self.return_bias:
+            bias_out_channels = [Channel(0, "main"), Channel(1, "bias")]
+        else:
+            bias_out_channels = [Channel(0, "main")]
+        return [
+            ComputeOpSpec(
+                operator=bias_op,
+                is_backward=True,
+                input_channels=[Channel(0, "main")],
+                output_channels=bias_out_channels,
+            ),
+            ComputeOpSpec(
+                operator=basic_linear,
+                is_backward=True,
+                input_channels=[Channel(0, "main")],
+                output_channels=[Channel(0, "main")],
+            ),
+        ]
 
 
 # --- Additional operator examples demonstrating channel patterns ---
@@ -1668,9 +1755,9 @@ class NanoBatchContext:
     # Tensor storage - tensors are stored by auto-generated IDs
     tensor_store: TensorStore = field(default_factory=TensorStore)
     
-    # Operation contexts for backward, keyed by op_id (PartitionableOperator.op_id)
-    # Forward: create_op_context(op.operator.op_id) → saves OperationContext
-    # Backward: get_op_context(op.operator.op_id) → retrieves same OperationContext
+    # Operation contexts for backward, keyed by op_id (ComputeOp.op_id)
+    # Forward: create_op_context(op.op_id) → saves OperationContext
+    # Backward: get_op_context(op.op_id) → retrieves same OperationContext
     op_contexts: Dict[int, 'OperationContext'] = field(default_factory=dict)
     
     # Saved tensors for backward (flattened from all op_contexts)
@@ -1682,7 +1769,7 @@ class NanoBatchContext:
         Create operation context for an operator (called during forward).
         
         Args:
-            op_id: PartitionableOperator.op_id (assigned in _build_partitions Step 1)
+            op_id: ComputeOp.op_id (assigned in _build_partitions Step 1)
         """
         from transformer_engine.pytorch.ops.op import OperationContext
         ctx = OperationContext()
@@ -1694,7 +1781,7 @@ class NanoBatchContext:
         Get operation context for backward.
         
         Args:
-            op_id: PartitionableOperator.op_id - same value used in create_op_context
+            op_id: ComputeOp.op_id - same value used in create_op_context
                    since forward and backward ComputeOps share the same operator.
         """
         return self.op_contexts[op_id]
@@ -1849,9 +1936,9 @@ class ForwardPartition:
             
             # 1. Create OperationContext for this op (for autograd save/restore)
             #    (same as partition_fuser.py line 107)
-            #    Keyed by op.operator.op_id (assigned in _build_partitions Step 1).
+            #    Keyed by op.op_id (assigned in _build_partitions Step 1).
             #    Backward retrieves with the same key since it shares the operator.
-            op_ctx = ctx.create_op_context(op.operator.op_id)
+            op_ctx = ctx.create_op_context(op.op_id)
             
             # 2. Get input tensors by port tensor_ids from THIS nanobatch's store
             #    OLD: manual isinstance() to figure out extra_inputs
@@ -2115,10 +2202,10 @@ class BackwardPartition:
             
             # 1. Retrieve OperationContext saved during forward pass
             #    Contains saved_tensors needed for backward computation.
-            #    Keyed by op.operator.op_id (same value used in forward's
+            #    Keyed by op.op_id (same value used in forward's
             #    create_op_context, since forward and backward ComputeOps
             #    share the same operator instance).
-            op_ctx = ctx.get_op_context(op.operator.op_id)
+            op_ctx = ctx.get_op_context(op.op_id)
             
             # Stop if no more gradients are required
             # (same as partition_fuser.py lines 317-319)
@@ -2179,7 +2266,7 @@ class BackwardPartition:
             
             # Store parameter gradients
             # fused_op_grad_params is List[Tuple[Tensor, ...]], flatten to List[Tensor]
-            grad_params[op.operator.op_id] = [
+            grad_params[op.op_id] = [
                 t for param_tuple in fused_op_grad_params for t in param_tuple
             ]
             op_ctx.saved_tensors = None  # Free saved tensors

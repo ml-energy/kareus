@@ -46,7 +46,7 @@ class NanoBatchContext:
     # Tensor storage — tensors stored by auto-generated IDs (t_0, t_1, ...)
     tensor_store: TensorStore = field(default_factory=TensorStore)
 
-    # Operation contexts for backward, keyed by op_id (PartitionableOperator.op_id)
+    # Operation contexts for backward, keyed by op_id (ComputeOp.op_id)
     op_contexts: Dict[int, OperationContext] = field(default_factory=dict)
 
     # Bookkeeping for save_for_backward flattening
@@ -60,7 +60,7 @@ Methods:
 
 Called during **forward**. Creates a new `OperationContext` from TransformerEngine for saving activations needed by backward.
 
-- `op_id` comes from `PartitionableOperator.op_id`, assigned in `_build_partitions` Step 1
+- `op_id` comes from `ComputeOp.op_id`, assigned by `TensorGraphBuilder`
 - Stored in `self.op_contexts[op_id]`
 
 #### `get_op_context(op_id: int) -> OperationContext`
