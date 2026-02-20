@@ -1,6 +1,18 @@
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs
 from kareus.transformer_engine.pytorch.ops import LayerNorm, RMSNorm
+from kareus.megatron.core.partitions.tensor_graph import PartitionableOperator
+
+
+class PartitionableLayerNorm(LayerNorm, PartitionableOperator):
+    """LayerNorm with PartitionableOperator interface."""
+    pass
+
+
+class PartitionableRMSNorm(RMSNorm, PartitionableOperator):
+    """RMSNorm with PartitionableOperator interface."""
+    pass
+
 
 class TENormOp:
     """
@@ -16,7 +28,7 @@ class TENormOp:
             del extra_kwargs["params_dtype"]
 
         if config.normalization == "LayerNorm":
-            instance = LayerNorm(
+            instance = PartitionableLayerNorm(
                 hidden_size,
                 eps=eps,
                 # sequence_parallel=config.sequence_parallel,
@@ -24,7 +36,7 @@ class TENormOp:
                 **extra_kwargs,
             )
         elif config.normalization == "RMSNorm":
-            instance = RMSNorm(
+            instance = PartitionableRMSNorm(
                 hidden_size,
                 eps=eps,
                 # sequence_parallel=config.sequence_parallel,

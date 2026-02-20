@@ -1,12 +1,16 @@
 """Residual Fork operation for explicit residual connection handling."""
 
 import torch
-from typing import Optional
+from typing import List, Optional
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+from kareus.megatron.core.partitions.tensor_graph import (
+    Channel,
+    PartitionableOperator,
+)
 
 
-class ResidualForkOp(BasicOperation):
+class ResidualForkOp(BasicOperation, PartitionableOperator):
     """Residual fork as a BasicOperation.
 
     Forward:  input x → main output x, extra output x (residual copy)
@@ -15,6 +19,9 @@ class ResidualForkOp(BasicOperation):
 
     # One extra output: the residual copy
     num_extra_outputs: int = 1
+
+    def get_output_channels(self) -> List[Channel]:
+        return [Channel(0, "main"), Channel(1, "residual")]
 
     def __init__(self) -> None:
         super().__init__()

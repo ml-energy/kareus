@@ -1,11 +1,18 @@
 import warnings
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
 
 # from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.transformer.transformer_config import TransformerConfig
+from kareus.megatron.core.partitions.tensor_graph import (
+    Channel,
+    CommunicationOpSpec,
+    CommunicationType,
+    ComputeOpSpec,
+    PartitionableOperator,
+)
 from megatron.core.parallel_state import (
     get_expert_tensor_parallel_group,
     get_expert_tensor_parallel_rank,
@@ -298,11 +305,29 @@ class TELinearOp(Linear):
         return make_sharded_tensors_for_checkpoint(state_dict, prefix, None, sharded_offsets)
 
 
-class TEColumnParallelLinearOp(TELinearOp):
+class TEColumnParallelLinearOp(TELinearOp, PartitionableOperator):
     """
     Wrapper for the FusedOperation-based `Linear` layer specialized similar
     to megatron's `ColumnParallelLinear` layer.
     """
+
+    def get_output_channels(self) -> List[Channel]:
+        channels = [Channel(0, "main")]
+        if self.te_return_bias:
+            channels.append(Channel(1, "bias"))
+        return channels
+
+    def get_forward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
+        return [ComputeOpSpec(operator=self)]
+
+    def get_backward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
+        return [
+            ComputeOpSpec(operator=self, is_backward=True),
+            CommunicationOpSpec(
+                comm_type=CommunicationType.ALL_REDUCE,
+                channels=[Channel(0, "grad_main")],
+            ),
+        ]
 
     def __init__(
         self,
@@ -348,11 +373,29 @@ class TEColumnParallelLinearOp(TELinearOp):
         )
 
 
-class TERowParallelLinearOp(TELinearOp):
+class TERowParallelLinearOp(TELinearOp, PartitionableOperator):
     """
     Wrapper for the FusedOperation-based `Linear` layer specialized similar
     to megatron's `RowParallelLinear` layer.
     """
+
+    def get_output_channels(self) -> List[Channel]:
+        channels = [Channel(0, "main")]
+        if self.te_return_bias:
+            channels.append(Channel(1, "bias"))
+        return channels
+
+    def get_forward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
+        return [
+            ComputeOpSpec(operator=self),
+            CommunicationOpSpec(
+                comm_type=CommunicationType.ALL_REDUCE,
+                channels=[Channel(0, "main")],
+            ),
+        ]
+
+    def get_backward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
+        return [ComputeOpSpec(operator=self, is_backward=True)]
 
     def __init__(
         self,

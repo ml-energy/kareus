@@ -1,11 +1,15 @@
 """Bias Dropout Add operation following the BasicOperation pattern."""
 
 import torch
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 import math
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.utils import clear_tensor_data
+from kareus.megatron.core.partitions.tensor_graph import (
+    Channel,
+    PartitionableOperator,
+)
 
 
 @torch.compile
@@ -41,11 +45,11 @@ def fused_bias_dropout_add_backward(
     return grad_input, grad_bias, grad_residual
 
 
-class BiasDropoutAddOp(BasicOperation):
+class BiasDropoutAddOp(BasicOperation, PartitionableOperator):
     """Bias Dropout Add as a BasicOperation
-    
+
     This operation performs: residual + dropout(input + bias)
-    
+
     Parameters
     ----------
     dropout_prob : float, default = 0.0
@@ -56,6 +60,9 @@ class BiasDropoutAddOp(BasicOperation):
 
     # BiasDropoutAdd has 2 extra inputs: bias and residual
     num_extra_inputs: int = 2
+
+    def get_input_channels(self) -> List[Channel]:
+        return [Channel(0, "main"), Channel(1, "bias"), Channel(2, "residual")]
 
     def __init__(
         self,

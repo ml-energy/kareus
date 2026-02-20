@@ -1,21 +1,25 @@
 """Rotary Embedding operation following the BasicOperation pattern."""
 
 import torch
-from typing import Optional, Tuple, Union, Callable
+from typing import List, Optional, Tuple, Callable
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.utils import clear_tensor_data
+from kareus.megatron.core.partitions.tensor_graph import (
+    Channel,
+    PartitionableOperator,
+)
 # from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.inference.contexts import BaseInferenceContext
 from kareus.megatron.core.models.common.embedding.rope_utils import apply_rotary_pos_emb, apply_rotary_pos_emb_backward
 
-class RotaryEmbeddingOp(BasicOperation):
+class RotaryEmbeddingOp(BasicOperation, PartitionableOperator):
     """Rotary Embedding as a BasicOperation
-    
+
     This operation applies rotary positional embeddings to query and key tensors.
-    
+
     Parameters
     ----------
     config : TransformerConfig
@@ -28,6 +32,12 @@ class RotaryEmbeddingOp(BasicOperation):
     # RotaryEmbedding has 1 extra outputs: key (query is the main output)
     num_extra_inputs: int = 2
     num_extra_outputs: int = 1
+
+    def get_input_channels(self) -> List[Channel]:
+        return [Channel(0, "main"), Channel(1, "key"), Channel(2, "rotary_pos_emb")]
+
+    def get_output_channels(self) -> List[Channel]:
+        return [Channel(0, "main"), Channel(1, "key")]
 
     def __init__(
         self,

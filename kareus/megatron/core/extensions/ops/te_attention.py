@@ -50,8 +50,16 @@ from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 from kareus.transformer_engine.pytorch.attention.dot_product_attention import DotProductAttentionOp
 from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import K_TO_SAVE, V_TO_SAVE
+from kareus.megatron.core.partitions.tensor_graph import (
+    Channel,
+    CommunicationOpSpec,
+    CommunicationType,
+    ComputeOpSpec,
+    PartitionableOperator,
+)
 
-class TEDotProductAttentionOp(DotProductAttentionOp):
+
+class TEDotProductAttentionOp(DotProductAttentionOp, PartitionableOperator):
     """
     Wrapper for the Transformer-Engine's `DotProductAttentionOp` layer that also
     has "flash attention" enabled.
@@ -62,6 +70,35 @@ class TEDotProductAttentionOp(DotProductAttentionOp):
     """
 
     cp_stream: torch.cuda.Stream = None
+
+    def get_input_channels(self):
+        return [Channel(0, "main"), Channel(1, "key"), Channel(2, "value")]
+
+    def get_forward_ops(self):
+        if self.config.context_parallel_size > 1:
+            return [
+                CommunicationOpSpec(
+                    comm_type=CommunicationType.ALL_GATHER_KV,
+                    channels=[Channel(0, "key"), Channel(1, "value")],
+                ),
+                ComputeOpSpec(operator=self),
+            ]
+        return [ComputeOpSpec(operator=self)]
+
+    def get_backward_ops(self):
+        if self.config.context_parallel_size > 1:
+            return [
+                CommunicationOpSpec(
+                    comm_type=CommunicationType.ALL_GATHER_KV,
+                    channels=[Channel(0, "grad_key"), Channel(1, "grad_value")],
+                ),
+                ComputeOpSpec(operator=self, is_backward=True),
+                CommunicationOpSpec(
+                    comm_type=CommunicationType.REDUCE_SCATTER_KV,
+                    channels=[Channel(0, "grad_key"), Channel(1, "grad_value")],
+                ),
+            ]
+        return [ComputeOpSpec(operator=self, is_backward=True)]
 
     def __init__(
         self,

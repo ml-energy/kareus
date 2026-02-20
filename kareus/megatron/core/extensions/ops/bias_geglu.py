@@ -1,10 +1,14 @@
 """Bias GeGLU operation following the BasicOperation pattern."""
 
 import torch
-from typing import Optional
+from typing import List, Optional
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.utils import clear_tensor_data
+from kareus.megatron.core.partitions.tensor_graph import (
+    Channel,
+    PartitionableOperator,
+)
 
 
 @torch.compile
@@ -71,7 +75,7 @@ def fused_bias_geglu_backward(
     return grad_input, grad_bias
 
 
-class BiasGegluOp(BasicOperation):
+class BiasGegluOp(BasicOperation, PartitionableOperator):
     """Bias GeGLU as a BasicOperation
 
     This operation performs: GeGLU(input + bias) = GeLU_tanh(x1) * x2
@@ -85,6 +89,9 @@ class BiasGegluOp(BasicOperation):
 
     # BiasGeGLU has 1 extra input: bias
     num_extra_inputs: int = 1
+
+    def get_input_channels(self) -> List[Channel]:
+        return [Channel(0, "main"), Channel(1, "bias")]
 
     def __init__(
         self,

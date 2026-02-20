@@ -150,17 +150,20 @@ class PartitionableOperator(ABC):
     channels are auto-derived by ``ComputeOpSpec(is_backward=True)``.
 
     ``op_id`` lives on :class:`ComputeOp`, not on the operator.
+
+    Default implementations return a single ``ComputeOpSpec`` pointing
+    at ``self``.  Override only when the operator introduces
+    communication ops (e.g. AllReduce in linear layers, AllGatherKV
+    in attention with context parallelism).
     """
 
-    @abstractmethod
     def get_forward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
         """Return specs for forward-pass ops in execution order."""
-        ...
+        return [ComputeOpSpec(operator=self)]
 
-    @abstractmethod
     def get_backward_ops(self) -> List[Union[ComputeOpSpec, CommunicationOpSpec]]:
         """Return specs for backward-pass ops in execution order."""
-        ...
+        return [ComputeOpSpec(operator=self, is_backward=True)]
 
     def get_input_channels(self) -> List[Channel]:
         """Channels consumed by this operator's first forward op."""

@@ -7,7 +7,7 @@ from .rotary_embedding import RotaryEmbeddingOp, create_rotary_embedding_op
 from .residual_fork import ResidualForkOp
 from .te_linear import TEColumnParallelLinearOp, TERowParallelLinearOp, TELinearOp
 from .te_attention import TEDotProductAttentionOp
-from .te_norm import TENormOp
+from .te_norm import TENormOp, PartitionableLayerNorm, PartitionableRMSNorm
 
 __all__ = [
     "BiasSwigluOp",
@@ -24,4 +24,6 @@ __all__ = [
     "TELinearOp",
     "TEDotProductAttentionOp",
     "TENormOp",
+    "PartitionableLayerNorm",
+    "PartitionableRMSNorm",
 ]

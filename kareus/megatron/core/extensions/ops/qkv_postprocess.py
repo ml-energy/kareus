@@ -1,18 +1,22 @@
 """QKV Post-Processing operation following the BasicOperation pattern."""
 
 import torch
-from typing import Optional, Tuple, Union, Callable
+from typing import List, Optional, Tuple, Callable
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+from kareus.megatron.core.partitions.tensor_graph import (
+    Channel,
+    PartitionableOperator,
+)
 
 
-class QKVPostProcessOp(BasicOperation):
+class QKVPostProcessOp(BasicOperation, PartitionableOperator):
     """QKV Post-Processing as a BasicOperation
-    
+
     This operation takes the output of a linear QKV layer and post-processes it to
-    produce separate query, key, and value tensors with proper reshaping and 
+    produce separate query, key, and value tensors with proper reshaping and
     optional layer normalization.
-    
+
     Parameters
     ----------
     num_query_groups_per_partition : int
@@ -33,6 +37,9 @@ class QKVPostProcessOp(BasicOperation):
 
     # QKVPostProcess has 2 extra outputs: key and value (query is the main output)
     num_extra_outputs: int = 2
+
+    def get_output_channels(self) -> List[Channel]:
+        return [Channel(0, "main"), Channel(1, "key"), Channel(2, "value")]
 
     def __init__(
         self,
