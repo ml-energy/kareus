@@ -22,6 +22,20 @@ from .forward_partition import ForwardPartition
 from .partition_base import PartitionBase
 from .tensor_graph import CommunicationOp, ComputeOp, TensorGraph
 
+
+def _clone_comm(comm: CommunicationOp) -> CommunicationOp:
+    """Create an independent copy of a CommunicationOp.
+
+    Shares port objects (immutable tensor IDs) but has an independent
+    ``operator`` slot for per-partition physical comm assignment.
+    """
+    return CommunicationOp(
+        comm_type=comm.comm_type,
+        input_ports=comm.input_ports,
+        output_ports=comm.output_ports,
+        operator=comm.operator,
+    )
+
 # (list_of_compute_ops, trailing_communication_op_or_None)
 Segment = Tuple[List[ComputeOp], Optional[CommunicationOp]]
 
@@ -90,12 +104,16 @@ class PartitionBuilder:
 
         for seg_idx, (comp_ops, comm_after) in enumerate(segments):
             # --- NB0 partition ---
+            # Clone prev_comm so this partition has its own CommunicationOp
+            # instance with an independent ``operator`` slot.  Without this,
+            # NB0 seg N+1 and NB1 seg N would share the same object and
+            # _assign_comm_operators would clobber one of them.
             partitions.append(partition_class(
                 partition_id=len(partitions),
                 partition_key=f"{direction}_seg{seg_idx}_nb0",
                 nano_batch_idx=0,
                 comp_ops=comp_ops,
-                comm_op=prev_comm,
+                comm_op=_clone_comm(prev_comm) if prev_comm is not None else None,
             ))
 
             # --- NB1 partition ---
@@ -104,7 +122,7 @@ class PartitionBuilder:
                 partition_key=f"{direction}_seg{seg_idx}_nb1",
                 nano_batch_idx=1,
                 comp_ops=comp_ops,
-                comm_op=comm_after,
+                comm_op=_clone_comm(comm_after) if comm_after is not None else None,
             ))
 
             prev_comm = comm_after
