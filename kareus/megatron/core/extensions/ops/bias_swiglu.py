@@ -38,11 +38,8 @@ def fused_swiglu_backward(
 ) -> torch.Tensor:
     """Compiled backward function for fused SwiGLU operation (no bias)."""
     x1, x2 = torch.chunk(x, 2, -1)
-    silu_x1 = torch.nn.functional.silu(x1)
-    sigmoid_x1 = torch.sigmoid(x1)
-    silu_grad_x1 = sigmoid_x1 * (1 + x1 * (1 - sigmoid_x1))
-    grad_x1 = grad_output * x2 * silu_grad_x1
-    grad_x2 = grad_output * silu_x1
+    grad_x1 = grad_output * torch.sigmoid(x1) * (1 + x1 * (1 - torch.sigmoid(x1))) * x2
+    grad_x2 = grad_output * torch.nn.functional.silu(x1)
     grad_input = torch.cat([grad_x1, grad_x2], dim=-1)
     return grad_input
 
@@ -56,11 +53,8 @@ def fused_bias_swiglu_backward(
     """Compiled backward function for fused bias SwiGLU operation (with bias)."""
     x_plus_bias = x + bias
     x1, x2 = torch.chunk(x_plus_bias, 2, -1)
-    silu_x1 = torch.nn.functional.silu(x1)
-    sigmoid_x1 = torch.sigmoid(x1)
-    silu_grad_x1 = sigmoid_x1 * (1 + x1 * (1 - sigmoid_x1))
-    grad_x1 = grad_output * x2 * silu_grad_x1
-    grad_x2 = grad_output * silu_x1
+    grad_x1 = grad_output * torch.sigmoid(x1) * (1 + x1 * (1 - torch.sigmoid(x1))) * x2
+    grad_x2 = grad_output * torch.nn.functional.silu(x1)
     grad_x_plus_bias = torch.cat([grad_x1, grad_x2], dim=-1)
     grad_input = grad_x_plus_bias
     grad_bias = grad_x_plus_bias
@@ -116,18 +110,18 @@ class BiasSwigluOp(BasicOperation, PartitionableOperator):
         # Store input for backward pass
         input_for_backward = input_reshaped.to(torch.float8_e4m3fn) if fp8_input_store else input_reshaped
         
-        # Enable gradients for proper JIT compilation and mixed precision compatibility
-        with torch.enable_grad():
-            # Call compiled forward function (bias or no-bias variant)
-            if bias is not None:
-                output = fused_bias_swiglu_forward(
-                    x=input_reshaped,
-                    bias=bias,
-                )
-            else:
-                output = fused_swiglu_forward(
-                    x=input_reshaped,
-                )
+        # # Enable gradients for proper JIT compilation and mixed precision compatibility
+        # with torch.enable_grad():
+        # Call compiled forward function (bias or no-bias variant)
+        if bias is not None:
+            output = fused_bias_swiglu_forward(
+                x=input_reshaped,
+                bias=bias,
+            )
+        else:
+            output = fused_swiglu_forward(
+                x=input_reshaped,
+            )
 
         # Reshape output back to original shape (with half the last dimension due to SwiGLU)
         output = output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)

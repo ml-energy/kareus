@@ -1,7 +1,7 @@
 """Rotary Embedding operation following the BasicOperation pattern."""
 
 import torch
-from typing import List, Optional, Tuple, Callable
+from typing import List, Optional, Tuple, Union
 
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.utils import clear_tensor_data

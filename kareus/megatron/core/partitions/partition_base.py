@@ -38,6 +38,11 @@ class PartitionBase:
     comm_op: Optional[CommunicationOp] = None
     _schedule_config: Optional[Tuple[OverlapWindow, ResourceShape]] = None
 
+    # Captured from the caller *before* entering torch.autograd.Function,
+    # where torch.is_grad_enabled() returns False.  Mirrors the pattern
+    # used by TransformerEngine's _OperationFuserAutogradFunction.
+    is_grad_enabled: bool = True
+
     # ------------------------------------------------------------------ #
     #  Schedule loading
     # ------------------------------------------------------------------ #

@@ -168,6 +168,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         scheduler,                # PipelineCommScheduler | None
         config,                   # TransformerConfig
         seed_config: SeedConfig,
+        is_grad_enabled: bool,
         *params: Tensor,
     ) -> Tuple[Tensor, Tensor]:
 
@@ -193,6 +194,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         )
 
         for partition in forward_partitions:
+            partition.is_grad_enabled = is_grad_enabled
             if current_schedule is not None:
                 partition.load_schedule(current_schedule)
 
@@ -301,7 +303,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         #   h1, h2, rotary_pos_emb, attention_mask,
         #   forward_partitions, backward_partitions,
         #   forward_tensor_graph, backward_tensor_graph,
-        #   scheduler, config, seed_config, *params
+        #   scheduler, config, seed_config, is_grad_enabled, *params
         return (
             dh1,     # h1
             dh2,     # h2
@@ -314,5 +316,6 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             None,    # scheduler
             None,    # config
             None,    # seed_config
+            None,    # is_grad_enabled
             *combined,
         )

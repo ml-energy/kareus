@@ -463,6 +463,10 @@ class TransformerBlock(MegatronModule):
             # Collect all params for autograd tracking
             all_params = self._get_all_params()
 
+            # Capture grad mode *before* entering autograd Function
+            # (Function.forward runs under torch.no_grad).
+            is_grad_enabled = torch.is_grad_enabled()
+
             # Execute through single autograd boundary
             h1_out, h2_out = TransformerBlockAutogradFunction.apply(
                 h1,
@@ -476,6 +480,7 @@ class TransformerBlock(MegatronModule):
                 self.scheduler,
                 self.config,
                 self.seed_config,
+                is_grad_enabled,
                 *all_params,
             )
 

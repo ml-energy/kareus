@@ -26,6 +26,17 @@ class ResidualForkOp(BasicOperation, PartitionableOperator):
     def __init__(self) -> None:
         super().__init__()
 
+    def op_forward(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        *,
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
+    ) -> torch.Tensor:
+        """Forward pass: identity (residual copy is handled via fuser_forward)."""
+        return input_
+
     def op_backward(
         self,
         ctx: OperationContext,

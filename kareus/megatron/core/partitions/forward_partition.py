@@ -39,7 +39,6 @@ class ForwardPartition(PartitionBase):
             pre_ctx: NanoBatchContext for the OTHER nanobatch (comm op reads/writes here).
         """
         current_stream = torch.cuda.current_stream()
-        is_grad_enabled = torch.is_grad_enabled()
 
         # --- Communication overlap setup ---
         comm_start, comm_end, sm_num, block_size = self._setup_comm()
@@ -64,7 +63,12 @@ class ForwardPartition(PartitionBase):
                     ctx.tensor_store.get(p.tensor_id) for p in op.input_ports[1:]
                 )]
 
-            # 3. Track requires_grad
+            # 3. Track requires_grad.
+            #    Use ``self.is_grad_enabled`` (captured by the caller
+            #    *before* entering torch.autograd.Function.forward(),
+            #    where torch.is_grad_enabled() would return False).
+            #    This mirrors TransformerEngine's OperationFuser pattern.
+            is_grad_enabled = self.is_grad_enabled
             requires_grad = is_grad_enabled and x.requires_grad
             if is_grad_enabled and not requires_grad:
                 requires_grad = any(p.requires_grad for p in op.operator.parameters())
