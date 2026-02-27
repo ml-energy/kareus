@@ -279,20 +279,13 @@ class TELinearOp(Linear):
 
     def forward(self, x, batch_idx=0):
         """Forward pass."""
-        # Call the FusedOperation forward
-        outputs = super().forward(
-            x,
-            basic_op_kwargs=[{"batch_idx": batch_idx}, {}],
-        )
-        
-        # Handle bias return logic to match TELinear behavior
-        # if self.te_return_bias:
-        #     # For FusedOperation, bias is integrated into the output
-        #     # We need to return (output, bias) for compatibility
-        #     return output, self.bias
-        # return output, None
-        assert len(outputs) == 2
-        return outputs
+        # Call BasicOperation.forward (single op, not fused)
+        output = super().forward(x, batch_idx=batch_idx)
+        # When return_bias=True and has_bias=True, OperationFuser returns
+        # (output, bias) tuple. Otherwise it returns a single tensor.
+        if isinstance(output, tuple):
+            return output
+        return output, None
 
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
         """Replicate cross TP/DP for checkpointing."""

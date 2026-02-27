@@ -5,6 +5,7 @@
 """Single tensor operations supported by the operation fuser."""
 
 from .basic_linear import BasicLinear
+from .basic_linear_bias import BasicLinearBias
 from .bias import Bias
 from .all_reduce import AllReduce
 from .all_gather_kv import AllGatherKV, K_AG, V_AG

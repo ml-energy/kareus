@@ -457,6 +457,7 @@ class TransformerBlock(MegatronModule):
                     f"Batch size must be at least 2 for nano-batch splitting, got {batch_size}"
                 )
             mid_point = batch_size // 2
+            # Note that operators should handle non-contiguous views.
             h1 = hidden_states[:, :mid_point, ...]
             h2 = hidden_states[:, mid_point:, ...]
 

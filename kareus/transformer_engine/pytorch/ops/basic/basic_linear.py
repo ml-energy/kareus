@@ -557,6 +557,12 @@ class BasicLinear(BasicOperation):
         _wait_async(x_async)
         x_async = None
 
+        # Ensure contiguous layout — general_gemm assumes contiguous input
+        # and silently produces wrong results for non-contiguous views
+        # (e.g. nanobatch slices along the batch dimension).
+        if not x.is_contiguous():
+            x = x.contiguous()
+
         # Perform GEMM
         y, *_ = general_gemm(
             w,

@@ -6,21 +6,19 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union, Tuple
 
 import torch
 
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-from transformer_engine.pytorch.ops.op import FusedOperation
 
 from kareus.transformer_engine.pytorch.ops.basic import (
-    AllReduce,
     BasicLinear,
-    Bias,
+    BasicLinearBias,
 )
 
 
-class Linear(FusedOperation):
+class Linear(BasicLinearBias):
     """Apply linear transformation: :math:`y = x A^T + b`
 
     This is a drop-in replacement for `torch.nn.Linear`.
@@ -78,17 +76,15 @@ class Linear(FusedOperation):
         batch_size: Optional[int] = None,
         seq_length: Optional[int] = None,
     ) -> None:
-        
-        self._has_bias: bool = bias
-        self.return_bias: bool = return_bias
-        self.apply_bias = bias and not return_bias
+
+        apply_bias = bias and not return_bias
 
         if tensor_parallel_mode == "column" and return_bias == False:
             bias_fusable = True
         else:
             bias_fusable = False
 
-        # Tensor parallel configuration
+        # Canonicalize TP configuration before passing to super
         (
             tensor_parallel_mode,
             tensor_parallel_group,
@@ -105,106 +101,28 @@ class Linear(FusedOperation):
             out_features=out_features,
         )
 
-        # Construct basic ops
-        ops = []
-        linear_kwargs = {
-            "in_features": local_in_features,
-            "out_features": local_out_features,
-            "device": device,
-            "dtype": dtype,
-            "tensor_parallel_mode": None,
-            "tensor_parallel_group": None,
-            "tensor_parallel_size": 1,
-            "sequence_parallel": False,
-            "rng_state_tracker_function": rng_state_tracker_function,
-            "accumulate_into_main_grad": accumulate_into_main_grad,
-            "bias_fusable": bias_fusable,
-            "use_persistent_output": use_persistent_output,
-            "num_batches": num_batches,
-            "batch_size": batch_size,
-            "seq_length": seq_length,
-        }
-        bias_kwargs = {
-            "has_bias": self._has_bias,
-            "apply_bias": self.apply_bias,
-            "return_bias": self.return_bias,
-            "size": local_out_features,
-            "device": device,
-            "dtype": dtype,
-            "tensor_parallel": None,
-            "tensor_parallel_group": None,
-            "tensor_parallel_size": 1,
-        }
-        ops.append(BasicLinear(**linear_kwargs))
-        ops.append(Bias(**bias_kwargs))
-
-        # Initialize base class
-        super().__init__(ops)
+        # Initialize BasicLinearBias with local (post-TP) dimensions
+        # and tensor_parallel_mode=None since TP is already applied
+        super().__init__(
+            in_features=local_in_features,
+            out_features=local_out_features,
+            has_bias=bias,
+            apply_bias=apply_bias,
+            return_bias=return_bias,
+            device=device,
+            dtype=dtype,
+            tensor_parallel_mode=None,
+            tensor_parallel_group=None,
+            tensor_parallel_size=1,
+            sequence_parallel=False,
+            rng_state_tracker_function=rng_state_tracker_function,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            bias_fusable=bias_fusable,
+            use_persistent_output=use_persistent_output,
+            num_batches=num_batches,
+            batch_size=batch_size,
+            seq_length=seq_length,
+        )
 
         if sequence_parallel:
             raise NotImplementedError("Sequence parallelism is not supported")
-        
-        # self.forward_comm_op = None
-        # self.backward_comm_op = None
-        # if tensor_parallel_mode == "column":
-        #     self.backward_comm_op = AllReduce(process_group=tensor_parallel_group)
-        # elif tensor_parallel_mode == "row":
-        #     self.forward_comm_op = AllReduce(process_group=tensor_parallel_group)
-    
-    @property
-    def bias_fusable(self) -> bool:
-        return self.basic_ops[0].bias_fusable
-    
-    @bias_fusable.setter
-    def bias_fusable(self, value: bool) -> None:
-        self.basic_ops[0].bias_fusable = value
-    
-    @property
-    def use_persistent_output(self) -> Tuple[bool, bool]:
-        return self.basic_ops[0].use_persistent_output
-    
-    @property
-    def num_batches(self) -> int:
-        return self.basic_ops[0].num_batches
-    
-    @property
-    def persistent_outputs_fwd(self) -> List[torch.Tensor]:
-        return self.basic_ops[0].persistent_outputs_fwd
-    
-    @property
-    def persistent_outputs_bwd(self) -> List[torch.Tensor]:
-        return self.basic_ops[0].persistent_outputs_bwd
-
-    @property
-    def weight(self) -> torch.nn.Parameter:
-        """Weight tensor
-
-        Parameter is owned by `BasicLinear` operation.
-
-        """
-        return self.basic_ops[0].weight
-
-    @weight.setter
-    def weight(self, value: Optional[torch.nn.Parameter]) -> None:
-        self.basic_ops[0].weight = value
-
-    @property
-    def bias(self) -> Optional[torch.nn.Parameter]:
-        """Bias tensor
-
-        Parameter is owned by `Bias` operation.
-
-        """
-        if self._has_bias:
-            return self.basic_ops[1].bias
-        return None
-
-    @bias.setter
-    def bias(self, value: Optional[torch.nn.Parameter]) -> None:
-        if self._has_bias:
-            self.basic_ops[1].bias = value
-        elif value is not None:
-            raise ValueError(
-                "Attempted to set bias parameter in Linear operation "
-                "that does not have bias enabled"
-            )
