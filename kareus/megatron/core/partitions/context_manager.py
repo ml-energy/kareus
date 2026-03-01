@@ -45,13 +45,24 @@ class TensorStore:
         """Store *tensor* under *tensor_id*."""
         self._tensors[tensor_id] = tensor
 
-    def get(self, tensor_id: str) -> Optional[torch.Tensor]:
-        """Retrieve the tensor for *tensor_id*, or ``None`` if absent."""
-        return self._tensors.get(tensor_id)
+    def get(self, tensor_id: str) -> torch.Tensor:
+        """Retrieve the tensor for *tensor_id*.
 
-    def get_by_ports(self, ports: List[TensorPort]) -> List[Optional[torch.Tensor]]:
+        Raises:
+            KeyError: If *tensor_id* has not been stored.  This typically
+                means a channel was declared in ``get_input_channels`` but
+                no upstream operator produced it.
+        """
+        if tensor_id not in self._tensors:
+            raise KeyError(
+                f"TensorStore: tensor_id '{tensor_id}' not found. "
+                f"Available ids: {sorted(self._tensors.keys())}"
+            )
+        return self._tensors[tensor_id]
+
+    def get_by_ports(self, ports: List[TensorPort]) -> List[torch.Tensor]:
         """Read tensors for a list of :class:`TensorPort` in port order."""
-        return [self._tensors.get(p.tensor_id) for p in ports]
+        return [self.get(p.tensor_id) for p in ports]
 
     def set_from_ports(
         self,

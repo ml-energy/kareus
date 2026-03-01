@@ -490,6 +490,7 @@ class Attention(MegatronModule, ABC):
 
         return output_total
 
+    # TODO: sequential execution mode, handle communication
     def forward(
         self,
         batch_idx: int,

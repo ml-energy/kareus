@@ -306,7 +306,7 @@ class TEColumnParallelLinearOp(TELinearOp, PartitionableOperator):
 
     def get_output_channels(self) -> List[Channel]:
         channels = [Channel(0, "main")]
-        if self.te_return_bias:
+        if self.te_return_bias and self.has_bias:
             channels.append(Channel(1, "bias"))
         return channels
 
@@ -374,7 +374,7 @@ class TERowParallelLinearOp(TELinearOp, PartitionableOperator):
 
     def get_output_channels(self) -> List[Channel]:
         channels = [Channel(0, "main")]
-        if self.te_return_bias:
+        if self.te_return_bias and self.has_bias:
             channels.append(Channel(1, "bias"))
         return channels
 

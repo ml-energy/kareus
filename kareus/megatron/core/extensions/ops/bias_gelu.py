@@ -73,21 +73,26 @@ class BiasGeluOp(BasicOperation, PartitionableOperator):
 
     Parameters
     ----------
+    has_bias : bool, default = True
+              Whether the upstream linear layer produces a bias tensor.
+              When False, the "bias" input channel is omitted entirely.
     fp8_input_store : bool, default = False
                      whether to store input in FP8 format for backward pass.
     """
 
-    # BiasGeLU has 1 extra input: bias
-    num_extra_inputs: int = 1
-
     def get_input_channels(self) -> List[Channel]:
-        return [Channel(0, "main"), Channel(1, "bias")]
+        if self.has_bias:
+            return [Channel(0, "main"), Channel(1, "bias")]
+        return [Channel(0, "main")]
 
     def __init__(
         self,
+        has_bias: bool = True,
         fp8_input_store: bool = False,
     ) -> None:
         super().__init__()
+        self.has_bias = has_bias
+        self.num_extra_inputs: int = 1 if has_bias else 0
         self.fp8_input_store = fp8_input_store
 
     def op_forward(
@@ -200,10 +205,11 @@ class BiasGeluOp(BasicOperation, PartitionableOperator):
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
         """Override fuser_forward since we have extra inputs."""
 
-        # Extract bias from extra inputs
-        (bias,) = basic_op_extra_inputs[0]
+        if self.has_bias:
+            (bias,) = basic_op_extra_inputs[0]
+        else:
+            bias = None
 
-        # Add bias to kwargs
         kwargs = basic_op_kwargs[0].copy()
         kwargs['bias'] = bias
 
@@ -229,6 +235,8 @@ class BiasGeluOp(BasicOperation, PartitionableOperator):
     ]:
         """Override fuser_backward since we have extra inputs."""
 
-        grad_input, grad_extra_inputs = self.op_backward(basic_op_ctxs[0], grad_output)
-        return grad_input, [()], [grad_extra_inputs]
+        grad_input, (grad_bias,) = self.op_backward(basic_op_ctxs[0], grad_output)
+        if self.has_bias:
+            return grad_input, [()], [(grad_bias,)]
+        return grad_input, [()], [()]
 

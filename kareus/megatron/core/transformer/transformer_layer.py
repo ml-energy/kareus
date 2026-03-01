@@ -104,7 +104,11 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         )
 
         # [Module 3: Self-Attention BiasDropoutAdd]
-        self.self_attn_bda = build_module(submodules.self_attn_bda)
+        self.self_attn_bda = build_module(
+            submodules.self_attn_bda,
+            has_bias=config.add_bias_linear,
+            dropout_prob=self.hidden_dropout,
+        )
 
         # =================================================================
         # MLP submodules
@@ -126,7 +130,11 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             self.mlp.set_layer_number(self.layer_number)
 
         # [Module 6: MLP BiasDropoutAdd]
-        self.mlp_bda = build_module(submodules.mlp_bda)
+        self.mlp_bda = build_module(
+            submodules.mlp_bda,
+            has_bias=config.add_bias_linear,
+            dropout_prob=self.hidden_dropout,
+        )
 
         # Recompute flags
         self.recompute_input_layernorm = False
@@ -144,26 +152,29 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
     def get_all_operators(self) -> List:
         """Return all operators in forward execution order.
 
-        Order: [attn_bda, attn_residual_fork, input_ln,
-                qkv, qkv_post, rotary, core_attn, proj,
-                mlp_bda, mlp_residual_fork, pre_mlp_ln,
-                fc1, activation, fc2]
+        Order:
+          attn_residual_fork, input_ln,
+          qkv, qkv_post, rotary, core_attn, proj, [AR],
+          self_attn_bda,
+          mlp_residual_fork, pre_mlp_ln,
+          fc1, activation, fc2, [AR],
+          mlp_bda
 
         ResidualForkOp sits before each LayerNorm so that:
-          Forward:  fork x into (x_main->LN, x_copy->residual for next BDA)
+          Forward:  fork x into (x_main->LN, x_copy->residual for later BDA)
           Backward: accumulate grad_main + grad_residual at the fork point
         """
         ops: List = []
-        # Attention partition
-        ops.append(self.self_attn_bda)
+        # Attention layer
         ops.append(self.attn_residual_fork)
         ops.append(self.input_layernorm)
         ops.extend(self.self_attention.get_compute_ops())
-        # MLP partition
-        ops.append(self.mlp_bda)
+        ops.append(self.self_attn_bda)
+        # MLP layer
         ops.append(self.mlp_residual_fork)
         ops.append(self.pre_mlp_layernorm)
         ops.extend(self.mlp.get_compute_ops())
+        ops.append(self.mlp_bda)
         return ops
 
     # =================================================================

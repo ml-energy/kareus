@@ -913,9 +913,9 @@ def _cleanup() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--seq-len", type=int, default=512)
+    parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--hidden-size", type=int, default=2048)
+    parser.add_argument("--hidden-size", type=int, default=4096)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--atol", type=float, default=1e-3)
     parser.add_argument("--rtol", type=float, default=1e-3)

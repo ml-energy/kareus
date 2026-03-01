@@ -88,12 +88,16 @@ class MLP(MegatronModule):
         )
 
         self.activation_func = self.config.activation_func
+        act_kwargs = dict(
+            has_bias=self.config.add_bias_linear,
+            fp8_input_store=self.config.activation_func_fp8_input_store,
+        )
         if self.activation_func == F.silu and self.config.gated_linear_unit:
-            self.activation_op = BiasSwigluOp(self.config.activation_func_fp8_input_store)
+            self.activation_op = BiasSwigluOp(**act_kwargs)
         elif self.activation_func == F.gelu and self.config.gated_linear_unit:
-            self.activation_op = BiasGegluOp(self.config.activation_func_fp8_input_store)
+            self.activation_op = BiasGegluOp(**act_kwargs)
         elif self.activation_func == F.gelu and not self.config.gated_linear_unit:
-            self.activation_op = BiasGeluOp(self.config.activation_func_fp8_input_store)
+            self.activation_op = BiasGeluOp(**act_kwargs)
         else:
             raise NotImplementedError("Only support gelu (with/without gate) and swiglu in MLP.")
 
@@ -119,6 +123,7 @@ class MLP(MegatronModule):
     def get_persistent_outputs_bwd(self):
         return self.linear_fc1.persistent_outputs_bwd
 
+    # TODO: sequential execution mode, handle communication
     def forward(self, 
         batch_idx: int,
         hidden_states: Tensor, 
@@ -142,11 +147,15 @@ class MLP(MegatronModule):
                 # else:
                 #     raise ValueError("Only support fusion of swiglu with per_token_scale in MLP.")
             else:
-                # Unified activation op call (handles GELU, GeGLU, SwiGLU)
-                intermediate_parallel = self.activation_op(
-                    intermediate_parallel,
-                    bias_parallel,
-                )
+                if bias_parallel is not None:
+                    intermediate_parallel = self.activation_op(
+                        intermediate_parallel,
+                        bias_parallel,
+                    )
+                else:
+                    intermediate_parallel = self.activation_op(
+                        intermediate_parallel,
+                    )
         else:
             raise NotImplementedError("Only bias activation fusion is supported in MLP.")
             # if bias_parallel is not None:

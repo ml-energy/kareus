@@ -52,25 +52,30 @@ class BiasDropoutAddOp(BasicOperation, PartitionableOperator):
 
     Parameters
     ----------
+    has_bias : bool, default = True
+              Whether the upstream linear layer produces a bias tensor.
+              When False, the "bias" input channel is omitted entirely.
     dropout_prob : float, default = 0.0
-                  dropout probability for the dropout operation.
+              dropout probability for the dropout operation.
     training : bool, default = True
               whether the model is in training mode.
     """
 
-    # BiasDropoutAdd has 2 extra inputs: bias and residual
-    num_extra_inputs: int = 2
-
     def get_input_channels(self) -> List[Channel]:
-        return [Channel(0, "main"), Channel(1, "bias"), Channel(2, "residual")]
+        if self.has_bias:
+            return [Channel(0, "main"), Channel(1, "bias"), Channel(2, "residual")]
+        return [Channel(0, "main"), Channel(1, "residual")]
 
     def __init__(
         self,
+        has_bias: bool = True,
         dropout_prob: float = 0.0,
         training: bool = True,
     ) -> None:
         super().__init__()
-        
+
+        self.has_bias = has_bias
+        self.num_extra_inputs: int = 2 if has_bias else 1
         self.dropout_prob = dropout_prob
         self.training = training
 
@@ -140,15 +145,17 @@ class BiasDropoutAddOp(BasicOperation, PartitionableOperator):
         basic_op_kwargs: list[dict[str, any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
         """Override fuser_forward since we have extra inputs."""
-        
-        # Extract bias and residual from extra inputs
-        bias, residual = basic_op_extra_inputs[0]
-        
-        # Add bias and residual to kwargs
+
+        if self.has_bias:
+            bias, residual = basic_op_extra_inputs[0]
+        else:
+            (residual,) = basic_op_extra_inputs[0]
+            bias = None
+
         kwargs = basic_op_kwargs[0].copy()
         kwargs['bias'] = bias
         kwargs['residual'] = residual
-        
+
         output = self.op_forward(
             basic_op_ctxs[0],
             input_,
@@ -167,9 +174,13 @@ class BiasDropoutAddOp(BasicOperation, PartitionableOperator):
     ) -> tuple[
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],
-        list[tuple[torch.Tensor, torch.Tensor]],
+        list[tuple[torch.Tensor, ...]],
     ]:
         """Override fuser_backward since we have extra inputs."""
-        
-        grad_input, grad_extra_inputs = self.op_backward(basic_op_ctxs[0], grad_output)
-        return grad_input, [()], [grad_extra_inputs]
+
+        grad_input, (grad_bias, grad_residual) = self.op_backward(
+            basic_op_ctxs[0], grad_output,
+        )
+        if self.has_bias:
+            return grad_input, [()], [(grad_bias, grad_residual)]
+        return grad_input, [()], [(grad_residual,)]
