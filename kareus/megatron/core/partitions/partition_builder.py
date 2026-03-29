@@ -58,10 +58,6 @@ class PartitionBuilder:
         self.forward_graph = forward_graph
         self.backward_graph = backward_graph
 
-    # ------------------------------------------------------------------ #
-    #  Public API
-    # ------------------------------------------------------------------ #
-
     def build_forward_partitions(self) -> List[ForwardPartition]:
         """Form interleaved forward partitions from the forward graph."""
         return self._form_partitions(
@@ -77,10 +73,6 @@ class PartitionBuilder:
             BackwardPartition,
             direction="bwd",
         )
-
-    # ------------------------------------------------------------------ #
-    #  Core algorithm
-    # ------------------------------------------------------------------ #
 
     def _form_partitions(
         self,
@@ -103,7 +95,7 @@ class PartitionBuilder:
         prev_comm: Optional[CommunicationOp] = None
 
         for seg_idx, (comp_ops, comm_after) in enumerate(segments):
-            # --- NB0 partition ---
+            # NB0 partition
             # Clone prev_comm so this partition has its own CommunicationOp
             # instance with an independent ``operator`` slot.  Without this,
             # NB0 seg N+1 and NB1 seg N would share the same object and
@@ -116,7 +108,7 @@ class PartitionBuilder:
                 comm_op=_clone_comm(prev_comm) if prev_comm is not None else None,
             ))
 
-            # --- NB1 partition ---
+            # NB1 partition
             partitions.append(partition_class(
                 partition_id=len(partitions),
                 partition_key=f"{direction}_seg{seg_idx}_nb1",
@@ -128,10 +120,6 @@ class PartitionBuilder:
             prev_comm = comm_after
 
         return partitions
-
-    # ------------------------------------------------------------------ #
-    #  Segment splitting
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _split_by_communications(

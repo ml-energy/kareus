@@ -25,11 +25,6 @@ if TYPE_CHECKING:
 from transformer_engine.pytorch.ops.op import OperationContext
 
 
-# ------------------------------------------------------------------ #
-#  TensorStore
-# ------------------------------------------------------------------ #
-
-
 @dataclass
 class TensorStore:
     """Dict-based storage mapping tensor IDs to tensors.
@@ -73,11 +68,6 @@ class TensorStore:
         for port, tensor in zip(ports, tensors):
             if tensor is not None:
                 self._tensors[port.tensor_id] = tensor
-
-
-# ------------------------------------------------------------------ #
-#  NanoBatchContext
-# ------------------------------------------------------------------ #
 
 
 @dataclass

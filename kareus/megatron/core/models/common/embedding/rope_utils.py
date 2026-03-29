@@ -1,7 +1,13 @@
+"""
+Modified from Megatron-LM (megatron/core/models/common/embeddings/rope_utils.py) by NVIDIA.
+Changes: apply_rotary_pos_emb and _apply_rotary_pos_emb_bshd forward/backward
+are split into separate functions with an externally managed ctx, bypassing
+torch.autograd.Function.apply().
+"""
+
 import torch
 from torch import Tensor
 from megatron.core.transformer.transformer_config import TransformerConfig
-from transformer_engine.pytorch.ops.op import OperationContext
 from typing import Optional
 
 from kareus.apex.transformer.functional import fused_apply_rotary_pos_emb, fused_apply_rotary_pos_emb_backward
@@ -16,8 +22,11 @@ def apply_rotary_pos_emb(
     mscale: float = 1.0,
 ):
     """
-    Reroute to the appropriate apply_rotary_pos_emb function depending on
+    Forward pass: reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
+
+    Modified: accepts an externally managed ctx for saving tensors needed by
+    the backward pass.
     """
 
     if config.apply_rope_fusion:
@@ -93,6 +102,15 @@ def apply_rotary_pos_emb_backward(
     config: TransformerConfig,
     grad_output: Tensor,
 ) -> Tensor:
+    """Backward pass of rotary positional embedding routing.
+
+    Added: split out from the original autograd-based implementation so the
+    caller can invoke the backward pass explicitly with the saved ctx.
+
+    Returns:
+        (Tensor, None): Gradient w.r.t. input tensor t; None for freqs
+            (rotary frequencies are not learnable).
+    """
     if config.apply_rope_fusion:
         return fused_apply_rotary_pos_emb_backward(ctx, grad_output)
     else:
@@ -110,11 +128,16 @@ def _apply_rotary_pos_emb_bshd(
     multi_latent_attention: bool = False,
     mscale: float = 1.0,
 ) -> Tensor:
-    """Apply rotary positional embedding to input tensor T.
+    """Forward pass: apply rotary positional embedding to input tensor T.
+
+    Modified: accepts an externally managed ctx and saves only cos_ and sin_
+    for the backward pass. Gradient w.r.t. freqs is not computed because
+    rotary frequencies are fixed positional encodings, not learnable parameters.
 
     check https://kexue.fm/archives/8265 for detailed formulas
 
     Args:
+        ctx: Externally managed context for saving tensors for backward.
         t (Tensor): Input tensor T is of shape [seq_length, ... , dim]
         freqs (Tensor): Rotary Positional embedding tensor freq is of shape [seq_length, ..., dim]
 
@@ -137,12 +160,10 @@ def _apply_rotary_pos_emb_bshd(
     cos_ = (torch.cos(freqs) * mscale).to(t.dtype)
     sin_ = (torch.sin(freqs) * mscale).to(t.dtype)
 
-    r_t = _rotate_half(t_re, rotary_interleaved)
-
-    y_re = (t_re * cos_) + (r_t * sin_)
+    y_re = (t_re * cos_) + (_rotate_half(t_re, rotary_interleaved) * sin_)
 
     ctx.rot_dim = rot_dim
-    ctx.save_for_backward(t_re, cos_, sin_, r_t)
+    ctx.save_for_backward(cos_, sin_)
 
     return torch.cat((y_re, t_pass), dim=-1)
 
@@ -167,31 +188,24 @@ def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
         # return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
 
-def _rotate_half_backward(grad_output: Tensor, rotary_interleaved: bool = False) -> Tensor:
-    half = grad_output.shape[-1] // 2
-    sg1, sg2 = grad_output[..., :half], grad_output[..., half:]
-    return torch.cat((sg2, -sg1), dim=-1)
-    
-
 def _apply_rotary_pos_emb_bshd_backward(
     ctx,
     grad_output: Tensor,
 ) -> Tensor:
-    """Apply backward pass of rotary positional embedding to gradient tensor.
+    """Added: explicit backward pass of _apply_rotary_pos_emb_bshd.
 
-    This function computes the gradient with respect to the input tensor t
-    given the gradient with respect to the output of _apply_rotary_pos_emb_bshd.
-
-    The backward pass involves rotating in the opposite direction (negative angle).
+    Only computes grad_t; grad_freqs is not needed because rotary frequencies
+    are fixed positional encodings, not learnable parameters.
 
     Args:
+        ctx: Externally managed context containing saved tensors from forward.
         grad_output (Tensor): Gradient tensor with respect to output, shape [seq_length, ... , dim]
 
     Returns:
-        Tensor: Gradient with respect to input tensor t
+        (Tensor, None): Gradient with respect to input tensor t; None for freqs
     """
     rot_dim = ctx.rot_dim
-    t_re, cos_, sin_, r_t = ctx.saved_tensors
+    cos_, sin_ = ctx.saved_tensors
 
     grad_re = grad_output[..., :rot_dim]
     grad_pass = grad_output[..., rot_dim:]
@@ -203,77 +217,6 @@ def _apply_rotary_pos_emb_bshd_backward(
     grad_t_re[..., :half] += sg2
     grad_t_re[..., half:] -= sg1
 
-    grad_freqs = grad_re * (-t_re * sin_ + r_t * cos_)
-    grad_freqs = grad_freqs.sum(dim=(1, 2), keepdim=True)
     grad_t = torch.cat((grad_t_re, grad_pass), dim=-1)
 
-    return grad_t, grad_freqs
-
-
-class RotaryPosEmbFunction(torch.autograd.Function):
-    """Custom autograd function for rotary positional embedding with proper gradient computation."""
-    
-    @staticmethod
-    def forward(
-        ctx,
-        t: Tensor,
-        freqs: Tensor,
-        rotary_interleaved: bool = False,
-        multi_latent_attention: bool = False,
-        mscale: float = 1.0,
-    ) -> Tensor:
-        """Forward pass of rotary positional embedding."""
-        # Create a context object for the rope function to save tensors
-        # rope_ctx = type('Context', (), {})()
-        rope_ctx = OperationContext()
-        
-        # Call the rope function with the rope context
-        result = _apply_rotary_pos_emb_bshd(
-            rope_ctx, t, freqs, rotary_interleaved, multi_latent_attention, mscale
-        )
-        
-        # Save the rope context and other parameters for backward pass
-        ctx.rope_ctx = rope_ctx
-        ctx.rotary_interleaved = rotary_interleaved
-        ctx.multi_latent_attention = multi_latent_attention
-        ctx.mscale = mscale
-        
-        return result
-    
-    @staticmethod
-    def backward(ctx, grad_output: Tensor) -> tuple:
-        """Backward pass of rotary positional embedding."""
-        # Use the saved rope context for backward pass
-        grad_t, grad_freqs = _apply_rotary_pos_emb_bshd_backward(
-            ctx.rope_ctx, grad_output
-        )
-        
-        # Return gradients for all inputs (None for non-tensor inputs)
-        return grad_t, grad_freqs, None, None, None
-
-
-def apply_rotary_pos_emb_bshd_with_grad(
-    t: Tensor,
-    freqs: Tensor,
-    rotary_interleaved: bool = False,
-    multi_latent_attention: bool = False,
-    mscale: float = 1.0,
-) -> Tensor:
-    """Apply rotary positional embedding with proper gradient computation.
-    
-    This is a wrapper around the autograd function that provides the same interface
-    as the original _apply_rotary_pos_emb_bshd but with correct gradients.
-    
-    Args:
-        t (Tensor): Input tensor T is of shape [seq_length, ... , dim]
-        freqs (Tensor): Rotary Positional embedding tensor freq is of shape [seq_length, ..., dim]
-        rotary_interleaved (bool): Whether to use interleaved rotary embedding
-        multi_latent_attention (bool): Whether using multi-latent attention
-        mscale (float): Scaling factor for the rotation
-        
-    Returns:
-        Tensor: The input tensor after applying RoPE with proper gradients
-    """
-    return RotaryPosEmbFunction.apply(
-        t, freqs, rotary_interleaved, multi_latent_attention, mscale
-    )
+    return grad_t, None

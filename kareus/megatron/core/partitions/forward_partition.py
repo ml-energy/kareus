@@ -40,13 +40,13 @@ class ForwardPartition(PartitionBase):
         """
         current_stream = torch.cuda.current_stream()
 
-        # --- Communication overlap setup ---
+        # Communication overlap setup
         comm_start, comm_end, sm_num, block_size = self._setup_comm()
 
         comm_output = None
         comm_extra_outputs: list = []
 
-        # --- Iterate compute ops ---
+        # Iterate compute ops
         for fused_idx, op in enumerate(self.comp_ops):
 
             # 1. Create OperationContext for autograd save/restore.
@@ -116,12 +116,12 @@ class ForwardPartition(PartitionBase):
                     extra_out.requires_grad_(requires_grad=requires_grad)
                     ctx.tensor_store.set(port.tensor_id, extra_out)
 
-        # --- Handle non-overlapped comm ---
+        # Handle non-overlapped comm
         if comm_start == -1 and self.comm_op is not None:
             comm_output, comm_extra_outputs = self._launch_comm_no_overlap(
                 pre_ctx, sm_num, block_size,
             )
 
-        # --- Sync comm and store output to OTHER nanobatch ---
+        # Sync comm and store output to OTHER nanobatch
         if self.comm_op is not None:
             self._sync_comm(pre_ctx, comm_output, comm_extra_outputs)

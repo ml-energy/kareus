@@ -1,4 +1,8 @@
-# Copyright (c) 2023, Tri Dao.
+"""
+Modified from Flash Attention 3 (flash_attn/hopper/flash_attn_interface.py) by Tri Dao.
+Changes: FlashAttnFunc.forward/backward are called directly as static methods
+with an externally managed ctx, bypassing torch.autograd.Function.apply().
+"""
 
 from typing import Optional, Union
 
@@ -361,7 +365,12 @@ def flash_attn_func(
     descale_v=None,
     gqa_parallel=False,
 ):
-    """dropout_p should be set to 0.0 during evaluation
+    """Flash Attention forward pass, calling FlashAttnFunc.forward directly.
+
+    Modified from Flash Attention 3: calls .forward() directly instead of
+    .apply(), bypassing autograd. The caller must supply ctx and invoke the
+    corresponding backward via flash_attn_func_backward manually.
+
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
     For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
@@ -384,33 +393,22 @@ def flash_attn_func(
     [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
 
     Arguments:
+        ctx: Externally managed context object for saving tensors needed by backward.
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
         v: (batch_size, seqlen, nheads_k, headdim)
-        dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
         window_size: (left, right). If not (-1, -1), implements sliding window local attention.
-        alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
-            (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
-            is added to the attention score of query i and key j.
         deterministic: bool. Whether to use the deterministic implementation of the backward pass,
             which is slightly slower and uses more memory. The forward pass is always deterministic.
         descale_q: (1,), fp32. A de-quantization scaling factor for q in fp8 execution.
         descale_k: (1,), fp32. A de-quantization scaling factor for k in fp8 execution.
         descale_v: (1,), fp32. A de-quantization scaling factor for v in fp8 execution.
-        return_attn_probs: bool. Whether to return the attention probabilities. This option is for
-           testing only. The returned probabilities are not guaranteed to be correct
-           (they might not have the right scaling).
     Return:
         out: (batch_size, seqlen, nheads, headdim).
-        softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
-            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
-            normalization factor).
-        S_dmask [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen, seqlen).
-            The output of softmax (possibly with different scaling). It also encodes the dropout
-            pattern (negative means that location was dropped, nonnegative means it was kept).
+        softmax_lse: (batch_size, nheads, seqlen).
     """
     return FlashAttnFunc.forward(
         ctx,
@@ -429,6 +427,8 @@ def flash_attn_func(
 
 
 def flash_attn_func_backward(ctx, dout, *args):
+    """Backward pass for flash_attn_func, called directly with the same ctx
+    populated during the forward pass. Returns gradients for q, k, v."""
     return FlashAttnFunc.backward(ctx, dout, *args)
 
 

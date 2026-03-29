@@ -1,3 +1,11 @@
+"""
+Modified from Megatron-LM (megatron/core/extensions/transformer_engine.py::TENorm).
+Changes: replaces the original te.pytorch.LayerNorm / te.pytorch.RMSNorm bases
+with the BasicOperation-based LayerNorm / RMSNorm ops and adds the
+PartitionableOperator mixin so normalization layers can participate in the
+partition scheduler's compute/communication graph.
+"""
+
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs
 from kareus.transformer_engine.pytorch.ops import LayerNorm, RMSNorm
@@ -5,19 +13,24 @@ from kareus.megatron.core.partitions.tensor_graph import PartitionableOperator
 
 
 class PartitionableLayerNorm(LayerNorm, PartitionableOperator):
-    """LayerNorm with PartitionableOperator interface."""
+    """BasicOperation-based LayerNorm with the PartitionableOperator interface."""
     pass
 
 
 class PartitionableRMSNorm(RMSNorm, PartitionableOperator):
-    """RMSNorm with PartitionableOperator interface."""
+    """BasicOperation-based RMSNorm with the PartitionableOperator interface."""
     pass
 
 
 class TENormOp:
     """
     A conditional wrapper to initialize an instance of Transformer-Engine's
-    `LayerNorm` or `RMSNorm` based on input
+    `LayerNorm` or `RMSNorm` based on input.
+
+    Modified from Megatron-LM's `TENorm`: the returned instances inherit
+    from BasicOperation-based norm ops and `PartitionableOperator`, so
+    they expose `fuser_forward` / `fuser_backward` with externally
+    managed ctx and can declare their compute graph for partition scheduling.
     """
 
     # TODO should we ditch normalization config and just use spec to choose LayerNorm vs RMSNorm?

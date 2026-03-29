@@ -51,16 +51,16 @@ class BackwardPartition(PartitionBase):
         """
         current_stream = torch.cuda.current_stream()
 
-        # --- Communication overlap setup ---
+        # Communication overlap setup
         comm_start, comm_end, sm_num, block_size = self._setup_comm()
 
         comm_output = None
         comm_extra_outputs: list = []
 
-        # --- Collect parameter gradients ---
+        # Collect parameter gradients
         grad_params: Dict[int, List] = {}
 
-        # --- Iterate compute ops ---
+        # Iterate compute ops
         for fused_idx, op in enumerate(self.comp_ops):
 
             # 1. Retrieve OperationContext saved during forward.
@@ -119,13 +119,13 @@ class BackwardPartition(PartitionBase):
                     if grad_extra is not None:
                         ctx.tensor_store.set(port.tensor_id, grad_extra)
 
-        # --- Handle non-overlapped backward comm ---
+        # Handle non-overlapped backward comm
         if comm_start == -1 and self.comm_op is not None:
             comm_output, comm_extra_outputs = self._launch_comm_no_overlap(
                 pre_ctx, sm_num, block_size, backward=True,
             )
 
-        # --- Sync backward comm and store output to OTHER nanobatch ---
+        # Sync backward comm and store output to OTHER nanobatch
         if self.comm_op is not None:
             self._sync_comm(pre_ctx, comm_output, comm_extra_outputs)
 

@@ -1,4 +1,10 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+"""
+Modified from Megatron-LM (megatron/core/transformer/attention.py) by NVIDIA.
+Changes: forward() accepts batch_idx for nanobatch indexing; QKV post-processing
+and rotary embedding use dedicated Op objects for graph-based partition execution;
+get_compute_ops added for the partition system;
+inference code paths (flash decode, dynamic batching, packed sequences) disabled.
+"""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -260,9 +266,6 @@ class Attention(MegatronModule, ABC):
         if inference_context is None:
             return query, key, value, rotary_pos_emb, attn_mask_type
 
-        # =================================================
-        # Pre-allocate memory for key-values for inference.
-        # =================================================
         if inference_context.is_static_batching():
             if self.layer_number not in inference_context.key_value_memory_dict:
                 inf_max_seq_length = inference_context.max_sequence_length
@@ -543,16 +546,7 @@ class Attention(MegatronModule, ABC):
         else:
             assert rotary_pos_cos is None and rotary_pos_sin is None
 
-        # =====================
-        # Query, Key, and Value
-        # =====================
-        # Get the query, key and value tensors based on the type of attention -
-        # self or cross attn.
         query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
-
-        # ===================================================
-        # Adjust key, value, and rotary_pos_emb for inference
-        # ===================================================
 
         # This branch only runs in the decode phase of flash decoding and returns after the linear
         # projection. This conditional is not used in the prefill phase or non-flash-decoding cases.
@@ -601,9 +595,6 @@ class Attention(MegatronModule, ABC):
             # key = key.squeeze(1)
             # value = value.squeeze(1)
 
-        # ================================================
-        # relative positional embedding (rotary embedding)
-        # ================================================
         if rotary_pos_emb is not None:
             query, key = self.rotary_embedding_op(query, key, rotary_pos_emb)
         # For self attention we just duplicate the rotary_pos_emb if it isn't already
@@ -645,10 +636,6 @@ class Attention(MegatronModule, ABC):
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
-
-        # ==================================
-        # core attention computation
-        # ==================================
 
         attn_mask_type = self.attn_mask_type
         if self.checkpoint_core_attention and self.training:
@@ -695,10 +682,6 @@ class Attention(MegatronModule, ABC):
             # t is the pack size = sum (sq_i)
             # note that batch is a dummy dimension in the packed case
             # core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
-
-        # =================
-        # Output. [sq, b, h]
-        # =================
 
         output, bias = self.linear_proj(core_attn_out, batch_idx)
 

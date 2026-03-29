@@ -1,3 +1,11 @@
+"""
+Modified from Megatron-LM (megatron/core/transformer/transformer_block.py) by NVIDIA.
+Changes: replaced per-layer sequential forward with graph-based partition system
+(TensorGraph, PartitionBuilder, TransformerBlockAutogradFunction) for automatic
+tensor routing and communication-computation overlap; forward splits micro-batches
+into nanobatches; communication operators (AllReduce, AllGatherKV, ReduceScatterKV)
+assigned lazily via set_tensor_parallel_group/set_context_parallel_group.
+"""
 
 from contextlib import nullcontext
 from typing import Optional, Union, List
@@ -123,10 +131,6 @@ class TransformerBlock(MegatronModule):
         # Build tensor graphs and partitions
         self._build_partitions()
 
-    # ================================================================= #
-    #  Partition graph construction
-    # ================================================================= #
-
     def _build_partitions(self):
         """Build TensorGraphs and form interleaved nanobatch partitions.
 
@@ -187,10 +191,6 @@ class TransformerBlock(MegatronModule):
 
         # Step 5: Create SeedConfig (defaults match the initial channels above)
         self.seed_config = SeedConfig()
-
-    # ================================================================= #
-    #  Communication operator assignment
-    # ================================================================= #
 
     def _assign_comm_operators(self, comm_type, comm_ops):
         """Assign physical comm operators to CommunicationOps of given type.
@@ -302,10 +302,6 @@ class TransformerBlock(MegatronModule):
             CommunicationType.REDUCE_SCATTER_KV, self.reducescatter_comm_ops
         )
 
-    # ================================================================= #
-    #  Layer building (unchanged)
-    # ================================================================= #
-
     def _build_layers(self):
         def build_layer(layer_spec, layer_number):
             global_layer_number = layer_number + get_transformer_layer_offset(
@@ -352,10 +348,6 @@ class TransformerBlock(MegatronModule):
         else:
             self.final_layernorm = None  # Either this or nn.Identity
 
-    # ================================================================= #
-    #  Parameter collection
-    # ================================================================= #
-
     def _get_all_params(self) -> List[torch.nn.Parameter]:
         """Get all parameters in op_id order for autograd tracking.
 
@@ -370,10 +362,6 @@ class TransformerBlock(MegatronModule):
                 params.extend(op.parameters())
         return params
 
-    # ================================================================= #
-    #  Input helpers
-    # ================================================================= #
-
     def _get_layer(self, layer_number: int):
         return self.layers[layer_number]
 
@@ -386,10 +374,6 @@ class TransformerBlock(MegatronModule):
         used by internal code to bypass the input provided by the
         forward_step_func"""
         self.input_tensor = input_tensor
-
-    # ================================================================= #
-    #  Forward pass
-    # ================================================================= #
 
     def forward(
         self,
@@ -496,10 +480,6 @@ class TransformerBlock(MegatronModule):
             )
 
         return hidden_states
-
-    # ================================================================= #
-    #  State dict (unchanged)
-    # ================================================================= #
 
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: dict = None

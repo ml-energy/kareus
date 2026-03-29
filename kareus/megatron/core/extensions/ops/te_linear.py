@@ -1,3 +1,13 @@
+"""
+Modified from Megatron-LM (megatron/core/extensions/transformer_engine.py::TELinear,
+TEColumnParallelLinear, TERowParallelLinear).
+Changes: replaces the original te.pytorch.Linear base with the BasicOperation-based
+Linear op and adds the PartitionableOperator mixin so each layer can declare
+its compute/communication graph for the partition scheduler.
+forward/backward are called via fuser_forward/fuser_backward with an externally
+managed ctx, bypassing torch.autograd.Function.apply().
+"""
+
 import warnings
 from typing import Any, Callable, List, Optional, Union
 
@@ -49,14 +59,16 @@ def _get_cuda_rng_tracker_fn():
 
 class TELinearOp(Linear):
     """
-    Wrapper for the Transformer-Engine's FusedOperation-based `Linear` layer.
-    
-    This is a drop-in replacement for the traditional TELinear that uses
-    the experimental FusedOperation API instead of TransformerEngineBaseModule.
-    
+    Wrapper for the Transformer-Engine's BasicOperation-based `Linear` layer.
+
+    Modified from Megatron-LM's `TELinear`: inherits from the
+    BasicOperation-based `Linear` (transformer_engine.pytorch.ops.Linear)
+    instead of `te.pytorch.Linear`, enabling fuser_forward/fuser_backward
+    to be called with an externally managed ctx by the PartitionFuser.
+
     parallel_mode currently supports 3 different values:
         - "column": Split the weight matrix along output dimension
-        - "row": Split the weight matrix along input dimension  
+        - "row": Split the weight matrix along input dimension
         - "duplicated": No tensor parallelism and weight is duplicated across TP ranks
         - Note: For expert linear layers, we will disable communication logic here
                 as TP communication is handled in token_dispatcher.
@@ -300,8 +312,12 @@ class TELinearOp(Linear):
 
 class TEColumnParallelLinearOp(TELinearOp, PartitionableOperator):
     """
-    Wrapper for the FusedOperation-based `Linear` layer specialized similar
-    to megatron's `ColumnParallelLinear` layer.
+    Column-parallel linear layer using the BasicOperation-based `Linear`.
+
+    Modified from Megatron-LM's `TEColumnParallelLinear`: adds the
+    `PartitionableOperator` mixin and declares its backward all-reduce
+    via `get_backward_ops()` so the partition scheduler can overlap
+    communication with computation.
     """
 
     def get_output_channels(self) -> List[Channel]:
@@ -368,8 +384,12 @@ class TEColumnParallelLinearOp(TELinearOp, PartitionableOperator):
 
 class TERowParallelLinearOp(TELinearOp, PartitionableOperator):
     """
-    Wrapper for the FusedOperation-based `Linear` layer specialized similar
-    to megatron's `RowParallelLinear` layer.
+    Row-parallel linear layer using the BasicOperation-based `Linear`.
+
+    Modified from Megatron-LM's `TERowParallelLinear`: adds the
+    `PartitionableOperator` mixin and declares its forward all-reduce
+    via `get_forward_ops()` so the partition scheduler can overlap
+    communication with computation.
     """
 
     def get_output_channels(self) -> List[Channel]:

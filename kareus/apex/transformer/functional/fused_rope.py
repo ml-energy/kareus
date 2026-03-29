@@ -1,17 +1,9 @@
-# coding=utf-8
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""
+Modified from NVIDIA Apex (apex/transformer/functional/fused_rope.py).
+Changes: forward/backward are called directly as static methods with an
+externally managed ctx, bypassing torch.autograd.Function.apply().
+"""
+
 from typing import Tuple, Union
 import torch
 
@@ -62,22 +54,22 @@ def fused_apply_rotary_pos_emb(
     freqs: torch.Tensor,
     transpose_output_memory: bool = False,
 ) -> torch.Tensor:
-    """Apply rotary positional embedding to input tensor T in `sbhd` format, where
-    s: sequence length
-    b: batch size
-    h: head num
-    d: dim of each head
+    """Apply rotary positional embedding to input tensor T in `sbhd` format.
+
+    Modified from original Apex: calls `FusedRoPEFunc.forward` directly instead of
+    `.apply()`, bypassing autograd. The caller must supply `ctx` and invoke the
+    corresponding backward manually.
 
     Args:
-        t (Tensor): Input tensor T is of shape [s, b, h, d]
-        freqs (Tensor): Rotary Positional embedding tensor freq is of shape [s, 1, 1, d] and
-        `float` dtype
-        transpose_output_memory (bool): Default to False. Whether to transpose the 's' and 'b'
-        dimension of the output's underlying memory format. This is very helpful when you want to
-        get a contiguous tensor after calling `output.transpose(0, 1)`.
+        ctx: Externally managed context object for saving tensors needed by backward.
+        t (Tensor): Input tensor of shape [s, b, h, d].
+        freqs (Tensor): Rotary positional embedding tensor of shape [s, 1, 1, d],
+            `float` dtype.
+        transpose_output_memory (bool): Default to False. Whether to transpose the
+            's' and 'b' dimension of the output's underlying memory format.
 
     Returns:
-        Tensor: The input tensor after applying RoPE
+        Tensor: The input tensor after applying RoPE.
     """
     return FusedRoPEFunc.forward(ctx, t, freqs, transpose_output_memory)
 
@@ -86,5 +78,7 @@ def fused_apply_rotary_pos_emb_backward(
     ctx,
     grad_output: torch.Tensor,
 ) -> torch.Tensor:
+    """Backward pass for fused RoPE, called directly with the same `ctx` populated
+    during the forward pass. Returns gradients for t and freqs."""
     grad_out, freqs_grad, _ = FusedRoPEFunc.backward(ctx, grad_output)
     return grad_out, freqs_grad

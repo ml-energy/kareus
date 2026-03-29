@@ -1,3 +1,12 @@
+"""
+Modified from Megatron-LM (megatron/core/extensions/transformer_engine.py::TEDotProductAttention).
+Changes: replaces the original te.pytorch.DotProductAttention base with the
+BasicOperation-based DotProductAttentionOp and adds the PartitionableOperator
+mixin so the operation can declare its compute/communication graph for the
+partition scheduler.  forward/backward are called via fuser_forward/fuser_backward
+with an externally managed ctx, bypassing torch.autograd.Function.apply().
+"""
+
 import dataclasses
 import io
 import os
@@ -63,6 +72,13 @@ class TEDotProductAttentionOp(DotProductAttentionOp, PartitionableOperator):
     """
     Wrapper for the Transformer-Engine's `DotProductAttentionOp` layer that also
     has "flash attention" enabled.
+
+    Modified from Megatron-LM's `TEDotProductAttention`: inherits from the
+    BasicOperation-based `DotProductAttentionOp` instead of
+    `te.pytorch.DotProductAttention`, and implements the
+    `PartitionableOperator` interface so the partition scheduler can
+    query the forward/backward compute-communication graph via
+    `get_forward_ops()` / `get_backward_ops()`.
 
     Note that if Megatron's parallel_state has not been initialized yet, the
     tp_group and cp_group passed to TE will be None and must be set later
@@ -324,10 +340,10 @@ class TEDotProductAttentionOp(DotProductAttentionOp, PartitionableOperator):
         basic_op_next_ops: list,
         basic_op_kwargs: list,
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
-        """Forward pass for the fuser.
-        
-        This method delegates to the parent DotProductAttentionOp's fuser_forward
-        method, which handles the fusing logic appropriately.
+        """BasicOperation fuser_forward, called by PartitionFuser instead of .apply().
+
+        Handles qkv_format transpositions and CP-allgathered KV before
+        delegating to DotProductAttentionOp.fuser_forward.
         """
         key, value= basic_op_extra_inputs[0]
         batch_idx = basic_op_kwargs[0]['batch_idx'] if 'batch_idx' in basic_op_kwargs[0] else 0

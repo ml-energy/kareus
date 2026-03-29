@@ -1,3 +1,11 @@
+"""
+Modified from Megatron-LM (megatron/core/transformer/transformer_layer.py) by NVIDIA.
+Changes: layer does not execute forward passes directly; operators are collected
+via get_all_operators() for TransformerBlock's graph-based partition system;
+ResidualForkOp added for explicit residual branching; forward() raises
+NotImplementedError (execution handled by TransformerBlockAutogradFunction);
+cross-attention, CUDA graph, and selective recompute paths disabled.
+"""
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union, Tuple
@@ -72,10 +80,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         self.is_first_layer = layer_number == 1
         self.is_last_layer = layer_number == num_layers
 
-        # =================================================================
-        # Attention submodules
-        # =================================================================
-
         self.attn_residual_fork = ResidualForkOp()
 
         # [Module 1: Input Layernorm]
@@ -110,10 +114,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             dropout_prob=self.hidden_dropout,
         )
 
-        # =================================================================
-        # MLP submodules
-        # =================================================================
-
         self.mlp_residual_fork = ResidualForkOp()
 
         # [Module 4: Pre-MLP Layernorm]
@@ -145,10 +145,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 "Selective recompute not implemented for Kareus TransformerLayer"
             )
 
-    # =================================================================
-    # Operator access (for TensorGraph / partition building)
-    # =================================================================
-
     def get_all_operators(self) -> List:
         """Return all operators in forward execution order.
 
@@ -177,10 +173,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         ops.append(self.mlp_bda)
         return ops
 
-    # =================================================================
-    # Forward (not used — block-level graph execution handles this)
-    # =================================================================
-
     def forward(
         self,
         hidden_states: Tensor,
@@ -205,10 +197,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             "The graph-based partition system in TransformerBlock "
             "executes operators directly via TensorGraph."
         )
-
-    # =================================================================
-    # State dict
-    # =================================================================
 
     def sharded_state_dict(
         self,

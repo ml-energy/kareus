@@ -1,4 +1,10 @@
-# Copyright (c) 2023, Tri Dao.
+"""
+Modified from Flash Attention 2 (flash_attn/flash_attn_interface.py) by Tri Dao.
+Changes: FlashAttnFunc and FlashAttnVarlenFunc forward/backward are called
+directly as static methods with an externally managed ctx, bypassing
+torch.autograd.Function.apply(). The caller is responsible for
+orchestrating the forward/backward passes.
+"""
 
 from typing import Optional, Sequence, Tuple, Union
 
@@ -458,7 +464,12 @@ def flash_attn_func(
     deterministic=False,
     return_attn_probs=False,
 ):
-    """dropout_p should be set to 0.0 during evaluation
+    """Flash Attention forward pass, calling FlashAttnFunc.forward directly.
+
+    Modified from Flash Attention 2: calls .forward() directly instead of
+    .apply(), bypassing autograd. The caller must supply ctx and invoke the
+    corresponding backward via flash_attn_func_backward manually.
+
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
     For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
@@ -481,6 +492,7 @@ def flash_attn_func(
     [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
 
     Arguments:
+        ctx: Externally managed context object for saving tensors needed by backward.
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
         v: (batch_size, seqlen, nheads_k, headdim)
@@ -489,6 +501,7 @@ def flash_attn_func(
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
         window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        softcap: float. Anything > 0 activates softcapping attention.
         alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
             (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
             is added to the attention score of query i and key j.
@@ -522,6 +535,8 @@ def flash_attn_func(
     )
 
 def flash_attn_func_backward(ctx, dout, *args):
+    """Backward pass for flash_attn_func, called directly with the same ctx
+    populated during the forward pass. Returns gradients for q, k, v."""
     return FlashAttnFunc.backward(ctx, dout, *args)
 
 
@@ -544,7 +559,12 @@ def flash_attn_varlen_func(
     return_attn_probs=False,
     block_table=None,
 ):
-    """dropout_p should be set to 0.0 during evaluation
+    """Flash Attention variable-length forward pass, calling FlashAttnVarlenFunc.forward directly.
+
+    Modified from Flash Attention 2: calls .forward() directly instead of
+    .apply(), bypassing autograd. The caller must supply ctx and invoke the
+    corresponding backward via flash_attn_varlen_func_backward manually.
+
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
     For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
@@ -567,6 +587,7 @@ def flash_attn_varlen_func(
     [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
 
     Arguments:
+        ctx: Externally managed context object for saving tensors needed by backward.
         q: (total_q, nheads, headdim), where total_q = total number of query tokens in the batch.
         k: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
         v: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
@@ -621,4 +642,6 @@ def flash_attn_varlen_func(
 
 
 def flash_attn_varlen_func_backward(ctx, dout, *args):
+    """Backward pass for flash_attn_varlen_func, called directly with the same ctx
+    populated during the forward pass. Returns gradients for q, k, v."""
     return FlashAttnVarlenFunc.backward(ctx, dout, *args)

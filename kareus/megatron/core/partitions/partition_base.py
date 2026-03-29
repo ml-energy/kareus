@@ -43,10 +43,6 @@ class PartitionBase:
     # used by TransformerEngine's _OperationFuserAutogradFunction.
     is_grad_enabled: bool = True
 
-    # ------------------------------------------------------------------ #
-    #  Schedule loading
-    # ------------------------------------------------------------------ #
-
     def load_schedule(self, schedule) -> None:
         """Load overlap_window and resource_shape from the scheduler's current_schedule.
 
@@ -64,10 +60,6 @@ class PartitionBase:
         if self._schedule_config:
             return self._schedule_config
         return ((-1, -1), (None, None))
-
-    # ------------------------------------------------------------------ #
-    #  Communication helpers
-    # ------------------------------------------------------------------ #
 
     def _setup_comm(self) -> Tuple[int, int, Optional[int], Optional[int]]:
         """Parse comm config and emit the initial event_record if needed.
@@ -178,18 +170,10 @@ class PartitionBase:
                 if extra_out is not None:
                     pre_ctx.tensor_store.set(port.tensor_id, extra_out)
 
-    # ------------------------------------------------------------------ #
-    #  Internal helpers
-    # ------------------------------------------------------------------ #
-
     @staticmethod
     def _make_comm_ctx() -> OperationContext:
         from transformer_engine.pytorch.ops.op import OperationContext
         return OperationContext()
-
-    # ------------------------------------------------------------------ #
-    #  Abstract interface
-    # ------------------------------------------------------------------ #
 
     def execute(
         self,

@@ -19,22 +19,12 @@ from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Union
 
 
-# ------------------------------------------------------------------ #
-#  Enums
-# ------------------------------------------------------------------ #
-
-
 class CommunicationType(Enum):
     """Types of collective communication inserted between partitions."""
 
     ALL_REDUCE = auto()  # 1 input, 1 output (TP)
     ALL_GATHER_KV = auto()  # 2 inputs (k, v), 2 outputs (CP)
     REDUCE_SCATTER_KV = auto()  # 2 inputs (grad_k, grad_v), 2 outputs (CP)
-
-
-# ------------------------------------------------------------------ #
-#  Core data structures
-# ------------------------------------------------------------------ #
 
 
 @dataclass
@@ -67,11 +57,6 @@ class TensorPort:
 
     port_idx: int
     tensor_id: Optional[str] = None  # e.g. "t_0", "t_1" — assigned by builder
-
-
-# ------------------------------------------------------------------ #
-#  Concrete graph nodes
-# ------------------------------------------------------------------ #
 
 
 @dataclass
@@ -136,11 +121,6 @@ class CommunicationOp:
         self.operator.sync(stream)
 
 
-# ------------------------------------------------------------------ #
-#  PartitionableOperator — abstract base for partitioned operators
-# ------------------------------------------------------------------ #
-
-
 class PartitionableOperator(ABC):
     """Base interface for operators that participate in partitioning.
 
@@ -172,11 +152,6 @@ class PartitionableOperator(ABC):
     def get_output_channels(self) -> List[Channel]:
         """Channels produced by this operator's last forward op."""
         return [Channel(0, "main")]
-
-
-# ------------------------------------------------------------------ #
-#  Op specs — declarative descriptions used by TensorGraphBuilder
-# ------------------------------------------------------------------ #
 
 
 @dataclass
@@ -229,11 +204,6 @@ class CommunicationOpSpec:
 
     def get_output_channels(self) -> List[Channel]:
         return self.channels  # Comm ops read and write the same channels
-
-
-# ------------------------------------------------------------------ #
-#  TensorGraphBuilder
-# ------------------------------------------------------------------ #
 
 
 class TensorGraphBuilder:
@@ -295,7 +265,7 @@ class TensorGraphBuilder:
         input_channels = spec.get_input_channels()
         output_channels = spec.get_output_channels()
 
-        # --- Wire input ports ---
+        # Wire input ports
         input_ports: List[TensorPort] = []
         for ch in input_channels:
             tensor_id = self._channel_registry.get(ch.name)
@@ -304,14 +274,14 @@ class TensorGraphBuilder:
                 self._channel_registry[ch.name] = tensor_id
             input_ports.append(TensorPort(port_idx=ch.port_idx, tensor_id=tensor_id))
 
-        # --- Create output ports and update registry ---
+        # Create output ports and update registry
         output_ports: List[TensorPort] = []
         for ch in output_channels:
             tensor_id = self._new_tensor_id()
             self._channel_registry[ch.name] = tensor_id
             output_ports.append(TensorPort(port_idx=ch.port_idx, tensor_id=tensor_id))
 
-        # --- Build concrete op ---
+        # Build concrete op
         if isinstance(spec, ComputeOpSpec):
             op_id = spec.op_id if spec.op_id is not None else self._next_op_id()
             op = ComputeOp(
@@ -340,11 +310,6 @@ class TensorGraphBuilder:
     def get_channel_registry(self) -> Dict[str, str]:
         """Return a snapshot of the current channel→tensor_id mapping."""
         return dict(self._channel_registry)
-
-
-# ------------------------------------------------------------------ #
-#  TensorGraph — the built graph
-# ------------------------------------------------------------------ #
 
 
 @dataclass

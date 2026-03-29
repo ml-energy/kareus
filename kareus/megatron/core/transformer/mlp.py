@@ -1,4 +1,11 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+"""
+Modified from Megatron-LM (megatron/core/transformer/mlp.py) by NVIDIA.
+Changes: forward() accepts batch_idx for nanobatch indexing; activation
+functions wrapped in dedicated Op objects (BiasSwigluOp, BiasGegluOp,
+BiasGeluOp) for graph-based partition execution; get_compute_ops/
+get_persistent_outputs_fwd/bwd added for the partition system;
+non-fused activation and per-token-scale paths disabled.
+"""
 
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -123,7 +130,6 @@ class MLP(MegatronModule):
     def get_persistent_outputs_bwd(self):
         return self.linear_fc1.persistent_outputs_bwd
 
-    # TODO: sequential execution mode, handle communication
     def forward(self, 
         batch_idx: int,
         hidden_states: Tensor, 

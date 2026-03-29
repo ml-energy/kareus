@@ -145,6 +145,9 @@ class RotaryEmbeddingOp(BasicOperation, PartitionableOperator):
         grad_key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Backward pass for rotary embedding application.
+
+        Gradient w.r.t. rotary_pos_emb is always None because rotary
+        frequencies are fixed positional encodings, not learnable parameters.
         
         Args:
             ctx: Operation context with saved tensors and contexts
@@ -152,52 +155,30 @@ class RotaryEmbeddingOp(BasicOperation, PartitionableOperator):
             grad_key: Gradient w.r.t. key tensor
             
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]: Gradients w.r.t. input query, key, and rotary_pos_emb
+            Tuple[torch.Tensor, torch.Tensor, None]: Gradients w.r.t. input query, key; None for rotary_pos_emb
         """
         
-        # Initialize variables
         grad_query_input = grad_query
         grad_key_input = grad_key
-        grad_rotary_pos_emb = None
-        query_rope_applied = False
-        key_rope_applied = False
 
         for ctx_ in [ctx.query_ctx, ctx.key_ctx]:
             if ctx_._saved_tensors_range is not None:
                 ctx_.saved_tensors = ctx.saved_tensors[slice(*ctx_._saved_tensors_range)]
 
-        # Apply backward pass for rotary embeddings if they were applied in forward
         if hasattr(ctx, 'query_ctx'):
-            query_rope_applied = True
-            grad_query_input, grad_q_freqs = apply_rotary_pos_emb_backward(
+            grad_query_input, _ = apply_rotary_pos_emb_backward(
                 ctx.query_ctx, self.config, grad_query
             )
-            
+
         if hasattr(ctx, 'key_ctx'):
-            key_rope_applied = True
-            grad_key_input, grad_k_freqs = apply_rotary_pos_emb_backward(
+            grad_key_input, _ = apply_rotary_pos_emb_backward(
                 ctx.key_ctx, self.config, grad_key
             )
-        
-        # # Combine frequency gradients if both query and key had rotary embeddings applied
-        # if query_rope_applied and key_rope_applied:
-        #     # If the same frequency tensor was used for both, combine gradients
-        #     if ctx.duplicate_rotary_pos_emb:
-        #         grad_rotary_pos_emb = grad_q_freqs + grad_k_freqs
-        #     else:
-        #         # Different frequency tensors were used
-        #         grad_rotary_pos_emb = (grad_q_freqs, grad_k_freqs)
-        # elif query_rope_applied:
-        #     grad_rotary_pos_emb = (grad_q_freqs, None)
-        # elif key_rope_applied:
-        #     grad_rotary_pos_emb = (None, grad_k_freqs)
-        grad_rotary_pos_emb = None
 
-        # # Clear saved tensors if possible
         # if ctx.has_prev_op:
         #     clear_tensor_data(*ctx.saved_tensors)
 
-        return grad_query_input, grad_key_input, grad_rotary_pos_emb
+        return grad_query_input, grad_key_input, None
 
     def fuser_forward(
         self,

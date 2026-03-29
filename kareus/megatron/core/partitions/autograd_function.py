@@ -24,11 +24,6 @@ from .context_manager import NanoBatchContext, TensorStore
 from .tensor_graph import TensorGraph
 
 
-# ------------------------------------------------------------------ #
-#  Seed configuration
-# ------------------------------------------------------------------ #
-
-
 @dataclass(frozen=True)
 class SeedConfig:
     """Maps named tensor arguments to graph-level tensor IDs.
@@ -63,11 +58,6 @@ class SeedConfig:
     # Backward: channel name to read the final input gradient from
     # ``backward_tensor_graph.channel_registry``.
     bwd_output_channel: str = "grad_main"
-
-
-# ------------------------------------------------------------------ #
-#  Gradient combination helper
-# ------------------------------------------------------------------ #
 
 
 def _combine_param_grads(
@@ -126,11 +116,6 @@ def _combine_param_grads(
     return combined
 
 
-# ------------------------------------------------------------------ #
-#  Unified autograd function
-# ------------------------------------------------------------------ #
-
-
 class TransformerBlockAutogradFunction(torch.autograd.Function):
     """Single autograd boundary wrapping the entire transformer block.
 
@@ -172,11 +157,11 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         *params: Tensor,
     ) -> Tuple[Tensor, Tensor]:
 
-        # -- 1. Create NanoBatchContexts --
+        # 1. Create NanoBatchContexts
         ctx_nb1 = NanoBatchContext(batch_idx=0)
         ctx_nb2 = NanoBatchContext(batch_idx=1)
 
-        # -- 2. Seed TensorStores with initial tensors --
+        # 2. Seed TensorStores with initial tensors
         ctx_nb1.tensor_store.set(seed_config.h_tid, h1)
         ctx_nb2.tensor_store.set(seed_config.h_tid, h2)
 
@@ -188,7 +173,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             ctx_nb1.tensor_store.set(seed_config.mask_tid, attention_mask)
             ctx_nb2.tensor_store.set(seed_config.mask_tid, attention_mask)
 
-        # -- 3. Load schedule and execute forward partitions --
+        # 3. Load schedule and execute forward partitions
         current_schedule = (
             scheduler.current_schedule if scheduler is not None else None
         )
@@ -203,14 +188,14 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             else:
                 partition.execute(ctx=ctx_nb2, pre_ctx=ctx_nb1)
 
-        # -- 4. Extract final outputs --
+        # 4. Extract final outputs
         final_tid = forward_tensor_graph.get_output_channel(
             seed_config.fwd_output_channel
         )
         h1_out = ctx_nb1.tensor_store.get(final_tid)
         h2_out = ctx_nb2.tensor_store.get(final_tid)
 
-        # -- 5. Save for backward --
+        # 5. Save for backward
         func_ctx.backward_partitions = backward_partitions
         func_ctx.backward_tensor_graph = backward_tensor_graph
         func_ctx.scheduler = scheduler
@@ -234,7 +219,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         grad_h2: Tensor,
     ) -> tuple:
 
-        # -- 1. Restore saved tensors --
+        # 1. Restore saved tensors
         saved = func_ctx.saved_tensors
         num_saved_1: int = func_ctx.num_saved_1
         ctx_nb1: NanoBatchContext = func_ctx.ctx_nb1
@@ -245,7 +230,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
 
         seed_config: SeedConfig = func_ctx.seed_config
 
-        # -- 2. Seed backward TensorStores with grad inputs --
+        # 2. Seed backward TensorStores with grad inputs
         # Use fresh TensorStores for backward grad routing.  Forward
         # activations are accessed via OperationContext.saved_tensors
         # (restored above), not via TensorStore.
@@ -255,7 +240,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         ctx_nb1.tensor_store.set(seed_config.bwd_grad_tid, grad_h1)
         ctx_nb2.tensor_store.set(seed_config.bwd_grad_tid, grad_h2)
 
-        # -- 3. Load schedule and execute backward partitions --
+        # 3. Load schedule and execute backward partitions
         current_schedule = (
             func_ctx.scheduler.current_schedule
             if func_ctx.scheduler is not None
@@ -276,7 +261,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
                 grad_params = partition.execute(ctx=ctx_nb2, pre_ctx=ctx_nb1)
                 all_grad_params_nb2.update(grad_params)
 
-        # -- 4. Extract final input gradients --
+        # 4. Extract final input gradients
         final_grad_tid = func_ctx.backward_tensor_graph.get_output_channel(
             seed_config.bwd_output_channel
         )
@@ -291,14 +276,14 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             else None
         )
 
-        # -- 5. Combine parameter gradients from both nanobatches --
+        # 5. Combine parameter gradients from both nanobatches
         combined = _combine_param_grads(
             all_grad_params_nb1,
             all_grad_params_nb2,
             func_ctx.num_params,
         )
 
-        # -- 6. Return gradients --
+        # 6. Return gradients
         # Must match forward signature:
         #   h1, h2, rotary_pos_emb, attention_mask,
         #   forward_partitions, backward_partitions,
