@@ -2,6 +2,15 @@
 #
 # See LICENSE for license information.
 
+# ----- Kareus Modifications (relative to upstream NVIDIA/TransformerEngine v2.4.0) -----
+# This file is modified from the original TransformerEngine OperationFuser.
+#
+# _OperationFuserAutogradFunction backward() changes:
+#   - Commented out `ctx._saved_tensors_range = None` after unflatting saved
+#     tensors, preserving the range metadata for potential reuse by Kareus
+#     custom backward passes that re-enter the fuser's saved tensor slicing.
+# ---------------------------------------------------------------
+
 """Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
@@ -218,7 +227,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Unflatten list of saved tensors
         for ctx in basic_op_ctxs:
             ctx.saved_tensors = func_ctx.saved_tensors[slice(*ctx._saved_tensors_range)]
-            # ctx._saved_tensors_range = None
+            # ctx._saved_tensors_range = None  # [Kareus] keep range for reuse in custom backward passes
 
         # Unflatten list of extra tensor output grads
         if len(grad_extra_outputs) != func_ctx.num_extra_outputs:

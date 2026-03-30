@@ -2,6 +2,15 @@
 #
 # See LICENSE for license information.
 
+# ----- Kareus Modifications (relative to upstream NVIDIA/TransformerEngine v2.4.0) -----
+# This file is modified from the original TransformerEngine LayerNormLinear.
+#
+# _LayerNormLinear backward() changes:
+#   - Made dgrad allreduce synchronous (async_op=True -> async_op=False) in
+#     column-parallel non-sequence-parallel mode. This is for baseline Megatron-LM with
+#    sequential execution.
+# ---------------------------------------------------------------
+
 """LayerNormLinear API"""
 import os
 import warnings
@@ -731,7 +740,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         async_op=True,
                     )
                 else:
-                    dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=False)
+                    dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=False)  # [Kareus] sync allreduce (upstream: async_op=True)
                 nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
             else:
                 dgrad = gemm_out

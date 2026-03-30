@@ -2,6 +2,15 @@
 #
 # See LICENSE for license information.
 
+# ----- Kareus Modifications (relative to upstream NVIDIA/TransformerEngine v2.4.0) -----
+# This file is modified from the original TransformerEngine DotProductAttention.
+#
+# DotProductAttention.set_context_parallel_group() changes:
+#   - Preserve any cp_comm_type already set on the instance (e.g. from constructor
+#     or Kareus config) instead of unconditionally overwriting with the argument.
+#     This allows Kareus to set cp_comm_type="all_gather" at construction time.
+# ---------------------------------------------------------------
+
 """Attention."""
 from contextlib import nullcontext
 import math
@@ -430,6 +439,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
+        # [Kareus] Preserve cp_comm_type if already set (e.g. from constructor or Kareus config)
         self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
 
     @no_torch_dynamo(recursive=False)

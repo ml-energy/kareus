@@ -1,6 +1,6 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
-# ----- Kareus Modifications (relative to upstream Megatron-LM) -----
+# ----- Kareus Modifications (relative to upstream Megatron-LM v0.12.1) -----
 # This file is modified from the original Megatron-LM p2p_communication.
 #
 # _communicate() changes:

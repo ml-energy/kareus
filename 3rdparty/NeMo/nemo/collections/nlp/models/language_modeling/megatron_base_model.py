@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ----- Kareus Modifications (relative to upstream NeMo) -----
+# ----- Kareus Modifications (relative to upstream NeMo v2.3.1) -----
 # This file is modified from the original NeMo MegatronBaseModel.
 #
 # Imports added (guarded with HAVE_* flags; error raised if config enables but missing):
