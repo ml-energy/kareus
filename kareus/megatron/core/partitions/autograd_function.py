@@ -128,7 +128,8 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         forward(func_ctx, h1, h2, rotary_pos_emb, attention_mask,
                 forward_partitions, backward_partitions,
                 forward_tensor_graph, backward_tensor_graph,
-                scheduler, config, seed_config, *params)
+                scheduler, config, seed_config, is_grad_enabled,
+                checkpoint_activations, *params)
 
     Backward return (matches forward arg order)::
 
@@ -136,6 +137,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
          None, None,               # forward_partitions, backward_partitions
          None, None,               # forward_tensor_graph, backward_tensor_graph
          None, None, None,         # scheduler, config, seed_config
+         None, None,               # is_grad_enabled, checkpoint_activations
          *combined_grad_params)
     """
 
@@ -154,8 +156,16 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         config,                   # TransformerConfig
         seed_config: SeedConfig,
         is_grad_enabled: bool,
+        checkpoint_activations: bool,
         *params: Tensor,
     ) -> Tuple[Tensor, Tensor]:
+
+        func_ctx.checkpoint_activations = checkpoint_activations
+
+        # Save RNG state before forward execution (for deterministic recompute)
+        if checkpoint_activations:
+            func_ctx.fwd_cpu_rng_state = torch.get_rng_state()
+            func_ctx.fwd_cuda_rng_state = torch.cuda.get_rng_state()
 
         # 1. Create NanoBatchContexts
         ctx_nb1 = NanoBatchContext(batch_idx=0)
@@ -200,14 +210,23 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         func_ctx.backward_tensor_graph = backward_tensor_graph
         func_ctx.scheduler = scheduler
         func_ctx.seed_config = seed_config
-        func_ctx.ctx_nb1 = ctx_nb1
-        func_ctx.ctx_nb2 = ctx_nb2
         func_ctx.num_params = len(params)
 
-        saved_1 = ctx_nb1.flatten_saved_tensors()
-        saved_2 = ctx_nb2.flatten_saved_tensors()
-        func_ctx.num_saved_1 = len(saved_1)
-        func_ctx.save_for_backward(*saved_1, *saved_2)
+        if checkpoint_activations:
+            # Only save inputs for recompute; discard intermediate activations.
+            func_ctx.forward_partitions = forward_partitions
+            func_ctx.forward_tensor_graph = forward_tensor_graph
+            func_ctx.is_grad_enabled = is_grad_enabled
+            func_ctx.saved_rotary_pos_emb = rotary_pos_emb
+            func_ctx.saved_attention_mask = attention_mask
+            func_ctx.save_for_backward(h1, h2)
+        else:
+            func_ctx.ctx_nb1 = ctx_nb1
+            func_ctx.ctx_nb2 = ctx_nb2
+            saved_1 = ctx_nb1.flatten_saved_tensors()
+            saved_2 = ctx_nb2.flatten_saved_tensors()
+            func_ctx.num_saved_1 = len(saved_1)
+            func_ctx.save_for_backward(*saved_1, *saved_2)
 
         return h1_out, h2_out
 
@@ -219,21 +238,67 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         grad_h2: Tensor,
     ) -> tuple:
 
-        # 1. Restore saved tensors
-        saved = func_ctx.saved_tensors
-        num_saved_1: int = func_ctx.num_saved_1
-        ctx_nb1: NanoBatchContext = func_ctx.ctx_nb1
-        ctx_nb2: NanoBatchContext = func_ctx.ctx_nb2
-
-        ctx_nb1.restore_saved_tensors(saved[:num_saved_1])
-        ctx_nb2.restore_saved_tensors(saved[num_saved_1:])
-
         seed_config: SeedConfig = func_ctx.seed_config
+
+        # 1. Restore or recompute forward activations
+        if func_ctx.checkpoint_activations:
+            # Recompute: re-execute forward partitions to regenerate
+            # OperationContext.to_save for each compute op.
+            h1, h2 = func_ctx.saved_tensors
+            rotary_pos_emb = func_ctx.saved_rotary_pos_emb
+            attention_mask = func_ctx.saved_attention_mask
+
+            ctx_nb1 = NanoBatchContext(batch_idx=0)
+            ctx_nb2 = NanoBatchContext(batch_idx=1)
+
+            ctx_nb1.tensor_store.set(seed_config.h_tid, h1)
+            ctx_nb2.tensor_store.set(seed_config.h_tid, h2)
+
+            if rotary_pos_emb is not None and seed_config.rotary_tid is not None:
+                ctx_nb1.tensor_store.set(seed_config.rotary_tid, rotary_pos_emb)
+                ctx_nb2.tensor_store.set(seed_config.rotary_tid, rotary_pos_emb)
+
+            if attention_mask is not None and seed_config.mask_tid is not None:
+                ctx_nb1.tensor_store.set(seed_config.mask_tid, attention_mask)
+                ctx_nb2.tensor_store.set(seed_config.mask_tid, attention_mask)
+
+            current_schedule = (
+                func_ctx.scheduler.current_schedule
+                if func_ctx.scheduler is not None
+                else None
+            )
+
+            rng_devices = [torch.cuda.current_device()]
+            with torch.random.fork_rng(devices=rng_devices, enabled=True):
+                torch.set_rng_state(func_ctx.fwd_cpu_rng_state)
+                torch.cuda.set_rng_state(func_ctx.fwd_cuda_rng_state)
+
+                for partition in func_ctx.forward_partitions:
+                    partition.is_grad_enabled = func_ctx.is_grad_enabled
+                    if current_schedule is not None:
+                        partition.load_schedule(current_schedule)
+
+                    if partition.nano_batch_idx == 0:
+                        partition.execute(ctx=ctx_nb1, pre_ctx=ctx_nb2)
+                    else:
+                        partition.execute(ctx=ctx_nb2, pre_ctx=ctx_nb1)
+
+            ctx_nb1.finalize_recomputed_contexts()
+            ctx_nb2.finalize_recomputed_contexts()
+
+        else:
+            saved = func_ctx.saved_tensors
+            num_saved_1: int = func_ctx.num_saved_1
+            ctx_nb1: NanoBatchContext = func_ctx.ctx_nb1
+            ctx_nb2: NanoBatchContext = func_ctx.ctx_nb2
+
+            ctx_nb1.restore_saved_tensors(saved[:num_saved_1])
+            ctx_nb2.restore_saved_tensors(saved[num_saved_1:])
 
         # 2. Seed backward TensorStores with grad inputs
         # Use fresh TensorStores for backward grad routing.  Forward
         # activations are accessed via OperationContext.saved_tensors
-        # (restored above), not via TensorStore.
+        # (restored above or recomputed), not via TensorStore.
         ctx_nb1.tensor_store = TensorStore()
         ctx_nb2.tensor_store = TensorStore()
 
@@ -288,7 +353,8 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         #   h1, h2, rotary_pos_emb, attention_mask,
         #   forward_partitions, backward_partitions,
         #   forward_tensor_graph, backward_tensor_graph,
-        #   scheduler, config, seed_config, is_grad_enabled, *params
+        #   scheduler, config, seed_config, is_grad_enabled,
+        #   checkpoint_activations, *params
         return (
             dh1,     # h1
             dh2,     # h2
@@ -302,5 +368,6 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             None,    # config
             None,    # seed_config
             None,    # is_grad_enabled
+            None,    # checkpoint_activations
             *combined,
         )

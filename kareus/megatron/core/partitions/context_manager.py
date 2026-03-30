@@ -170,3 +170,17 @@ class NanoBatchContext:
         """
         for op_id, (start, end) in self._saved_ranges.items():
             self.op_contexts[op_id].saved_tensors = saved_tensors[start:end]
+
+    def finalize_recomputed_contexts(self) -> None:
+        """Move ``to_save`` into ``saved_tensors`` on each :class:`OperationContext`.
+
+        Called after recomputing forward partitions during activation-
+        checkpointed backward.  The recompute populates ``to_save`` on
+        each context; this method converts them so that backward
+        partitions can read ``saved_tensors`` as usual.
+        """
+        for op_id in sorted(self.op_contexts):
+            ctx = self.op_contexts[op_id]
+            if ctx.to_save is not None and len(ctx.to_save) > 0:
+                ctx.saved_tensors = tuple(ctx.to_save)
+                ctx.to_save = None

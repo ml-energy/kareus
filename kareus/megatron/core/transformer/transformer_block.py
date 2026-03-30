@@ -7,18 +7,14 @@ into nanobatches; communication operators (AllReduce, AllGatherKV, ReduceScatter
 assigned lazily via set_tensor_parallel_group/set_context_parallel_group.
 """
 
-from contextlib import nullcontext
 from typing import Optional, Union, List
 
 import torch
 from torch import Tensor
 
-from megatron.core import parallel_state, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
-from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
-from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.module import MegatronModule
@@ -26,7 +22,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 from megatron.core.transformer.utils import sharded_state_dict_default
-from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
+from megatron.core.utils import WrappedTensor, make_viewless_tensor
 
 from megatron.core.transformer.transformer_block import (
     TransformerBlockSubmodules,
@@ -49,10 +45,6 @@ from kareus.transformer_engine.pytorch.ops import AllGatherKV
 from kareus.transformer_engine.pytorch.ops import ReduceScatterKV
 from kareus.transformer_engine.pytorch.ops import AllReduce
 
-from megatron.core.extensions.transformer_engine import (
-    get_cpu_offload_context,
-    te_checkpoint,
-)
 
 from kareus.megatron.core.partitions import (
     CommunicationType,
@@ -97,31 +89,38 @@ class TransformerBlock(MegatronModule):
         # required for pipeline parallel schedules
         self.input_tensor = None
 
-        self.checkpoint_core_attention = (
-            self.config.recompute_granularity == 'selective'
-            and "core_attn" in self.config.recompute_modules
-        )
-
-        if get_cpu_offload_context is not None:
-            (self.offload_context, self.group_prefetch_offload_commit_async) = (
-                get_cpu_offload_context(
-                    self.config.cpu_offloading,
-                    self.config.cpu_offloading_num_layers,
-                    self.config.num_layers,
-                    self.config.cpu_offloading_activations,
-                    self.config.cpu_offloading_weights,
-                )
+        if self.config.cpu_offloading:
+            raise NotImplementedError(
+                "CPU offloading is not supported in Kareus TransformerBlock"
             )
-            self.config._cpu_offloading_context = (
-                self.offload_context if self.config.cpu_offloading else None
-            )
-        else:
-            assert (
-                self.config.cpu_offloading is False
-            ), "CPU Offloading is enabled when TE is not present"
 
-            self.offload_context, self.group_prefetch_offload_commit_async = nullcontext(), None
-            self.config._cpu_offloading_context = None
+        if self.config.fp8:
+            raise NotImplementedError(
+                "FP8 training is not supported in Kareus TransformerBlock"
+            )
+
+        if self.config.sequence_parallel:
+            raise NotImplementedError(
+                "Sequence parallel is not supported in Kareus TransformerBlock"
+            )
+
+        if self.config.distribute_saved_activations:
+            raise NotImplementedError(
+                "distribute_saved_activations is not supported in Kareus TransformerBlock"
+            )
+
+        if self.config.recompute_granularity == 'selective':
+            raise NotImplementedError(
+                "Selective activation checkpointing is not supported in Kareus TransformerBlock"
+            )
+
+        if (
+            self.config.recompute_method == 'block'
+        ):
+            raise NotImplementedError(
+                "recompute_method='block' is not supported in Kareus TransformerBlock; "
+                "only 'uniform' (checkpoint all layers at once) is supported"
+            )
 
         self._build_layers()
 
@@ -406,7 +405,36 @@ class TransformerBlock(MegatronModule):
         Returns:
             Output hidden states tensor [s, b, h].
         """
-        inference_context = deprecate_inference_params(inference_context, inference_params)
+        if context is not None or context_mask is not None:
+            raise NotImplementedError(
+                "Cross-attention (context/context_mask) is not supported in Kareus TransformerBlock"
+            )
+
+        if rotary_pos_cos is not None or rotary_pos_sin is not None:
+            raise NotImplementedError(
+                "rotary_pos_cos/rotary_pos_sin is not supported in Kareus TransformerBlock; "
+                "use rotary_pos_emb instead"
+            )
+
+        if attention_bias is not None:
+            raise NotImplementedError(
+                "attention_bias is not supported in Kareus TransformerBlock"
+            )
+
+        if packed_seq_params is not None:
+            raise NotImplementedError(
+                "packed_seq_params is not supported in Kareus TransformerBlock"
+            )
+
+        if sequence_len_offset is not None:
+            raise NotImplementedError(
+                "sequence_len_offset is not supported in Kareus TransformerBlock"
+            )
+
+        if inference_context is not None or inference_params is not None:
+            raise NotImplementedError(
+                "Inference is not supported in Kareus TransformerBlock"
+            )
 
         if isinstance(hidden_states, WrappedTensor):
             hidden_states = hidden_states.unwrap()
@@ -414,63 +442,51 @@ class TransformerBlock(MegatronModule):
         if not self.pre_process:
             hidden_states = self.input_tensor
 
-        if inference_context and not self.training:
-            inference_context.current_batch_size = hidden_states.size(1)
-
         hidden_states = make_viewless_tensor(
             inp=hidden_states, requires_grad=True, keep_graph=True
         )
 
-        if self.config.sequence_parallel:
-            raise NotImplementedError("Sequence parallel not implemented")
-        else:
-            rng_context = nullcontext()
-
-        use_outer_fp8_context = (
-            self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.delayed
-        )
-        outer_fp8_context = (
-            get_fp8_context(self.config) if use_outer_fp8_context else nullcontext()
-        )
-
-        with rng_context, outer_fp8_context:
-            # Split into nano-batches
-            batch_size = hidden_states.size(1)
-            if batch_size < 2:
-                raise ValueError(
-                    f"Batch size must be at least 2 for nano-batch splitting, got {batch_size}"
-                )
-            mid_point = batch_size // 2
-            # Note that operators should handle non-contiguous views.
-            h1 = hidden_states[:, :mid_point, ...]
-            h2 = hidden_states[:, mid_point:, ...]
-
-            # Collect all params for autograd tracking
-            all_params = self._get_all_params()
-
-            # Capture grad mode *before* entering autograd Function
-            # (Function.forward runs under torch.no_grad).
-            is_grad_enabled = torch.is_grad_enabled()
-
-            # Execute through single autograd boundary
-            h1_out, h2_out = TransformerBlockAutogradFunction.apply(
-                h1,
-                h2,
-                rotary_pos_emb,
-                attention_mask,
-                self.forward_partitions,
-                self.backward_partitions,
-                self.forward_tensor_graph,
-                self.backward_tensor_graph,
-                self.scheduler,
-                self.config,
-                self.seed_config,
-                is_grad_enabled,
-                *all_params,
+        # Split into nano-batches
+        batch_size = hidden_states.size(1)
+        if batch_size < 2:
+            raise ValueError(
+                f"Batch size must be at least 2 for nano-batch splitting, got {batch_size}"
             )
+        mid_point = batch_size // 2
+        h1 = hidden_states[:, :mid_point, ...]
+        h2 = hidden_states[:, mid_point:, ...]
 
-            # Concatenate nano-batch outputs
-            hidden_states = torch.cat([h1_out, h2_out], dim=1)
+        # Collect all params for autograd tracking
+        all_params = self._get_all_params()
+
+        # Capture grad mode *before* entering autograd Function
+        # (Function.forward runs under torch.no_grad).
+        is_grad_enabled = torch.is_grad_enabled()
+
+        checkpoint_activations = (
+            self.config.recompute_granularity == 'full' and self.training
+        )
+
+        # Execute through single autograd boundary
+        h1_out, h2_out = TransformerBlockAutogradFunction.apply(
+            h1,
+            h2,
+            rotary_pos_emb,
+            attention_mask,
+            self.forward_partitions,
+            self.backward_partitions,
+            self.forward_tensor_graph,
+            self.backward_tensor_graph,
+            self.scheduler,
+            self.config,
+            self.seed_config,
+            is_grad_enabled,
+            checkpoint_activations,
+            *all_params,
+        )
+
+        # Concatenate nano-batch outputs
+        hidden_states = torch.cat([h1_out, h2_out], dim=1)
 
         # Final layer norm
         if self.final_layernorm is not None:
@@ -484,7 +500,19 @@ class TransformerBlock(MegatronModule):
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: dict = None
     ) -> ShardedStateDict:
-        """Generate a sharded state dictionary for the transformer block."""
+        """
+        Generate a sharded state dictionary for the transformer block.
+
+        Args:
+            prefix (str, optional): Prefix to be added to all keys in the state dict.
+                Defaults to an empty string.
+            sharded_offsets (tuple, optional): Tuple of sharding offsets.
+            metadata (dict, optional): Additional metadata for sharding.
+                Can specify if layers are non-homogeneous. Defaults to None.
+
+        Returns:
+            ShardedStateDict: A dictionary containing the sharded state of the model.
+        """
         assert not sharded_offsets, "Unexpected sharded offsets"
         non_homogeneous_layers = metadata is not None and metadata.get(
             'non_homogeneous_layers', False
@@ -502,11 +530,11 @@ class TransformerBlock(MegatronModule):
 
         layer_prefix = f'{prefix}layers.'
         num_layers = self.config.num_layers
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             offset = get_transformer_layer_offset(self.config)
 
             global_layer_offset = layer.layer_number - 1
-            state_dict_prefix = f'{layer_prefix}{i}.'
+            state_dict_prefix = f'{layer_prefix}{global_layer_offset - offset}.'
             if non_homogeneous_layers:
                 sharded_prefix = f'{layer_prefix}{global_layer_offset}.'
                 sharded_pp_offset = []
@@ -523,7 +551,7 @@ class TransformerBlock(MegatronModule):
             sharded_state_dict.update(layer_sharded_state_dict)
 
         for name, module in self.named_children():
-            if module is not self.layers:
+            if not module is self.layers:
                 sharded_state_dict.update(
                     sharded_state_dict_default(
                         module, f'{prefix}{name}.', sharded_offsets, metadata
