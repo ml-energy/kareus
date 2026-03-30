@@ -1,5 +1,14 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
+# ----- Kareus Modifications (relative to upstream Megatron-LM) -----
+# This file is modified from the original Megatron-LM ModelParallelConfig.
+#
+# ModelParallelConfig dataclass fields added:
+#   - zeus_monitor: ZeusMonitor instance for energy monitoring (from fork commit 803aa36)
+#   - perseus_optimizer: PipelineFrequencyOptimizer instance for GPU freq opt (from fork)
+#   - kareus_scheduler: PipelineCommScheduler instance for comm scheduling (post-conversion)
+# ---------------------------------------------------------------
+
 from dataclasses import dataclass
 from typing import Callable, ContextManager, Optional
 
@@ -92,6 +101,7 @@ class ModelParallelConfig:
     timers: Optional[Callable] = None
     """Timers object to call for various timing functions. See megatron.core.timers.Timers"""
 
+    # [Kareus] Zeus energy monitor, Perseus frequency optimizer, Kareus comm scheduler
     zeus_monitor: Optional[Callable] = None
     """ZeusMonitor object for power and energy monitoring. See zeus.monitor.ZeusMonitor"""
 

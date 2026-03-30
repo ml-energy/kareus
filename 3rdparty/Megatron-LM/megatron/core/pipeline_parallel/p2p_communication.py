@@ -1,5 +1,13 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
+# ----- Kareus Modifications (relative to upstream Megatron-LM) -----
+# This file is modified from the original Megatron-LM p2p_communication.
+#
+# _communicate() changes:
+#   - Skips cuda.synchronize() after batch_isend_irecv when kareus_scheduler is
+#     active, to allow Kareus to manage its own communication-computation overlap
+# ---------------------------------------------------------------
+
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -397,7 +405,7 @@ def _communicate(
         # meaning this synchronization is required when ETP ≠ DTP.
         or len(tensor_recv_prev_list) > 1
         or len(tensor_recv_next_list) > 1
-    ):
+    ) and config.kareus_scheduler is None:  # [Kareus] skip sync when Kareus manages overlap
         # To protect against race condition when using batch_isend_irecv().
         # User should assert that we have a modern enough PyTorch to not need this
         torch.cuda.synchronize()

@@ -1,5 +1,24 @@
 # Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
 
+# ----- Kareus Modifications (relative to upstream Megatron-LM) -----
+# This file is modified from the original Megatron-LM timers.
+#
+# energy_polling_process() changes:
+#   - Takes global_rank and local_rank instead of just rank for disambiguated
+#     output filenames (time-energy-{global_rank}-{local_rank}.csv)
+#
+# Timers.__init__() changes:
+#   - Added global_rank, local_rank parameters for per-rank output filenames
+#   - Replaced duplicate device_idx assertion with global_rank/local_rank assertion
+#
+# Timers._start_energy_polling() / _stop_energy_polling() changes:
+#   - Updated log messages and args to use global_rank/local_rank
+#
+# Timers.shutdown() changes:
+#   - Output filename uses global_rank-local_rank suffix
+#     (instructions-{global_rank}-{local_rank}.csv)
+# ---------------------------------------------------------------
+
 """Megatron timers with energy monitoring capabilities.
 
 This module provides hierarchical timing and energy monitoring for Megatron training.
@@ -290,6 +309,7 @@ class Timer(TimerBase):
         return self._energy_consumed.copy()
 
 
+# [Kareus] Changed signature: rank -> global_rank, local_rank for disambiguated filenames
 def energy_polling_process(device_idx: int, channel: mp.SimpleQueue, output_dir: str, global_rank: int, local_rank: int) -> None:
     pynvml.nvmlInit()
     gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
@@ -322,6 +342,7 @@ def energy_polling_process(device_idx: int, channel: mp.SimpleQueue, output_dir:
 class Timers:
     """Class for a group of Timers with optional energy monitoring."""
 
+    # [Kareus] Added global_rank, local_rank params for per-rank output filenames
     def __init__(self, log_level, log_option, device_idx=None, enable_energy_monitoring=False, output_dir=None, global_rank=None, local_rank=None):
         """Initialize group of timers.
 

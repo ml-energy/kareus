@@ -1,5 +1,28 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
+# ----- Kareus Modifications (relative to upstream Megatron-LM) -----
+# This file is modified from the original Megatron-LM pipeline parallel schedules.
+#
+# forward_step() changes:
+#   - Added forward_only parameter (from fork commit 803aa36)
+#   - Perseus on_instruction_begin/end("forward") hooks (from fork)
+#   - Kareus on_instruction_begin/end("forward") hooks (post-conversion)
+#
+# backward_step() changes:
+#   - Perseus on_instruction_begin/end("backward") hooks (from fork)
+#   - Kareus on_instruction_begin/end("backward") hooks (post-conversion)
+#
+# forward_backward_no_pipelining() changes:
+#   - Passes forward_only to forward_step calls (from fork)
+#
+# forward_backward_pipelining_without_interleaving() changes:
+#   - Passes forward_only to forward_step calls (from fork)
+#   - Zeus monitor per-microbatch begin/end_window calls (from fork, now commented out)
+#
+# forward_step_helper() (interleaved schedule):
+#   - Passes forward_only to forward_step calls (from fork)
+# ---------------------------------------------------------------
+
 import contextlib
 from typing import Iterator, List, Union
 
@@ -256,6 +279,7 @@ def forward_step(
     if config.timers is not None:
         config.timers('forward-compute', log_level=2).start()
     
+    # [Kareus] Perseus & Kareus per-instruction hooks
     if config.perseus_optimizer is not None and not forward_only:
         config.perseus_optimizer.on_instruction_begin("forward")
     
@@ -354,6 +378,7 @@ def forward_step(
     if unwrap_output_tensor:
         return output_tensor, num_tokens
     
+    # [Kareus] Perseus & Kareus per-instruction hooks
     if config.perseus_optimizer is not None and not forward_only:
         config.perseus_optimizer.on_instruction_end("forward")
     
@@ -379,6 +404,7 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
     if config.timers is not None:
         config.timers('backward-compute', log_level=2).start()
     
+    # [Kareus] Perseus & Kareus per-instruction hooks
     if config.perseus_optimizer is not None:
         config.perseus_optimizer.on_instruction_begin("backward")
     
@@ -440,6 +466,7 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
     if config.timers is not None:
         config.timers('backward-compute').stop()
 
+    # [Kareus] Perseus & Kareus per-instruction hooks
     if config.perseus_optimizer is not None:
         config.perseus_optimizer.on_instruction_end("backward")
     

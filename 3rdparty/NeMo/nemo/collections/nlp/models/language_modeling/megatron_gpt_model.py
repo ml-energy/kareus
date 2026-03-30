@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ----- Kareus Modifications (relative to upstream NeMo) -----
+# This file is modified from the original NeMo MegatronGPTModel.
+#
+# MegatronGPTModel.training_step() changes:
+#   - Added Perseus optimizer hooks: on_step_begin() / on_step_end() per step
+#   - Added Kareus scheduler hooks: on_step_begin() / on_step_end() per step
+#   - Added Zeus monitor hooks: begin_window() / end_window() around training step
+#     and fwd_bwd_step_call for per-step energy measurement
+# ---------------------------------------------------------------
+
 import itertools
 import os
 import queue
@@ -837,6 +847,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         The input batch to each micro-batch is fetched using the dataloader function
         in the micro-batch fwd function.
         """
+        # [Kareus] Per-step hooks for Perseus, Kareus, and Zeus energy monitoring
         if self.perseus_optimizer is not None:
             self.perseus_optimizer.on_step_begin()
         
@@ -917,6 +928,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                     len(embedding_module.embedding_activation_buffer) == 0
                 ), "When you defer wgrads, this buffer should not hold stray activations"
         
+        # [Kareus] Zeus energy measurement around fwd/bwd step
         if self.zeus_monitor is not None:
             self.zeus_monitor.begin_window("training_step_fwd_bwd_step_call")
 
@@ -1065,6 +1077,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             self.log('global_batch_size', current_global_batch_size, prog_bar=True, rank_zero_only=True, batch_size=1)
             self.if_first_step = 1
         
+        # [Kareus] Per-step end hooks for Perseus, Kareus, and Zeus energy monitoring
         if self.perseus_optimizer is not None:
             self.perseus_optimizer.on_step_end()
         

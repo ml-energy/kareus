@@ -12,6 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ----- Kareus Modifications (relative to upstream NeMo) -----
+# This file is modified from the original NeMo MegatronBaseModel.
+#
+# Imports added (guarded with HAVE_* flags; error raised if config enables but missing):
+#   - multiprocessing, time, pynvml: for GPU stats background monitoring
+#   - zeus.monitor.ZeusMonitor: per-step energy measurement
+#   - zeus.monitor.power.PowerMonitor/PowerDomain: continuous power timeline collection
+#   - zeus.optimizer.pipeline_frequency.PipelineFrequencyOptimizer: Perseus GPU frequency opt
+#   - kareus.scheduler.PipelineCommScheduler: Kareus partition-based comm scheduling
+#
+# Module-level functions added:
+#   - gpu_stats_monitor(): background process sampling SM clock & throttle via pynvml
+#   - gpu_stats_monitor_start(): spawn one monitor process per GPU
+#   - gpu_stats_monitor_end(): terminate monitors, filter & return collected data
+#
+# MegatronBaseModel.__init__() changes:
+#   - Enhanced Megatron Timers with energy_monitoring, output_dir, device_idx,
+#     global_rank, local_rank
+#   - Added Zeus energy monitor initialization (ZeusMonitor)
+#   - Added PowerMonitor, gpu_stats_monitors, perseus_optimizer, kareus_scheduler
+#     member variables
+#
+# MegatronBaseModel.on_train_start() changes:
+#   - Perseus optimizer init with CP-aware TP rank/degree and dynamic server URL
+#     from MASTER_ADDR env var; handles self.model as list (pipeline parallel)
+#   - Kareus scheduler init from solution_path config
+#   - PowerMonitor init with update_period=0.05
+#   - GPU stats background monitor startup (pynvml frequency/throttle)
+#
+# MegatronBaseModel.on_train_end() added:
+#   - Timers shutdown
+#   - Power timeline CSV dump
+#   - GPU frequency/throttle CSV dump from background monitors
+#
+# MegatronBaseModel.build_model_parallel_config() changes:
+#   - Added zeus_monitor and perseus_optimizer to ModelParallelConfig mapping
+# ---------------------------------------------------------------
+
 import gc
 import itertools
 import multiprocessing
@@ -79,12 +117,14 @@ try:
 except (ImportError, ModuleNotFoundError):
     HAVE_MEGATRON_CORE_TIMERS = False
 
+# [Kareus] Zeus energy monitor for per-step energy measurement
 try:
     from zeus.monitor import ZeusMonitor
     HAVE_ZEUS_MONITOR = True
 except (ImportError, ModuleNotFoundError):
     HAVE_ZEUS_MONITOR = False
 
+# [Kareus] Zeus power monitor for continuous power timeline collection
 try:
     from zeus.monitor.power import PowerMonitor
     from zeus.monitor.power import PowerDomain
@@ -92,18 +132,21 @@ try:
 except (ImportError, ModuleNotFoundError):
     HAVE_POWER_MONITOR = False
 
+# [Kareus] pynvml for background GPU frequency/throttle monitoring
 try:
     import pynvml
     HAVE_PYNVML = True
 except (ImportError, ModuleNotFoundError):
     HAVE_PYNVML = False
 
+# [Kareus] Perseus pipeline frequency optimizer
 try:
     from zeus.optimizer.pipeline_frequency import PipelineFrequencyOptimizer
     HAVE_PERSEUS_OPTIMIZER = True
 except (ImportError, ModuleNotFoundError):
     HAVE_PERSEUS_OPTIMIZER = False
 
+# [Kareus] Kareus partition-based communication scheduler
 try:
     from kareus.scheduler import PipelineCommScheduler
     HAVE_KAREUS_SCHEDULER = True
@@ -116,15 +159,13 @@ from nemo.utils.env_var_parsing import get_envint
 __all__ = ["MegatronBaseModel"]
 
 
-def gpu_stats_monitor(shared_dict, gpu_idx, interval=0.02):
+# [Kareus] GPU stats background monitoring functions (frequency/throttle via pynvml)
+def gpu_stats_monitor(shared_dict, gpu_idx, interval=0.05):
     """
     Child process function that continuously collects GPU frequency and throttle data for a single GPU.
     The data is stored in shared_dict with keys 'frequency' and 'throttle'.
     Data format: [timestamp, sm_clock] for frequency, [timestamp, throttle_reasons] for throttle.
     """
-    if not HAVE_PYNVML:
-        return
-    
     try:
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
@@ -145,7 +186,7 @@ def gpu_stats_monitor(shared_dict, gpu_idx, interval=0.02):
             except Exception:
                 pass
             
-            # time.sleep(interval)
+            time.sleep(interval)
     except Exception:
         pass
     finally:
@@ -276,6 +317,7 @@ class MegatronBaseModel(NLPModel):
             else torch.float32
         )
 
+        # [Kareus] Enhanced timers, Zeus/power monitors, Perseus optimizer, Kareus scheduler
         self.megatron_timers = None
         if self.cfg.get('enable_megatron_timers', False) and HAVE_MEGATRON_CORE_TIMERS:
             self.megatron_timers_cfg = dict(self.cfg.get('megatron_timer_kwargs', dict()))
@@ -302,7 +344,9 @@ class MegatronBaseModel(NLPModel):
             )
         
         self.zeus_monitor = None
-        if self.cfg.get('enable_zeus_monitor', False) and HAVE_ZEUS_MONITOR:
+        if self.cfg.get('enable_zeus_monitor', False):
+            if not HAVE_ZEUS_MONITOR:
+                raise ImportError("enable_zeus_monitor is set but zeus is not installed: pip install zeus")
             zeus_monitor_cfg = dict(self.cfg.get('zeus_monitor_kwargs', dict()))
             if 'gpu_indices' not in zeus_monitor_cfg:
                 zeus_monitor_cfg['gpu_indices'] = [trainer.local_rank]
@@ -654,8 +698,10 @@ class MegatronBaseModel(NLPModel):
         super().on_train_start()
         self.init_global_step = self.trainer.global_step
         
-        # Initialize Perseus optimizer here after distributed setup is complete
-        if self.cfg.get('enable_perseus_optimizer', False) and HAVE_PERSEUS_OPTIMIZER and self.perseus_optimizer is None:
+        # [Kareus] Initialize Perseus optimizer here after distributed setup is complete
+        if self.cfg.get('enable_perseus_optimizer', False) and self.perseus_optimizer is None:
+            if not HAVE_PERSEUS_OPTIMIZER:
+                raise ImportError("enable_perseus_optimizer is set but zeus is not installed: pip install '.[pfo-server]'")
             # Consider CP as part of TP: combine TP and CP for rank/degree
             _cp_size = parallel_state.get_context_parallel_world_size()
             _cp_rank = parallel_state.get_context_parallel_rank()
@@ -689,7 +735,10 @@ class MegatronBaseModel(NLPModel):
                 self.model.config.perseus_optimizer = self.perseus_optimizer
             print(f"Perseus optimizer successfully initialized for rank {self.trainer.global_rank}")
         
-        if self.cfg.get('enable_kareus_scheduler', False) and HAVE_KAREUS_SCHEDULER and self.kareus_scheduler is None:
+        # [Kareus] Initialize Kareus partition-based comm scheduler
+        if self.cfg.get('enable_kareus_scheduler', False) and self.kareus_scheduler is None:
+            if not HAVE_KAREUS_SCHEDULER:
+                raise ImportError("enable_kareus_scheduler is set but kareus.scheduler is not available")
             kareus_scheduler_cfg = dict(self.cfg.get('kareus_scheduler_kwargs', dict()))
             if 'solution_path' not in kareus_scheduler_cfg:
                 raise ValueError("solution_path is not set")
@@ -708,7 +757,10 @@ class MegatronBaseModel(NLPModel):
                 self.model.config.kareus_scheduler = self.kareus_scheduler
             print(f"Kareus scheduler successfully initialized for rank {self.trainer.global_rank}")
         
-        if self.cfg.get('enable_power_monitor', False) and HAVE_POWER_MONITOR:
+        # [Kareus] Initialize power monitor and GPU stats background processes
+        if self.cfg.get('enable_power_monitor', False):
+            if not HAVE_POWER_MONITOR:
+                raise ImportError("enable_power_monitor is set but zeus is not installed: pip install zeus")
             self.power_monitor_cfg = dict(self.cfg.get('power_monitor_kwargs', dict()))
             if 'gpu_indices' not in self.power_monitor_cfg:
                 self.power_monitor_cfg['gpu_indices'] = [self.trainer.local_rank]
@@ -716,12 +768,13 @@ class MegatronBaseModel(NLPModel):
             self.power_monitor = PowerMonitor(**self.power_monitor_cfg)
             print(f"Power monitor successfully initialized for local rank {self.trainer.local_rank}")
             
-            # Start GPU stats monitoring (one process per GPU for frequency and throttle)
-            if HAVE_PYNVML:
-                gpu_indices = self.power_monitor_cfg['gpu_indices']
-                self.gpu_stats_monitors = gpu_stats_monitor_start(gpu_indices)
-                print(f"GPU stats monitors successfully initialized for local rank {self.trainer.local_rank}, monitoring GPUs: {gpu_indices} (one process per GPU)")
+            if not HAVE_PYNVML:
+                raise ImportError("enable_power_monitor requires pynvml for GPU frequency/throttle monitoring: pip install pynvml")
+            gpu_indices = self.power_monitor_cfg['gpu_indices']
+            self.gpu_stats_monitors = gpu_stats_monitor_start(gpu_indices)
+            print(f"GPU stats monitors successfully initialized for local rank {self.trainer.local_rank}, monitoring GPUs: {gpu_indices} (one process per GPU)")
     
+    # [Kareus] on_train_end: shut down timers, dump power/frequency/throttle data
     def on_train_end(self) -> None:
         """
         Callback function invoked when the train ends.
@@ -1521,8 +1574,8 @@ class MegatronBaseModel(NLPModel):
             "bf16": self.torch_dtype == torch.bfloat16 and megatron_amp_O2,
             "params_dtype": self.params_dtype,
             "timers": self.megatron_timers,
-            "zeus_monitor": self.zeus_monitor,
-            "perseus_optimizer": self.perseus_optimizer,
+            "zeus_monitor": self.zeus_monitor,  # [Kareus]
+            "perseus_optimizer": self.perseus_optimizer,  # [Kareus]
             "async_tensor_model_parallel_allreduce": self.cfg.get('tensor_model_parallel_world_size', 1) > 1
             and not self.cfg.get('sequence_parallel', False),
             "pipeline_dtype": pipeline_dtype,
