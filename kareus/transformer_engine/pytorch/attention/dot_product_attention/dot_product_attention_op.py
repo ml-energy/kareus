@@ -1,4 +1,30 @@
-"""Attention operation following the BasicOperation pattern."""
+"""
+Modified from TransformerEngine
+(transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py).
+Changes:
+- Replaces ``DotProductAttention(TransformerEngineBaseModule)`` with
+  ``DotProductAttentionOp(BasicOperation)``.  This enables
+  ``op_forward`` / ``op_backward`` to be called with an externally
+  managed ``ctx`` (OperationContext) by the PartitionFuser.
+- Adds ``fuser_forward`` / ``fuser_backward`` overrides to handle the
+  two extra inputs (key_layer, value_layer) required by attention.
+- Delegates to ``flash_attention_forward`` / ``flash_attention_backward``
+  (from ``kareus.transformer_engine...backends``) instead of the three
+  sub-module backends (FlashAttention, FusedAttention,
+  UnfusedDotProductAttention).  No dynamic backend selection.
+- Reads pre-gathered KV tensors from global ``K_AG`` / ``V_AG`` (set
+  by the fuser's AllGatherKV op) and writes dK/dV to global ``K_RS`` /
+  ``V_RS`` (for the fuser's ReduceScatterKV op) during context
+  parallelism, rather than performing communication inline.
+- Adds ``batch_idx`` parameter to index into the global KV buffers.
+- Removes features not needed by the partition scheduler: dynamic
+  backend selection (``get_attention_backend``), FusedAttention /
+  UnfusedDotProductAttention paths, ``checkpoint_core_attention``,
+  ``prepare_forward`` context manager, FP8 checks, cuDNN workspace
+  optimization, ``_load_from_state_dict`` compatibility, and bias
+  shape detection.
+"""
+
 from contextlib import nullcontext
 import math
 import os
@@ -64,11 +90,12 @@ _alibi_cache = {
 
 
 class DotProductAttentionOp(BasicOperation):
-    """Dot Product Attention as a BasicOperation
-    
-    This implementation follows the BasicOperation pattern and only uses
-    FlashAttention backend for simplicity.
-    
+    """Modified from TransformerEngine's ``DotProductAttention``: inherits from
+    ``BasicOperation`` instead of ``TransformerEngineBaseModule``, enabling
+    ``op_forward`` / ``op_backward`` to be called with an externally managed
+    ``ctx`` by the PartitionFuser.  Only uses FlashAttention; backend
+    selection logic and FusedAttention / UnfusedDotProductAttention are removed.
+
     Parameters
     ----------
     num_attention_heads : int
@@ -131,6 +158,9 @@ class DotProductAttentionOp(BasicOperation):
         cp_stream: torch.cuda.Stream = None,
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
+        profiling_mode: bool = False,
+        cp_size: Optional[int] = None,
+        rank: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -155,8 +185,11 @@ class DotProductAttentionOp(BasicOperation):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.num_attention_heads = num_attention_heads
         self.layer_number = 1 if layer_number is None else layer_number
+        self.profiling_mode = profiling_mode
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
+        self.cp_size = cp_size
+        self.rank = rank
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
 
@@ -214,12 +247,21 @@ class DotProductAttentionOp(BasicOperation):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
+        cp_size: Optional[int] = None,
+        rank: Optional[int] = None,
     ) -> None:
-        """Set the context parallel attributes for the given module."""
+        """Set the context parallel attributes for the given module.
+
+        In profiling mode, ``cp_size`` and ``rank`` can be provided directly
+        without requiring a live ``cp_group`` process group.
+        """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
+        if cp_size is not None:
+            self.cp_size = cp_size
+        if rank is not None:
+            self.rank = rank
         self.cp_stream = cp_stream
-        # self.cp_stream = torch.cuda.current_stream()
         self.cp_comm_type = self.cp_comm_type if self.cp_comm_type is not None else cp_comm_type
 
     def op_forward(
@@ -249,8 +291,12 @@ class DotProductAttentionOp(BasicOperation):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
     ) -> torch.Tensor:
-        """Forward pass for dot product attention."""
-        
+        """Modified from ``DotProductAttention.forward()``: uses
+        ``flash_attention_forward`` directly instead of dispatching through
+        multiple backends.  Reads pre-gathered KV from global ``K_AG`` /
+        ``V_AG`` for context parallelism.
+        """
+
         query_layer = input_
         
         # Basic validation
@@ -335,7 +381,7 @@ class DotProductAttentionOp(BasicOperation):
 
         # update KV cache and retrieve saved tokens from cache for inference
         if inference_params is not None:
-            raise NotImplementedError("DotProductAttentionOp does not support inference_params is not None.")
+            raise NotImplementedError("DotProductAttentionOp does not support inference_params.")
             assert self.layer_number is not None, "Layer number must be set!"
 
             # convert top-left causal to bottom-right causal due to KV caching
@@ -401,12 +447,15 @@ class DotProductAttentionOp(BasicOperation):
             )
 
         # Adjust max_seqlen and cu_seqlens for CP
-        cp_size = 1
-        if isinstance(self.cp_group, dist_group_type):
-            cp_size = get_distributed_world_size(self.cp_group)
-        elif isinstance(self.cp_group, list):
-            for group in self.cp_group:
-                cp_size *= get_distributed_world_size(group)
+        if self.profiling_mode:
+            cp_size = self.cp_size
+        else:
+            cp_size = 1
+            if isinstance(self.cp_group, dist_group_type):
+                cp_size = get_distributed_world_size(self.cp_group)
+            elif isinstance(self.cp_group, list):
+                for group in self.cp_group:
+                    cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
         
         if q_format in ["sbhd", "bshd"]:
@@ -528,7 +577,6 @@ class DotProductAttentionOp(BasicOperation):
             fp8_meta=self.fp8_meta if hasattr(self, 'fp8_meta') else None,
             quantizers=self.quantizers if hasattr(self, 'quantizers') else None,
             inference_params=inference_params,
-            # Let backend decide if FA3 is available by import/version
             flash_attention_backend=None,
             softmax_scale=self.softmax_scale,
             attention_dropout=self.attention_dropout,
@@ -536,7 +584,10 @@ class DotProductAttentionOp(BasicOperation):
             attention_type=self.attention_type,
             deterministic=self.deterministic,
             training=self.training if hasattr(self, 'training') else True,
-            ctx=ctx,  # Pass context to save tensors for backward
+            ctx=ctx,
+            profiling_mode=self.profiling_mode,
+            cp_size_override=self.cp_size,
+            rank_override=self.rank,
         )
 
         return output
@@ -546,7 +597,10 @@ class DotProductAttentionOp(BasicOperation):
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """Backward pass for dot product attention using FlashAttention backward functions."""
+        """New method (no counterpart in original ``DotProductAttention``):
+        explicit backward that calls ``flash_attention_backward`` and writes
+        dK/dV to global ``K_RS`` / ``V_RS`` for the fuser's ReduceScatterKV.
+        """
         
         # Retrieve saved context information
         qkv_format = ctx.op_qkv_format
@@ -587,7 +641,9 @@ class DotProductAttentionOp(BasicOperation):
         basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
-        """Override fuser_forward since we have extra inputs."""
+        """New method for the BasicOperation fuser interface: unpacks key and
+        value from ``basic_op_extra_inputs`` and delegates to ``op_forward``.
+        """
         
         # Extract key and value from extra inputs
         kwargs = basic_op_kwargs[0].copy()
@@ -624,6 +680,8 @@ class DotProductAttentionOp(BasicOperation):
         list[tuple[Optional[torch.Tensor], ...]],
         list[tuple[torch.Tensor, torch.Tensor]],
     ]:
-        """Override fuser_backward since we have extra inputs."""
+        """New method for the BasicOperation fuser interface: routes gradients
+        for the extra inputs (key, value) back through ``op_backward``.
+        """
         grad_input, grad_extra_inputs = self.op_backward(basic_op_ctxs[0], grad_output)
         return grad_input, [()], [grad_extra_inputs] 

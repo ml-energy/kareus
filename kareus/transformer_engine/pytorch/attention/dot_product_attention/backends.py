@@ -1,3 +1,26 @@
+"""
+Modified from TransformerEngine
+(transformer_engine/pytorch/attention/dot_product_attention/backends.py).
+Changes:
+- Extracts the FlashAttention.forward() method into a standalone
+  flash_attention_forward() function with an explicit ctx parameter,
+  and adds a corresponding flash_attention_backward() function, so that
+  forward/backward can be called by the PartitionFuser's autograd
+  Function without a torch.nn.Module wrapper.
+- Imports flash_attn forward/backward from kareus.flash_attn (custom
+  wrappers that expose separate forward and backward entry points with
+  an external ctx).
+- Uses kareus context_parallel module (attn_forward_func_with_cp,
+  attn_backward_func_with_cp) that accept pre-gathered KV tensors for
+  communication-computation overlap.
+- In sbhd + context_parallel mode, only Q is transposed to bshd; K/V
+  are left in sbhd because they will be allgathered along the seq dim.
+- Comments out features not needed by the partition scheduler: Float8Tensor
+  format conversion, padding masks, thd format, inference/KV-cache,
+  CPU offload.
+- Removes UnfusedDotProductAttention, FusedAttnFunc, and FusedAttention.
+"""
+
 from contextlib import nullcontext
 import math
 import os
@@ -94,10 +117,16 @@ def flash_attention_forward(
     deterministic: bool = False,
     training: bool = True,
     ctx: Optional[OperationContext] = None,
+    profiling_mode: bool = False,
+    cp_size_override: Optional[int] = None,
+    rank_override: Optional[int] = None,
 ) -> torch.Tensor:
-    """Standalone FlashAttention forward function extracted from FlashAttention module.
-    
-    This function contains the core FlashAttention logic without the torch.nn.Module wrapper.
+    """Modified from TransformerEngine's ``FlashAttention.forward()``: extracted
+    into a standalone function so the PartitionFuser can call it with an
+    externally managed ``ctx`` (OperationContext) instead of relying on
+    ``nn.Module`` state.  Accepts additional ``key_layer_gathered`` /
+    ``value_layer_gathered`` for pre-gathered KV in context parallelism, and
+    passes ``ctx`` as the first positional arg to the kareus flash_attn wrappers.
     """
     
     assert all(
@@ -111,12 +140,15 @@ def flash_attention_forward(
         qkv_layout in QKVLayouts
     ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
 
-    cp_size = 1
-    if isinstance(cp_group, dist_group_type):
-        cp_size = get_distributed_world_size(cp_group)
-    elif isinstance(cp_group, list):
-        for group in cp_group:
-            cp_size *= get_distributed_world_size(group)
+    if profiling_mode:
+        cp_size = cp_size_override
+    else:
+        cp_size = 1
+        if isinstance(cp_group, dist_group_type):
+            cp_size = get_distributed_world_size(cp_group)
+        elif isinstance(cp_group, list):
+            for group in cp_group:
+                cp_size *= get_distributed_world_size(group)
     context_parallel = cp_size > 1
 
     # get q_format and kv_format for training and inference
@@ -131,8 +163,7 @@ def flash_attention_forward(
                 and query_layer.shape[0] * query_layer.shape[1] >= 512
                 and qkv_layout == "sbh3d"
             ):  
-                raise NotImplementedError("FlashAttention does not support \
-                    query_layer.shape[-1] == 128 and query_layer.shape[0] * query_layer.shape[1] >= 512 and qkv_layout == 'sbh3d'.")
+                raise NotImplementedError("_PrepareQKVForFA is not implemented.")
                 # # Use _PrepareQKVForFA if available
                 # try:
                 #     from transformer_engine.pytorch.attention.dot_product_attention.backends import _PrepareQKVForFA
@@ -153,17 +184,15 @@ def flash_attention_forward(
                         x.transpose(0, 1).contiguous()
                         for x in (query_layer, key_layer, value_layer)
                     ]
-        # else:
-        #     raise NotImplementedError(f"qkv_format: {qkv_format} is not supported in FlashAttention.")
         elif q_format == "sbhd" and kv_format == "bshd":
-            raise NotImplementedError("FlashAttention does not support q_format == sbhd and kv_format == bshd.")
+            raise NotImplementedError("FlashAttention backend does not support q_format == sbhd and kv_format == bshd.")
             # query_layer = query_layer.transpose(0, 1).contiguous()
         # if context_parallel:
         #     query_layer, key_layer, value_layer = [
         #         x.contiguous() for x in (query_layer, key_layer, value_layer)
         #     ]
     else:
-        raise NotImplementedError("Float8Tensors are not supported in FlashAttention.")
+        raise NotImplementedError("Float8Tensors are not supported in FlashAttention backend.")
         # if qkv_format == "sbhd":
         #     query_layer._data, key_layer._data, value_layer._data = [
         #         x.transpose(0, 1).contiguous()
@@ -198,7 +227,7 @@ def flash_attention_forward(
             max_seqlen_kv *= cp_size
 
             if "padding" in attn_mask_type:
-                raise NotImplementedError("Padding mask not supported with context parallelism!")
+                raise NotImplementedError("Padding mask not supported in FlashAttention backend.")
                 # assert (
                 #     not context_parallel
                 # ), "Padding mask not supported with context parallelism!"
@@ -259,7 +288,7 @@ def flash_attention_forward(
             #             key_layer.device,
             #         )
         elif qkv_format == "thd":
-            raise NotImplementedError("FlashAttention does not support qkv_format = thd.")
+            raise NotImplementedError("FlashAttention backend does not support qkv_format = thd.")
             # assert (
             #     cu_seqlens_q is not None and cu_seqlens_kv is not None
             # ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
@@ -270,7 +299,7 @@ def flash_attention_forward(
             #     seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
             #     max_seqlen_kv = seqlens_kv.max().item()
     else:
-        raise NotImplementedError("FlashAttention does not support inference_params is not None.")
+        raise NotImplementedError("FlashAttention backend does not support inference_params is not None.")
         # if qkv_format in ["sbhd_2bshd", "bshd"]:
         #     # q is in bshd in both cases from conversion above or the original input
         #     batch_size, context_len = query_layer.shape[:2]
@@ -306,7 +335,6 @@ def flash_attention_forward(
     if context_parallel and all(
         not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
     ):
-        # raise NotImplementedError("Context parallelism is not supported with FlashAttention.")
         assert (
             alibi_slopes is None
         ), "Alibi slope bias addition is not supported with context parallelism."
@@ -338,6 +366,9 @@ def flash_attention_forward(
                 quantizers=quantizers,
                 pad_between_seqs=False,
                 use_flash_attn_3=use_flash_attn_3,
+                profiling_mode=profiling_mode,
+                cp_size_override=cp_size_override,
+                rank_override=rank_override,
             )
     else:
         from transformer_engine.pytorch.cpu_offload import (
@@ -346,7 +377,7 @@ def flash_attention_forward(
         )
 
         if CPUOffloadEnabled:
-            raise NotImplementedError("FlashAttention does not support CPUOffload.")
+            raise NotImplementedError("FlashAttention backend does not support CPUOffload.")
             # mark_activation_offload(
             #     query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
             # )
@@ -370,7 +401,7 @@ def flash_attention_forward(
                     flash_attn_func if not use_flash_attn_3 else flash_attn_func_v3
                 )
             else:
-                raise NotImplementedError("FlashAttention does not support flash_attn_varlen_func.")
+                raise NotImplementedError("FlashAttention backend does not support flash_attn_varlen_func.")
                 # if not use_flash_attn_3:
                 #     func = flash_attn_varlen_func
                 # elif inference_params is None:
@@ -527,7 +558,7 @@ def flash_attention_forward(
     if q_format == "sbhd":
         # (bs)hd -> bs(hd) -> sb(hd)
         if fp8 and fp8_meta["recipe"].fp8_mha:
-            raise NotImplementedError("FlashAttention does not support fp8.")
+            raise NotImplementedError("FlashAttention backend does not support fp8.")
             # output_data = (
             #     output._data.reshape(batch_size, max_seqlen_q // cp_size, -1)
             #     .transpose(0, 1)
@@ -541,14 +572,12 @@ def flash_attention_forward(
         else:
             ctx.original_output_shape = output.shape
             output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
-    # else:
-    #     raise NotImplementedError("FlashAttention does not support q_format != sbhd.")
     elif q_format == "bshd":
         # (bs)hd -> bs(hd)
         ctx.original_output_shape = tuple(output.shape)
         output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
     elif q_format == "thd":
-        raise NotImplementedError("FlashAttention does not support q_format == thd.")
+        raise NotImplementedError("FlashAttention backend does not support q_format == thd.")
         # # thd -> t(hd)
         # output = output.reshape(output.shape[0], -1)
 
@@ -563,7 +592,11 @@ def flash_attention_backward(
     k_ag: Optional[torch.Tensor] = None,
     v_ag: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward pass for FlashAttention that reverses all forward transformations."""
+    """
+    New function: explicit backward pass for ``flash_attention_forward``, reversing
+    its output reshaping, dispatching to the kareus flash_attn backward
+    wrappers (or the kareus CP backward), and reversing input transpositions.
+    """
 
     # Step 1: Reverse the final output format transformations
     if q_format == "sbhd":
@@ -574,11 +607,10 @@ def flash_attention_backward(
         original_shape = ctx.original_output_shape
         grad_output_transformed = grad_output.reshape(original_shape)
     else:
-        raise NotImplementedError("FlashAttention only supports q_format == 'sbhd' or 'bshd'.")
+        raise NotImplementedError("FlashAttention backend only supports q_format == 'sbhd' or 'bshd'.")
 
     # Step 2: Call the appropriate FlashAttention backward function
     if context_parallel:
-        # raise NotImplementedError("Context parallelism backward is not supported.")
         dq, dk, dv = attn_backward_func_with_cp(ctx, grad_output_transformed, k_ag, v_ag)
     else:
         # Determine if FlashAttention 3 is available and should be used
@@ -598,6 +630,6 @@ def flash_attention_backward(
         else:
             dq, dk, dv = [x.transpose(0, 1).contiguous() for x in (dq, dk, dv)]
     elif qkv_format != "bshd":
-        raise NotImplementedError("Simplified FlashAttention only supports qkv_format == 'sbhd' or 'bshd'.")
+        raise NotImplementedError("FlashAttention backend only supports qkv_format == 'sbhd' or 'bshd'.")
 
     return dq, dk, dv 

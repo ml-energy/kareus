@@ -2,7 +2,29 @@
 #
 # See LICENSE for license information.
 
-"""Context Parallelism."""
+"""
+Modified from TransformerEngine
+(transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py).
+Changes:
+- Decomposes the ``AttnFuncWithCPAndKVAllGather`` autograd.Function into
+  standalone sub-functions (preprocess, gather, compute, backward pieces)
+  so the PartitionFuser can orchestrate each phase independently and
+  overlap KV all-gather / reduce-scatter with other compute.
+- ``attn_forward_func_with_cp`` and new ``attn_backward_func_with_cp``
+  accept an explicit ``ctx`` (OperationContext) and pre-gathered
+  ``k_ag`` / ``v_ag`` tensors; the all-gather and reduce-scatter are
+  performed externally by the fuser, not inside these functions.
+- Imports low-level ``_flash_attn_forward`` / ``_flash_attn_backward``
+  from ``kareus.flash_attn`` instead of TransformerEngine backends.
+- Removes classes / helpers not needed by the all_gather CP path:
+  ``AttnFuncWithCPAndKVP2P``, ``AttnFuncWithCPAndQKVOA2A``,
+  ``flash_attn_p2p_communicate``, ``flash_attn_a2a_communicate``,
+  A2A reordering helpers, P2P output correction / softmax-lse merge
+  helpers, ``get_cu_seqlens_on_cp_rank``, and associated caches.
+- Removes FusedAttention (cuDNN) paths, FA v3, thd format, FP8, and
+  padding-mask support (all raise ``NotImplementedError``).
+"""
+
 import os
 from typing import List, Union
 import torch
@@ -198,9 +220,9 @@ def _attn_cp_kv_allgather_preprocess(
     v,
     qkv_format,
 ):
-    """Preprocess inputs before gather_along_first_dim in CP+KV all-gather forward.
-
-    Returns only tensors (q, k, v).
+    """Extracted from ``AttnFuncWithCPAndKVAllGather.forward()``: reshapes Q
+    into ``[..., 2, s//2, ...]`` for the dual-chunk strategy.  K/V movedim is
+    commented out because the fuser keeps K/V in seq-first layout.
     """
     seq_dim = qkv_format.index("s")
     assert (
@@ -216,9 +238,9 @@ def _attn_cp_kv_allgather_preprocess(
 
 
 def _attn_cp_kv_allgather_gather(cp_group, k, v):
-    """Perform gather_along_first_dim for K and V in CP+KV all-gather forward.
-
-    Returns only gathered tensors.
+    """Extracted from ``AttnFuncWithCPAndKVAllGather.forward()``: performs
+    ``gather_along_first_dim`` for K and V.  In practice this is called by
+    the fuser externally and the result is passed in as ``k_ag`` / ``v_ag``.
     """
     k_ag, _ = gather_along_first_dim(k, cp_group)
     v_ag, _ = gather_along_first_dim(v, cp_group)
@@ -250,10 +272,14 @@ def _attn_cp_kv_allgather_compute(
     use_flash_attn_3,
     k_ag,
     v_ag,
+    profiling_mode=False,
+    cp_size_override=None,
+    rank_override=None,
 ):
-    """Compute the attention after KV all-gather and finalize context for backward.
-
-    Returns only the output tensor; recomputes needed metadata locally.
+    """Extracted from ``AttnFuncWithCPAndKVAllGather.forward()``: core
+    attention computation after KV all-gather, plus saving tensors on
+    ``ctx`` for backward.  Receives pre-gathered ``k_ag`` / ``v_ag``
+    from the fuser instead of calling gather internally.
     """
     # from _attn_cp_kv_allgather_preprocess
     # [b, s, np, hn] -> [b, 2, s//2, np, hn] or [s, b, np, hn] -> [2, s//2, b, np, hn]
@@ -261,8 +287,12 @@ def _attn_cp_kv_allgather_compute(
     q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
 
     qkv_dtype = q.dtype
-    cp_size = get_distributed_world_size(cp_group)
-    rank = get_distributed_rank(cp_group)
+    if profiling_mode:
+        cp_size = cp_size_override
+        rank = rank_override
+    else:
+        cp_size = get_distributed_world_size(cp_group)
+        rank = get_distributed_rank(cp_group)
     causal = "causal" in attn_mask_type
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -274,7 +304,6 @@ def _attn_cp_kv_allgather_compute(
     ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
     assert qkv_format != "thd", f"{qkv_format} format is not supported!"
     qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
-    # seq_dim = qkv_format.index("s")
 
     # scale seqlen info for CP
     max_seqlen_q = max_seqlen_q // (2 * cp_size)
@@ -292,7 +321,7 @@ def _attn_cp_kv_allgather_compute(
     if not use_fused_attention:
         fa_forward_kwargs_base = {"softmax_scale": softmax_scale}
         if use_flash_attn_3:
-            raise NotImplementedError("FlashAttention does not support use_flash_attn_3")
+            raise NotImplementedError("FlashAttention backend with context parallelism does not support use_flash_attn_3")
             # from transformer_engine.pytorch.attention.dot_product_attention.backends import (
             #     _flash_attn_fwd_v3,
             # )
@@ -300,7 +329,7 @@ def _attn_cp_kv_allgather_compute(
             # flash_attn_fwd = _flash_attn_fwd_v3
         else:
             if qkv_format == "thd":
-                raise NotImplementedError("FlashAttention does not support qkv_format == thd")
+                raise NotImplementedError("FlashAttention backend with context parallelism does not support qkv_format == thd")
                 # from transformer_engine.pytorch.attention.dot_product_attention.backends import (
                 #     _flash_attn_varlen_fwd,
                 # )
@@ -366,7 +395,7 @@ def _attn_cp_kv_allgather_compute(
                 )
                 max_seqlen_kv_ = seq_end_idx - seq_start_idx
                 if use_fused_attention or qkv_format == "thd":
-                    raise NotImplementedError("FusedAttention does not support use_fused_attention or qkv_format == thd")
+                    raise NotImplementedError("FlashAttention backend with context parallelism does not support use_fused_attention or qkv_format == thd")
                     # cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
                     #     k_ag.shape[1], max_seqlen_kv_, k_ag.device
                     # )
@@ -374,7 +403,7 @@ def _attn_cp_kv_allgather_compute(
                 # [s_range, b, np, hn] -> [b, s_range, np, hn] or [s_range, b, np, hn]
                 k_, v_ = [x.movedim(0, seq_dim).contiguous() for x in [k_, v_]]
                 if use_fused_attention:
-                    raise NotImplementedError("FusedAttention does not support use_fused_attention")
+                    raise NotImplementedError("FlashAttention backend with context parallelism does not support use_fused_attention")
                     # out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
                     #     ctx.is_training,
                     #     max_seqlen_q,
@@ -441,7 +470,7 @@ def _attn_cp_kv_allgather_compute(
     torch.cuda.current_stream().wait_stream(cp_stream)
 
     if use_fused_attention:
-        raise NotImplementedError("FusedAttention does not support use_fused_attention")
+        raise NotImplementedError("FlashAttention backend with context parallelism does not support use_fused_attention")
         # if qkv_format == "bshd":
         #     out = out.view(out.shape[0], -1, *out.shape[-2:])
         # elif qkv_format == "sbhd":
@@ -465,6 +494,8 @@ def _attn_cp_kv_allgather_compute(
     ctx.kv_seq_range_per_step = kv_seq_range_per_step
     ctx.window_size_per_step = window_size_per_step
     ctx.cp_group = cp_group
+    ctx.cp_size = cp_size
+    ctx.rank = rank
     ctx.cp_stream = cp_stream
     ctx.dropout_p = dropout_p
     ctx.max_seqlen_q = max_seqlen_q
@@ -503,8 +534,15 @@ def AttnFuncWithCPAndKVAllGather_forward(
     cp_group,
     cp_stream,
     use_flash_attn_3,
+    profiling_mode=False,
+    cp_size_override=None,
+    rank_override=None,
 ):
-    # pylint: disable=missing-function-docstring
+    """Modified from ``AttnFuncWithCPAndKVAllGather.forward()``: converted from
+    a ``torch.autograd.Function.forward`` static method into a plain function
+    with explicit ``ctx``.  Preprocess and gather steps are performed externally
+    by the fuser; ``k_ag`` / ``v_ag`` arrive pre-gathered.
+    """
     nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
     # q, k, v = _attn_cp_kv_allgather_preprocess(
     #     q,
@@ -539,12 +577,19 @@ def AttnFuncWithCPAndKVAllGather_forward(
         use_flash_attn_3,
         k_ag,
         v_ag,
+        profiling_mode=profiling_mode,
+        cp_size_override=cp_size_override,
+        rank_override=rank_override,
     )
     nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
     return out
 
 
 def _attn_cp_kv_allgather_bwd_gather(ctx):
+    """Extracted from ``AttnFuncWithCPAndKVAllGather.backward()``: re-gathers
+    K/V for the backward pass.  In practice the fuser provides pre-gathered
+    ``k_ag`` / ``v_ag`` so this helper is not called directly.
+    """
     (*saved_tensors,) = ctx.saved_tensors
     k, v = saved_tensors[1:3]
     k_ag, _ = gather_along_first_dim(k, ctx.cp_group)
@@ -558,8 +603,12 @@ def _attn_cp_kv_allgather_bwd_pre_reduce(
     k_ag,
     v_ag,
 ):
-    cp_size = get_distributed_world_size(ctx.cp_group)
-    rank = get_distributed_rank(ctx.cp_group)
+    """Extracted from ``AttnFuncWithCPAndKVAllGather.backward()``: computes
+    ``dq``, ``dk``, ``dv`` using pre-gathered ``k_ag`` / ``v_ag``.  The
+    subsequent ``reduce_scatter`` is performed externally by the fuser.
+    """
+    cp_size = ctx.cp_size
+    rank = ctx.rank
 
     (*saved_tensors,) = ctx.saved_tensors
     (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = saved_tensors[:5]
@@ -603,7 +652,7 @@ def _attn_cp_kv_allgather_bwd_pre_reduce(
     if not ctx.use_fused_attention:
         fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
         if ctx.use_flash_attn_3:
-            raise NotImplementedError("FlashAttention does not support use_flash_attn_3")
+            raise NotImplementedError("FlashAttention backend with context parallelism does not support use_flash_attn_3")
             # # from transformer_engine.pytorch.attention.dot_product_attention.backends import (
             #     _flash_attn_bwd_v3,
             # )
@@ -612,7 +661,7 @@ def _attn_cp_kv_allgather_bwd_pre_reduce(
             # fa_backward_kwargs["deterministic"] = ctx.deterministic
         else:
             if ctx.qkv_format == "thd":
-                raise NotImplementedError("FlashAttention does not support qkv_format == thd")
+                raise NotImplementedError("FlashAttention backend with context parallelism does not support qkv_format == thd")
                 # from transformer_engine.pytorch.attention.dot_product_attention.backends import (
                 #     _flash_attn_varlen_bwd,
                 # )
@@ -753,12 +802,19 @@ def _attn_cp_kv_allgather_bwd_pre_reduce(
 
 
 def _attn_cp_kv_allgather_bwd_reduce_scatter(ctx, dk, dv):
+    """Extracted from ``AttnFuncWithCPAndKVAllGather.backward()``: performs
+    ``reduce_scatter`` on ``dk`` / ``dv``.  Called externally by the fuser.
+    """
     dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
     dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
     return dk, dv
 
 
 def _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv):
+    """Extracted from ``AttnFuncWithCPAndKVAllGather.backward()``: reshapes
+    ``dq`` back to the original layout.  The ``dk``/``dv`` movedim is
+    commented out because the fuser keeps gradients in seq-first layout.
+    """
     seq_dim = ctx.qkv_format.index("s")
     dq = dq.view(*dq.shape[:seq_dim], -1, *dq.shape[(seq_dim + 2) :])
     # dk = dk.movedim(0, seq_dim).contiguous()
@@ -767,7 +823,11 @@ def _attn_cp_kv_allgather_bwd_post_reduce(ctx, dq, dk, dv):
 
 
 def AttnFuncWithCPAndKVAllGather_backward(ctx, dout, k_ag, v_ag):
-    # pylint: disable=missing-function-docstring
+    """Modified from ``AttnFuncWithCPAndKVAllGather.backward()``: converted
+    into a plain function with explicit ``ctx``.  KV re-gather and dKV
+    reduce-scatter are performed externally by the fuser; ``k_ag`` / ``v_ag``
+    arrive pre-gathered.
+    """
     nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
     # k_ag, v_ag = _attn_cp_kv_allgather_bwd_gather(ctx)
@@ -825,66 +885,17 @@ def attn_forward_func_with_cp(
     quantizers=None,
     pad_between_seqs=False,
     use_flash_attn_3=False,
+    profiling_mode=False,
+    cp_size_override=None,
+    rank_override=None,
 ) -> torch.Tensor:
-    """
-    Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
-    dimension, and by reducing the memory and computational pressure on each GPU, it enables long-context
-    LLMs in a distributed fashion. Transformer Engine's PyTorch CP implementation currently utilizes
-    the DualChunkSwap strategy to ensure load balancing across CP ranks. It is applied to all `attn_mask_type`s
-    and all `qkv_format`s, and it requires sequence lengths to be, or are padded to be, divisible by
-    (cp_size * 2). It also requires tokens to be re-ordered before entering this function.
-
-    For qkv_format = {'bshd', 'sbhd'}, the token re-ordering is illustrated as below, for an example
-    use case of s = 12, attn_mask_type = 'causal', and cp_size = 2. seq_pos indicates each token's position
-    in their corresponding sequence.
-
-                   GPU0        |      GPU1                            GPU0        |      GPU1
-    seq_pos | 0  1  2  3  4  5 | 6  7  8  9 10 11      seq_pos | 0  1  2  9 10 11 | 3  4  5  6  7  8
-    ---------------------------|-----------------      ---------------------------|------------------
-          0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0            0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-    G     1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0      G     1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-    P     2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0      P     2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-    U     3 | 1, 1, 1, 1, 0, 0,| 0, 0, 0, 0, 0, 0      U     9 | 1, 1, 1, 1, 0, 0,| 1, 1, 1, 1, 1, 1,
-    0     4 | 1, 1, 1, 1, 1, 0,| 0, 0, 0, 0, 0, 0  ->  0    10 | 1, 1, 1, 1, 1, 0,| 1, 1, 1, 1, 1, 1,
-          5 | 1, 1, 1, 1, 1, 1,| 0, 0, 0, 0, 0, 0           11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,
-    ---------------------------|-----------------      ---------------------------|------------------
-          6 | 1, 1, 1, 1, 1, 1,| 1, 0, 0, 0, 0, 0            3 | 1, 1, 1, 0, 0, 0,| 1, 0, 0, 0, 0, 0,
-    G     7 | 1, 1, 1, 1, 1, 1,| 1, 1, 0, 0, 0, 0      G     4 | 1, 1, 1, 0, 0, 0,| 1, 1, 0, 0, 0, 0,
-    P     8 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 0, 0, 0,     P     5 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 0, 0, 0,
-    U     9 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 0, 0,     U     6 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
-    1    10 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 0,     1     7 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 0,
-         11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,           8 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 1,
-
-    For qkv_format = 'thd', multiple sequences may be packed into the batch, and they may be of different
-    lengths. DualChunkSwap divides each sequence into (cp_size * 2) chunks and distributes 2 chunks of
-    every sequence onto a CP rank. The token matrix transformation is shown as follows, for an example of
-    batch_size = 2, seq_ids = [0, 1], seq_lens = [8, 4], t = 12, attn_mask_type = 'padding_causal', and
-    cp_size = 2.
-
-                   GPU0        |      GPU1                            GPU0        |      GPU1
-    seq_id  | 0  0  0  0  0  0 | 0  0  1  1  1  1      seq_id  | 0  0  0  0  1  1 | 0  0  0  0  1  1
-    seq_pos | 0  1  2  3  4  5 | 6  7  0  1  2  3      seq_pos | 0  1  6  7  0  3 | 2  3  4  5  1  2
-    ---------------------------|-----------------      ---------------------------|------------------
-        0 0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0          0 0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-    G   0 1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0      G   0 1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-    P   0 2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0      P   0 6 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
-    U   0 3 | 1, 1, 1, 1, 0, 0,| 0, 0, 0, 0, 0, 0      U   0 7 | 1, 1, 1, 1, 0, 0,| 1, 1, 1, 1, 0, 0,
-    0   0 4 | 1, 1, 1, 1, 1, 0,| 0, 0, 0, 0, 0, 0  ->  0   1 0 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 0, 0,
-        0 5 | 1, 1, 1, 1, 1, 1,| 0, 0, 0, 0, 0, 0          1 3 | 0, 0, 0, 0, 2, 2,| 0, 0, 0, 0, 2, 2,
-    ---------------------------|-----------------      ---------------------------|------------------
-        0 6 | 1, 1, 1, 1, 1, 1,| 1, 0, 0, 0, 0, 0          0 2 | 1, 1, 0, 0, 0, 0,| 1, 0, 0, 0, 0, 0,
-    G   0 7 | 1, 1, 1, 1, 1, 1,| 1, 1, 0, 0, 0, 0      G   0 3 | 1, 1, 0, 0, 0, 0,| 1, 1, 0, 0, 0, 0,
-    P   1 0 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 0, 0, 0      P   0 4 | 1, 1, 0, 0, 0, 0,| 1, 1, 1, 0, 0, 0,
-    U   1 1 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 0, 0      U   0 5 | 1, 1, 0, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
-    1   1 2 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 0      1   1 1 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 0,
-        1 3 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 2          1 2 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 2,
-
-    When all transformer layers in a model share the same CP configuration, i.e. cp_group, cp_global_ranks,
-    cp_comm_type and cp_stream, token re-ordering can take place in the dataloader, i.e. only once for
-    all the layers. An example of the re-ordering code is `get_batch_on_this_cp_rank
-    <https://github.com/NVIDIA/Megatron-LM/blob/d6eb60b5ea1efca47401c0be97f456fbe3a55bcd/megatron/core/utils.py#L1725>`_
-    in Megatron-LM.
-
+    """Modified from TransformerEngine's ``attn_forward_func_with_cp()``:
+    takes an explicit ``ctx`` (OperationContext) and pre-gathered
+    ``k_ag`` / ``v_ag`` instead of performing all-gather internally via
+    ``AttnFuncWithCPAndKVAllGather.apply()``.  Only the ``all_gather``
+    CP comm type is supported; ``p2p``, ``a2a+p2p``, and ``a2a`` paths
+    are disabled.  Calls ``AttnFuncWithCPAndKVAllGather_forward`` (a
+    plain function) instead of the autograd.Function.
     """
     if cp_comm_type == "a2a+p2p":
         raise NotImplementedError(f"Not supported cp_comm_type: {cp_comm_type}")
@@ -899,9 +910,10 @@ def attn_forward_func_with_cp(
         #     cp_group = cp_group[0]
         #     cp_comm_type = "a2a"
     else:
-        assert isinstance(
-            cp_group, dist_group_type
-        ), f"Unsupported process group for CP communication type {cp_comm_type}!"
+        if not profiling_mode:
+            assert isinstance(
+                cp_group, dist_group_type
+            ), f"Unsupported process group for CP communication type {cp_comm_type}!"
 
     assert qkv_format in [
         "bshd",
@@ -970,7 +982,8 @@ def attn_forward_func_with_cp(
     elif cp_comm_type == "all_gather":
         # args.pop(5)
         # args.pop(8)
-        args += [window_size, cp_group, cp_stream, use_flash_attn_3]
+        args += [window_size, cp_group, cp_stream, use_flash_attn_3,
+                 profiling_mode, cp_size_override, rank_override]
         out = AttnFuncWithCPAndKVAllGather_forward(*args)
     elif cp_comm_type == "a2a":
         raise NotImplementedError(f"Not supported cp_comm_type: {cp_comm_type}")
@@ -988,4 +1001,9 @@ def attn_backward_func_with_cp(
     k_ag,
     v_ag,
 ):
+    """New function (no counterpart in the original TransformerEngine
+    context_parallel): explicit backward entry point paired with
+    ``attn_forward_func_with_cp``, receiving pre-gathered ``k_ag`` /
+    ``v_ag`` from the fuser.
+    """
     return AttnFuncWithCPAndKVAllGather_backward(ctx, dout, k_ag, v_ag)
