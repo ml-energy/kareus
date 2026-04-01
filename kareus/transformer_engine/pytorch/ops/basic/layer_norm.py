@@ -1,8 +1,11 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
-"""Fusable operation for Layer Normalization."""
+"""
+Modified from TransformerEngine
+(transformer_engine/pytorch/ops/basic/layer_norm.py).
+Changes:
+- Disables ``clear_tensor_data`` calls in ``op_backward`` so that saved
+  tensors (input, means, rstdevs) are preserved across repeated backward
+  passes during profiling.
+"""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -27,7 +30,11 @@ from transformer_engine.pytorch.ops._common import maybe_autocast_dtype, reshape
 
 
 class LayerNorm(BasicOperation):
-    r"""Layer Normalization
+    r"""Modified from TransformerEngine's ``LayerNorm``: disables
+    ``clear_tensor_data`` in backward to allow repeated backward passes
+    during profiling.
+
+    Layer Normalization
 
     Applies Layer Normalization over a mini-batch of inputs as described in
     the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__

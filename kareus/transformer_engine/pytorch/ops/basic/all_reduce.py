@@ -1,8 +1,20 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
-"""Fusible operation for all-reduce."""
+"""
+Modified from TransformerEngine
+(transformer_engine/pytorch/ops/basic/all_reduce.py).
+Changes:
+- Adds MSCCl (``kareus.msccl.msccl_comm``) backend support alongside
+  NCCL.  When ``backend="msccl"``, the op pre-allocates persistent
+  device buffers and initialises an MSCCl AllReduce handle so the
+  fuser can overlap the all-reduce with compute on a dedicated stream
+  using a configurable number of SMs (``sm_num``, ``block_size``).
+- Adds explicit ``sync()`` / ``event_record()`` / ``event_wait()``
+  helpers for stream-based synchronisation, used by the PartitionFuser
+  to overlap communication with the next partition's compute.
+- Adds ``backward`` flag to ``op_forward`` so the same op instance
+  can be reused for the backward-pass all-reduce.
+- Stores per-batch persistent buffers in global ``X_AR`` so multiple
+  micro-batches can run without re-allocating.
+"""
 
 from __future__ import annotations
 from typing import Optional, Dict, Any, Union
@@ -18,7 +30,11 @@ import kareus.msccl.msccl_comm as msccl_comm
 X_AR: list[torch.Tensor | None] = [None, None]
 
 class AllReduce(BasicOperation):
-    """All-reduce tensor
+    """Modified from TransformerEngine's ``AllReduce``: adds MSCCl backend
+    support, explicit stream/event synchronisation helpers, and per-batch
+    persistent buffers for the PartitionFuser's communication overlap.
+
+    All-reduce tensor
 
     Equivalent to summing tensors from all processes. It is assumed
     that the output is used in operations that are redundantly

@@ -1,8 +1,19 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
+"""
+Merges ``BasicLinear`` and ``Bias`` into a single ``BasicOperation`` subclass
+so that the PartitionFuser can call ``fuser_forward`` / ``fuser_backward``
+as one atomic step.  This avoids the overhead of a ``FusedOperation`` pipeline
+for the common linear+bias pattern.
 
-"""Fusible operation for linear layer with bias."""
+The main motivation is to support the ``skip_bias_add=True`` pattern used by
+Megatron-LM linear layers.  When``skip_bias_add=True``, the bias is not
+fused into the GEMM but returned as a separate output so that it can be fused
+with a later residual-add or dropout-add operation by the PartitionFuser, 
+reducing kernel launch overhead. When ``apply_bias=True`` 
+(i.e. ``skip_bias_add=False``), the bias is fused directly into the cuBLAS 
+GEMM call instead.
+
+Also serves as the base class for the composite ``Linear`` op.
+"""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -25,6 +36,11 @@ class BasicLinearBias(BasicLinear):
 
     Merges BasicLinear and Bias into a single BasicOperation so that
     the partition system can call fuser_forward/fuser_backward directly.
+
+    When ``return_bias=True`` (the ``skip_bias_add`` path from Megatron's
+    ``TELinear`` and attention projections), the bias is returned as an
+    extra output for downstream fusion with residual-add / dropout-add.
+    When ``apply_bias=True``, the bias is fused into the cuBLAS GEMM.
 
     Parameters
     ----------

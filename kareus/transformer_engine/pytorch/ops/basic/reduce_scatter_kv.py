@@ -1,4 +1,21 @@
-"""Fusible operation for reduce-scatter with optional MSCCl backend."""
+"""
+Implements a reduce-scatter operation specialised for KV gradient tensors
+in context parallelism.  After the attention backward pass, each rank
+holds full-length dK and dV gradients; ``ReduceScatterKV`` sums and
+scatters them so each rank retains only its local shard.
+
+Supports two backends:
+- ``nccl``: standard ``torch.distributed.reduce_scatter_tensor``.
+- ``msccl``: uses ``kareus.msccl.msccl_comm`` with pre-allocated
+  persistent device buffers and a dedicated CUDA stream, allowing the
+  PartitionFuser to overlap communication with compute via configurable
+  SM counts (``sm_num``, ``block_size``).
+
+Global buffers ``K_RS`` / ``V_RS`` receive the dK/dV gradients from the
+``DotProductAttentionOp`` backward pass (written inline rather than
+returned through autograd), and ``K_RS_BUFFER`` / ``V_RS_BUFFER`` hold
+the MSCCl persistent buffers per micro-batch index.
+"""
 
 from __future__ import annotations
 from typing import Optional, List
@@ -16,9 +33,11 @@ K_RS_BUFFER: list[torch.Tensor | None] = [None, None]
 V_RS_BUFFER: list[torch.Tensor | None] = [None, None]
 
 class ReduceScatterKV():
-    """Reduce-scatter tensor along outer dimension.
-
-    Optionally uses MSCCl persistent buffers via kareus.msccl.msccl_comm.
+    """Reduce-scatter dK and dV gradient tensors along the sequence
+    dimension for context parallelism.  Supports NCCL and MSCCl backends;
+    provides ``fuser_forward`` so the PartitionFuser can schedule the
+    reduce-scatter with extra inputs (the V gradient) and stream-based
+    overlap.
     """
 
     def __init__(

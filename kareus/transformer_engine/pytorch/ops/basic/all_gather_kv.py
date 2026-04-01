@@ -1,4 +1,21 @@
-"""Fusible operation for all-gather with optional MSCCl backend."""
+"""
+Implements an all-gather operation specialised for KV tensors in context
+parallelism.  Each rank holds a local K and V shard; ``AllGatherKV``
+concatenates all shards along the sequence dimension so that every rank
+has the full KV context for attention.
+
+Supports two backends:
+- ``nccl``: standard ``torch.distributed.all_gather_into_tensor``.
+- ``msccl``: uses ``kareus.msccl.msccl_comm`` with pre-allocated
+  persistent device buffers and a dedicated CUDA stream, allowing the
+  PartitionFuser to overlap communication with compute via configurable
+  SM counts (``sm_num``, ``block_size``).
+
+Global buffers ``K_AG`` / ``V_AG`` store the gathered tensors per
+micro-batch index so the downstream ``DotProductAttentionOp`` can read
+them without extra copies.  ``K_TO_SAVE`` / ``V_TO_SAVE`` cache the
+local shards for the backward pass.
+"""
 
 from __future__ import annotations
 from typing import Optional, List
@@ -16,9 +33,10 @@ K_TO_SAVE: list[torch.Tensor | None] = [None, None]
 V_TO_SAVE: list[torch.Tensor | None] = [None, None]
 
 class AllGatherKV():
-    """All-gather tensor along outer dimension.
-
-    Optionally uses MSCCl persistent buffers via kareus.msccl.msccl_comm.
+    """All-gather K and V tensors along the sequence dimension for context
+    parallelism.  Supports NCCL and MSCCl backends; provides
+    ``fuser_forward`` so the PartitionFuser can schedule the all-gather
+    with extra inputs (the V tensor) and stream-based overlap.
     """
 
     def __init__(

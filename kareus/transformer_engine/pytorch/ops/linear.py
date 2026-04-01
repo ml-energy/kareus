@@ -1,8 +1,18 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
+"""
+Modified from TransformerEngine (transformer_engine/pytorch/ops/linear.py).
+Changes:
+- Replaces the original ``FusedLinear`` (a ``FusedOperation`` pipeline of
+  BasicLinear + Bias + AllReduce + optional activation) with a single
+  ``BasicLinearBias`` subclass.  This flattens the operation graph so that
+  the PartitionFuser can schedule each piece independently.
+- Pre-canonicalizes tensor-parallel configuration (column/row splitting)
+  and passes already-local dimensions to ``BasicLinearBias.__init__`` with
+  ``tensor_parallel_mode=None``, because TP communication is handled
+  externally by the fuser's AllReduce / AllGatherKV / ReduceScatterKV ops
+  rather than inside the linear op itself.
+- Removes Userbuffers-based TP overlap support (now handled by the fuser).
+"""
 
-"""Fusible operation for linear layer."""
 
 from __future__ import annotations
 from collections.abc import Callable
@@ -19,7 +29,13 @@ from kareus.transformer_engine.pytorch.ops.basic import (
 
 
 class Linear(BasicLinearBias):
-    """Apply linear transformation: :math:`y = x A^T + b`
+    """Modified from TransformerEngine's ``Linear``: inherits from
+    ``BasicLinearBias`` instead of being a ``FusedLinear`` pipeline,
+    enabling ``op_forward`` / ``op_backward`` to be called with an
+    externally managed ``ctx`` by the PartitionFuser.  TP communication
+    is factored out to separate AllReduce / AllGatherKV ops in the fuser.
+
+    Apply linear transformation: :math:`y = x A^T + b`
 
     This is a drop-in replacement for `torch.nn.Linear`.
 

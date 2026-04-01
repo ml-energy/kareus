@@ -1,9 +1,3 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
-"""Single tensor operations supported by the operation fuser."""
-
 from .basic_linear import BasicLinear
 from .basic_linear_bias import BasicLinearBias
 from .bias import Bias

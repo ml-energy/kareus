@@ -1,8 +1,21 @@
+"""
+Modified from TransformerEngine
+(transformer_engine/pytorch/ops/fused/forward_linear_bias_activation.py).
+Changes:
+- Imports Kareus ``BasicLinear`` and ``Bias`` (from
+  ``kareus.transformer_engine.pytorch.ops.basic``) instead of the original
+  TransformerEngine versions, so the fused op works with the
+  ``BasicOperation``-based ops that expose ``op_forward`` /
+  ``op_backward`` with an externally managed ``OperationContext``.
+- ``fuser_forward`` stores ``has_prev_op`` on the linear context so the
+  fuser's backward pass knows whether it can clear the saved input early.
+- Activation support is stubbed (``activation=None``) because Kareus
+  handles activations (SwiGLU, etc.) as separate ops in the fuser graph.
+"""
+
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
-"""Fused operation for forward GEMM + bias + activation."""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -22,7 +35,11 @@ from kareus.transformer_engine.pytorch.ops.basic import BasicLinear, Bias
 
 
 class ForwardLinearBiasActivation(FusedOperation):
-    """Fused forward GEMM + bias + activation
+    """Modified from TransformerEngine's ``ForwardLinearBiasActivation``:
+    uses Kareus ``BasicLinear`` and ``Bias`` ops so that the fused GEMM+bias
+    path is compatible with the PartitionFuser's externally managed context.
+
+    Fused forward GEMM + bias + activation
 
     Bias and activation are both optional. Row tensor parallelism is
     not supported since that requires communication immediately after

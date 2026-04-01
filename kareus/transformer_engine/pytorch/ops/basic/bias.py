@@ -1,8 +1,13 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
-"""Fusible operation for bias."""
+"""
+Modified from TransformerEngine (transformer_engine/pytorch/ops/basic/bias.py).
+Changes:
+- Adds ``has_bias`` / ``apply_bias`` / ``return_bias`` flags to control
+  whether the bias is applied inline, returned as an extra output for
+  downstream fusion, or skipped entirely.  The original only supports
+  unconditional additive bias.
+- Accepts ``tensor_parallel_size`` directly for TP-aware bias sharding,
+  instead of querying the process group at runtime.
+"""
 
 from __future__ import annotations
 from typing import Optional
@@ -20,7 +25,11 @@ from transformer_engine.pytorch.ops._common import (
 
 
 class Bias(BasicOperation):
-    """Apply additive bias
+    """Modified from TransformerEngine's ``Bias``: adds ``has_bias`` /
+    ``apply_bias`` / ``return_bias`` control and ``fuser_forward`` /
+    ``fuser_backward`` overrides.
+
+    Apply additive bias
 
     This is equivalent to the additive bias in `torch.nn.Linear`.
 

@@ -1,8 +1,25 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
-"""Fusible operation for linear layer without bias."""
+"""
+Modified from TransformerEngine
+(transformer_engine/pytorch/ops/basic/basic_linear.py).
+Changes:
+- Adds persistent output buffers (``persistent_outputs_fwd`` /
+  ``persistent_outputs_bwd``) that are pre-allocated once and reused
+  across micro-batches, eliminating per-step allocation overhead.
+  ``op_forward`` / ``op_backward`` accept a ``batch_idx`` parameter to
+  index into the correct buffer, and ``_functional_forward`` /
+  ``_functional_backward`` accept ``out`` / ``grad_input`` arguments to
+  write directly into these pre-allocated tensors.
+- Adds ``bias_fusable`` flag so the downstream
+  ``ForwardLinearBiasActivation`` fuser can decide whether cuBLAS
+  GEMM+bias fusion is safe.
+- Accepts ``tensor_parallel_size`` directly instead of querying the
+  process group, since the fuser manages communication externally.
+- Forces input contiguity before GEMM (``x.contiguous()``) to handle
+  non-contiguous nanobatch slices that ``general_gemm`` silently
+  miscomputes.
+- Disables ``accumulate_into_main_grad`` and
+  ``accumulate_into_grad_input`` (not needed by the fuser path).
+"""
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable
@@ -42,7 +59,12 @@ def _wait_async(handle: Optional[Any]) -> None:
 
 
 class BasicLinear(BasicOperation):
-    """Apply linear transformation: :math:`y = x A^T`
+    """Modified from TransformerEngine's ``BasicLinear``: adds persistent
+    output buffers for allocation-free micro-batch execution, a
+    ``bias_fusable`` flag for downstream GEMM+bias fusion, and accepts
+    ``tensor_parallel_size`` directly instead of querying the process group.
+
+    Apply linear transformation: :math:`y = x A^T`
 
     This is a drop-in replacement for `torch.nn.Linear` with
     `bias=False`.

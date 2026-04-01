@@ -1,7 +1,3 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
 """
 Modified from TransformerEngine
 (transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py).
