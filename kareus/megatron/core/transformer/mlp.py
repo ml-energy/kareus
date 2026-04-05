@@ -89,6 +89,12 @@ class MLP(MegatronModule):
             tp_comm_buffer_name='fc1',
         )
 
+        if not self.config.bias_activation_fusion:
+            raise NotImplementedError(
+                "bias_activation_fusion=False is not supported in Kareus MLP; "
+                "activation ops always use fused kernels"
+            )
+
         self.activation_func = self.config.activation_func
         act_kwargs = dict(
             has_bias=self.config.add_bias_linear,

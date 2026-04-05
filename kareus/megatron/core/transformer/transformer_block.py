@@ -123,6 +123,7 @@ class TransformerBlock(MegatronModule):
             )
 
         self._build_layers()
+        self.num_layers_per_pipeline_rank = len(self.layers)
 
         # Scheduler (from config)
         self.scheduler = getattr(self.config, 'kareus_scheduler', None)

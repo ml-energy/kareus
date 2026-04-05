@@ -37,6 +37,7 @@ class PartitionBase:
     comp_ops: List[ComputeOp] = field(default_factory=list)
     comm_op: Optional[CommunicationOp] = None
     _schedule_config: Optional[Tuple[OverlapWindow, ResourceShape]] = None
+    profiling_mode: bool = False
 
     # Captured from the caller *before* entering torch.autograd.Function,
     # where torch.is_grad_enabled() returns False.  Mirrors the pattern

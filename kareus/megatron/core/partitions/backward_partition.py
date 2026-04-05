@@ -99,7 +99,8 @@ class BackwardPartition(PartitionBase):
             grad_params[op.op_id] = [
                 t for param_tuple in fused_op_grad_params for t in param_tuple
             ]
-            op_ctx.saved_tensors = None
+            if not self.profiling_mode:
+                op_ctx.saved_tensors = None
 
             # 6. Record event for next comm window
             if fused_idx == comm_start - 1:
