@@ -177,8 +177,8 @@ class PartitionExecutor:
         # partition), not from this partition's compute outputs.
         comm_op = CommunicationOp(
             comm_type=comm_type,
-            input_ports=[TensorPort(port_idx=ch.port_idx, tensor_id=f"comm_{ch.name}") for ch in comm_channels],
-            output_ports=[TensorPort(port_idx=ch.port_idx, tensor_id=f"comm_{ch.name}") for ch in comm_channels],
+            input_ports=[TensorPort(port_idx=ch.port_idx, tensor_id=f"comm_in_{ch.name}") for ch in comm_channels],
+            output_ports=[TensorPort(port_idx=ch.port_idx, tensor_id=f"comm_out_{ch.name}") for ch in comm_channels],
             operator=comm_operator,
         )
         return graph.get_compute_ops(), comm_op

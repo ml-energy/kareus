@@ -12,9 +12,6 @@ import torch
 import torch.distributed as dist
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../fuser/'))
-
-from common_config import FuserTestConfig
 from kareus.megatron.core.extensions.ops import (
     BiasDropoutAddOp,
     BiasSwigluOp,
@@ -23,8 +20,9 @@ from kareus.megatron.core.extensions.ops import (
 from kareus.megatron.core.partitions.tensor_graph import CommunicationType
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../common/'))
-from partition_executor import PartitionableLinear, PartitionExecutor  # noqa: E402
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
+from common import PartitionableLinear, PartitionExecutor  # noqa: E402
+from common import get_model_config  # noqa: E402
 
 
 def init_distributed(rank, world_size, backend='nccl'):
@@ -50,11 +48,12 @@ class PartitionTest:
 
         self.batch_size = args.batch_size
         self.seq_length = args.seq_len // getattr(args, 'context_parallel_size', 1)
-        self.hidden_size = FuserTestConfig.HIDDEN_SIZE
-        self.ffn_hidden_size = FuserTestConfig.FFN_HIDDEN_SIZE
+        model = get_model_config(args.model_name)
+        self.hidden_size = model.hidden_size
+        self.ffn_hidden_size = model.ffn_hidden_size
 
-        self.config = FuserTestConfig.create_mlp_config(
-            context_parallel_size=1, tensor_parallel_size=world_size, dtype=self.dtype,
+        self.config = model.create_transformer_config(
+            context_parallel_size=1, tensor_parallel_size=world_size, dtype=self.dtype, partition_type="mlp",
         )
 
         self.hidden_states, self.residual, self.allreduce_inputs = self._create_tensors()
@@ -84,7 +83,7 @@ class PartitionTest:
         tp = self.tensor_parallel_size
         nb = self.batch_size // 2
 
-        bda = BiasDropoutAddOp(has_bias=False, dropout_prob=self.config.hidden_dropout, training=True)
+        bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
         norm = PartitionableRMSNorm(
             normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
             device=self.device, dtype=self.dtype,
@@ -92,14 +91,14 @@ class PartitionTest:
         fc1_size = 2 * self.ffn_hidden_size // tp
         linear_fc1 = PartitionableLinear(
             in_features=self.hidden_size, out_features=fc1_size,
-            device=self.device, dtype=self.dtype, bias=False, return_bias=True,
+            device=self.device, dtype=self.dtype, bias=self.config.add_bias_linear, return_bias=True,
             tensor_parallel_mode=None, tensor_parallel_group=None, tensor_parallel_size=None,
         )
-        swiglu = BiasSwigluOp(fp8_input_store=self.config.activation_func_fp8_input_store)
+        swiglu = BiasSwigluOp(has_bias=self.config.add_bias_linear, fp8_input_store=self.config.activation_func_fp8_input_store)
         fc2_size = self.ffn_hidden_size // tp
         linear_fc2 = PartitionableLinear(
             in_features=fc2_size, out_features=self.hidden_size,
-            device=self.device, dtype=self.dtype, bias=False, return_bias=True,
+            device=self.device, dtype=self.dtype, bias=self.config.add_bias_linear, return_bias=True,
             tensor_parallel_mode=None, tensor_parallel_group=None, tensor_parallel_size=None,
         )
 
@@ -151,9 +150,10 @@ if __name__ == "__main__":
                 dist.destroy_process_group()
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
-    parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
-    parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
-    parser.add_argument("--context_parallel_size", "-cp", type=int, default=1)
+    parser.add_argument("--world_size", "-w", type=int, required=True)
+    parser.add_argument("--batch_size", "-b", type=int, required=True)
+    parser.add_argument("--seq_len", "-s", type=int, required=True)
+    parser.add_argument("--context_parallel_size", "-cp", type=int, required=True)
+    parser.add_argument("--model_name", "-m", type=str, required=True)
     args = parser.parse_args()
     spawn(_run, args=(args.world_size, args, random.randint(8000, 65535)), nprocs=args.world_size, join=True)

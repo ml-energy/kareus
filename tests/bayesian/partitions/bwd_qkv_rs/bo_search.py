@@ -7,8 +7,6 @@ import sys
 import argparse
 
 CUR_DIR = os.path.dirname(__file__)
-sys.path.append(os.path.join(CUR_DIR, '../../../../'))
-sys.path.append(os.path.join(CUR_DIR, '../../../fuser/'))
 BO_UTILS_DIR = os.path.join(CUR_DIR, '../..')
 if BO_UTILS_DIR not in sys.path:
     sys.path.append(BO_UTILS_DIR)

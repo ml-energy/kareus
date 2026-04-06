@@ -127,6 +127,9 @@ class TEDotProductAttentionOp(DotProductAttentionOp, PartitionableOperator):
         k_channels: Optional[int] = None,
         v_channels: Optional[int] = None,
         cp_comm_type: str = "all_gather",
+        profiling_mode: bool = False,
+        cp_size: Optional[int] = None,
+        rank: Optional[int] = None,
     ):
         self.config = config
         self.te_forward_mask_type = False
@@ -168,11 +171,14 @@ class TEDotProductAttentionOp(DotProductAttentionOp, PartitionableOperator):
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
             if getattr(TEDotProductAttentionOp, "cp_stream") is None:
                 TEDotProductAttentionOp.cp_stream = torch.cuda.Stream()
-            extra_kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
-            extra_kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(
-                check_initialized=False
-            )
-            extra_kwargs["cp_stream"] = TEDotProductAttentionOp.cp_stream
+            if profiling_mode:
+                extra_kwargs["cp_stream"] = TEDotProductAttentionOp.cp_stream
+            else:
+                extra_kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
+                extra_kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(
+                    check_initialized=False
+                )
+                extra_kwargs["cp_stream"] = TEDotProductAttentionOp.cp_stream
             if is_te_min_version("1.10.0"):
                 if cp_comm_type is None:
                     extra_kwargs["cp_comm_type"] = "p2p"
@@ -182,9 +188,10 @@ class TEDotProductAttentionOp(DotProductAttentionOp, PartitionableOperator):
                         "hierarchical cp commucation."
                     )
                     extra_kwargs["cp_comm_type"] = "a2a+p2p"
-                    extra_kwargs["cp_group"] = get_hierarchical_context_parallel_groups(
-                        check_initialized=False
-                    )
+                    if not profiling_mode:
+                        extra_kwargs["cp_group"] = get_hierarchical_context_parallel_groups(
+                            check_initialized=False
+                        )
                 else:
                     extra_kwargs["cp_comm_type"] = cp_comm_type
 
@@ -255,6 +262,9 @@ class TEDotProductAttentionOp(DotProductAttentionOp, PartitionableOperator):
             ),
             tp_group=get_tensor_model_parallel_group(check_initialized=False),
             layer_number=layer_number,
+            profiling_mode=profiling_mode,
+            cp_size=cp_size,
+            rank=rank,
             **extra_kwargs,
         )
 

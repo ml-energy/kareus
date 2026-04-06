@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import csv
 import time
 import dataclasses
@@ -14,12 +13,13 @@ import numpy as np
 import torch
 from botorch.utils.multi_objective.pareto import is_non_dominated
 
-# Ensure fuser test config is importable
-_FUSER_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'fuser')
-if _FUSER_DIR not in sys.path:
-    sys.path.append(_FUSER_DIR)
-from common_config import FuserTestConfig  # noqa: E402
-
+from . import (
+    MODEL_REGISTRY,
+    DEFAULT_GPU,
+    GPU_CONFIGS,
+    get_model_config,
+    get_p2p_power,
+)
 from .encoding import BLOCK_SIZE, one_hot_encode, generate_all_configurations, get_unevaluated_configs
 from .surrogates import (
     train_xgb_models,
@@ -36,7 +36,7 @@ from .orchestration import (
     save_pareto_and_results,
     save_iteration_plots,
 )
-from .hardware import measure_batch_on_hardware
+from .hardware import measure_batch_on_hardware, reset_gpu_clocks
 
 
 @dataclasses.dataclass
@@ -59,7 +59,7 @@ class BOSearchConfig:
     logs_dir_fn: Callable                 # (args) -> str
     eval_log_filename: str = "eval_results.jsonl"
     world_size_default: str = "tp"        # "tp" or "cp"
-    timing_csv: str = "fwd"              # "fwd" (3 cols) or "bwd" (4 cols, +eval_time_s)
+    timing_csv: str = "fwd"              # "fwd" (3 cols) or "bwd" (4 cols)
 
 
 class PartitionTestConfig:
@@ -86,28 +86,23 @@ def build_argparser(search_space: SearchSpace, bo_config: BOSearchConfig) -> arg
     """Build the full argparse parser with per-partition defaults."""
     parser = argparse.ArgumentParser()
 
-    ws_default = (FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE
-                  if bo_config.world_size_default == "tp"
-                  else FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
-
-    parser.add_argument("--model_name", "-m", type=str, default=FuserTestConfig.MODEL_NAME)
-    parser.add_argument("--world_size", "-w", type=int, default=ws_default)
-    parser.add_argument("--tensor_parallel_size", "-tp", type=int,
-                        default=FuserTestConfig.DEFAULT_TENSOR_PARALLEL_SIZE)
-    parser.add_argument("--context_parallel_size", "-cp", type=int,
-                        default=FuserTestConfig.DEFAULT_CONTEXT_PARALLEL_SIZE)
-    parser.add_argument("--batch_size", "-b", type=int, default=FuserTestConfig.DEFAULT_BATCH_SIZE)
-    parser.add_argument("--seq_len", "-s", type=int, default=FuserTestConfig.DEFAULT_SEQ_LENGTH)
-    parser.add_argument("--gpu_type", type=str, choices=["A40", "A100"],
-                        default=FuserTestConfig.GPU_TYPE)
+    parser.add_argument("--model_name", "-m", type=str, required=True,
+                        choices=list(MODEL_REGISTRY))
+    parser.add_argument("--world_size", "-w", type=int, required=True)
+    parser.add_argument("--tensor_parallel_size", "-tp", type=int, required=True)
+    parser.add_argument("--context_parallel_size", "-cp", type=int, required=True)
+    parser.add_argument("--batch_size", "-b", type=int, required=True)
+    parser.add_argument("--seq_len", "-s", type=int, required=True)
+    parser.add_argument("--gpu_type", type=str, choices=list(GPU_CONFIGS),
+                        default=DEFAULT_GPU)
 
     parser.add_argument("--n_init", type=int, default=search_space.n_init)
     parser.add_argument("--batches", type=int, default=search_space.batches)
     parser.add_argument("--acq_batch", type=int, default=search_space.acq_batch,
                         help="New evaluations per batch")
-    parser.add_argument("--use_effective_energy", action="store_true",
+    parser.add_argument("--use_effective_energy", action=argparse.BooleanOptionalAction, default=True,
                         help="Use effective energy instead of real energy for GBT training")
-    parser.add_argument("--normalize_objectives", action="store_true",
+    parser.add_argument("--normalize_objectives", action=argparse.BooleanOptionalAction, default=True,
                         help="Normalize energy and time objectives to [0,1] range")
 
     parser.add_argument("--explore_fraction", type=float, default=search_space.explore_fraction,
@@ -138,13 +133,15 @@ def run_bo_search(
     """
     args = build_argparser(search_space, bo_config).parse_args()
 
-    # Attach search-space values to args so runners can read them
+    # Attach search-space values and resolved model config to args
     args.sm_values = search_space.sm_values
     args.overlap_windows = search_space.overlap_windows
+    args.model_config = get_model_config(args.model_name)
 
     print("===============================================")
     print(f"Bayesian Optimization for {bo_config.banner} (real measurements)")
     print("===============================================")
+    print(f"Model: {args.model_name}")
     print(f"World size: {args.world_size}")
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
@@ -155,14 +152,13 @@ def run_bo_search(
     print(f"Acquisition fractions: explore={args.explore_fraction}, time={args.time_fraction}")
 
     # Compute frequency values based on GPU type
-    if args.gpu_type == "A40":
-        freq_values = list(map(int, np.arange(1740, 900 - 60, -60)))
-    else:  # A100
-        freq_values = list(map(int, np.arange(1410, 900 - 30, -30)))
+    gpu_cfg = GPU_CONFIGS[args.gpu_type]
+    freq_min, freq_max, freq_step = gpu_cfg["freq_range"]
+    freq_values = list(map(int, np.arange(freq_max, freq_min - freq_step, -freq_step)))
     args.freq_values = freq_values
     print(f"Frequency search set has {len(freq_values)} values (min={min(freq_values)}, max={max(freq_values)})")
 
-    p2p_power_w = FuserTestConfig.get_p2p_power(args.gpu_type)
+    p2p_power_w = get_p2p_power(args.gpu_type)
 
     partition_test = PartitionTestConfig(args, search_space, bo_config, freq_values)
     all_configs = generate_all_configurations(partition_test)
@@ -335,3 +331,11 @@ def run_bo_search(
     save_pareto_and_results(
         args, partition_test, X_train, y_energy_eff, y_time, y_energy_real, all_records
     )
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if visible is not None and len(visible.strip()) > 0:
+        target_indices = [int(x) for x in visible.split(",") if x.strip()]
+    else:
+        target_indices = None
+    reset_gpu_clocks(device_indices=target_indices)
+    print("GPU clocks reset to default.")

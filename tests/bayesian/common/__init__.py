@@ -1,5 +1,16 @@
 """Bayesian optimization common utilities — split into submodules."""
 
+from __future__ import annotations
+
+from .model_config import (
+    ModelConfig,
+    MODEL_REGISTRY,
+    get_model_config,
+    GPU_CONFIGS,
+    DEFAULT_GPU,
+    get_p2p_power,
+)
+
 from .encoding import (
     FREQ_IDX,
     SM_IDX,
@@ -50,4 +61,9 @@ from .runner import (
     PartitionTestConfig,
     build_argparser,
     run_bo_search,
+)
+
+from .partition_executor import (
+    PartitionableLinear,
+    PartitionExecutor,
 )

@@ -38,6 +38,18 @@ def _set_gpu_frequency(target_freq_mhz: int, device_indices: List[int] | None = 
     pynvml.nvmlShutdown()
 
 
+def reset_gpu_clocks(device_indices: List[int] | None = None) -> None:
+    """Reset GPU clocks to default (unlocked) state via NVML."""
+    pynvml.nvmlInit()
+    all_indices = list(range(pynvml.nvmlDeviceGetCount()))
+    indices = device_indices if device_indices is not None else all_indices
+    for i in indices:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        pynvml.nvmlDeviceResetGpuLockedClocks(handle)
+    time.sleep(2)
+    pynvml.nvmlShutdown()
+
+
 def _dist_batch_eval_worker(
     rank: int,
     world_size: int,

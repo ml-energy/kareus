@@ -1,14 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Bayesian optimization for Forward AO-AR Partition (CP, ALL_REDUCE)."""
+"""Bayesian optimization for Forward AO-AR Partition (TP, ALL_REDUCE)."""
 
 import os
 import sys
 import argparse
 
 CUR_DIR = os.path.dirname(__file__)
-sys.path.append(os.path.join(CUR_DIR, '../../../../'))
-sys.path.append(os.path.join(CUR_DIR, '../../../fuser/'))
 BO_UTILS_DIR = os.path.join(CUR_DIR, '../..')
 if BO_UTILS_DIR not in sys.path:
     sys.path.append(BO_UTILS_DIR)
@@ -29,13 +27,13 @@ SEARCH_SPACE = SearchSpace(
 )
 
 BO_CONFIG = BOSearchConfig(
-    banner="Forward AO-AR Partition (CP, ALL_REDUCE)",
+    banner="Forward AO-AR Partition (TP, ALL_REDUCE)",
     logs_dir_fn=lambda args: (
         f"logs/{args.model_name}/cp{args.context_parallel_size}"
         f"-tp{args.tensor_parallel_size}-bs{args.batch_size}-seq{args.seq_len}/fwd_ao_ar"
     ),
     eval_log_filename="eval_results.jsonl",
-    world_size_default="cp",
+    world_size_default="tp",
     timing_csv="fwd",
 )
 
@@ -43,14 +41,14 @@ BO_CONFIG = BOSearchConfig(
 class PartitionTestRunner:
     def __init__(self, args: argparse.Namespace, rank: int, world_size: int) -> None:
         self.test = PartitionTest(args, rank=rank, world_size=world_size)
-        self.group = self.test.cp_group
+        self.group = self.test.tp_group
         self.FREQ_VALUES = args.freq_values
         self.SM_VALUES = args.sm_values
         self.OVERLAP_WINDOWS = args.overlap_windows
 
     @property
     def tp_group(self):
-        return self.test.cp_group
+        return self.test.tp_group
 
     def test_config(self, overlap_window, sm_configs):
         self.test.test_config(overlap_window, sm_configs)
