@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -9,7 +10,6 @@ import torch
 import xgboost as xgb
 from botorch.utils.multi_objective.hypervolume import Hypervolume
 
-from .encoding import one_hot_encode
 
 XGB_PARAMS = {
     "objective": "reg:squarederror",
@@ -125,48 +125,66 @@ def calculate_dominated_hypervolume(points: np.ndarray, ref_point: np.ndarray) -
     return float(hv_value)
 
 
-def normalize_objectives(data: np.ndarray, min_vals: np.ndarray, max_vals: np.ndarray) -> np.ndarray:
+def _normalize_objectives(data: np.ndarray, min_vals: np.ndarray, max_vals: np.ndarray) -> np.ndarray:
     ranges = max_vals - min_vals
     ranges = np.where(ranges == 0, 1.0, ranges)
     return (data - min_vals) / ranges
 
 
+@dataclasses.dataclass
+class HVContext:
+    """Pre-normalised Pareto front, reference point, and baseline hypervolume.
+
+    Encapsulates all state needed to score a candidate via EHVI for a single
+    energy variant (effective *or* real).  When *bounds* is ``None`` the raw
+    objectives are used directly; otherwise every point is mapped to [0, 1].
+    """
+
+    front: np.ndarray
+    ref_point: np.ndarray
+    baseline_hv: float
+    bounds: Tuple[np.ndarray, np.ndarray] | None
+
+    @classmethod
+    def build(
+        cls,
+        front: np.ndarray,
+        ref_point: np.ndarray,
+        normalization_bounds: Tuple[np.ndarray, np.ndarray] | None = None,
+    ) -> HVContext:
+        if normalization_bounds is not None:
+            min_vals, max_vals = normalization_bounds
+            front_n = _normalize_objectives(front, min_vals, max_vals)
+            ref_n = _normalize_objectives(
+                ref_point.reshape(1, -1), min_vals, max_vals
+            ).flatten()
+            hv = calculate_dominated_hypervolume(front_n, ref_n)
+            return cls(front=front_n, ref_point=ref_n,
+                       baseline_hv=hv, bounds=normalization_bounds)
+        hv = calculate_dominated_hypervolume(front, ref_point)
+        return cls(front=front, ref_point=ref_point,
+                   baseline_hv=hv, bounds=None)
+
+    def ehvi_for_point(self, predicted_point: np.ndarray) -> float:
+        """Return the hypervolume improvement from adding *predicted_point*."""
+        pt = predicted_point
+        if self.bounds is not None:
+            pt = _normalize_objectives(pt, *self.bounds)
+        new_front = np.vstack([self.front, pt])
+        new_hv = calculate_dominated_hypervolume(new_front, self.ref_point)
+        return float(max(0.0, new_hv - self.baseline_hv))
+
+
 def expected_hypervolume_improvement(
-    candidate_vec: np.ndarray,
-    pareto_front: np.ndarray,
+    candidate_encoded: np.ndarray,
     models,
-    ref_point: np.ndarray,
-    partition_test,
-    normalization_bounds: tuple = None,
-    current_hv_cached: float | None = None,
-    pareto_front_norm_cached: np.ndarray | None = None,
-    ref_point_norm_cached: np.ndarray | None = None,
+    hv_ctx: HVContext,
 ) -> float:
+    """Score a single candidate by predicted hypervolume improvement.
+
+    *candidate_encoded* must already be one-hot encoded (shape ``[1, D]``).
+    Normalization (if any) is handled internally by *hv_ctx*.
     """
-    Calculate expected hypervolume improvement with normalized objectives.
-    """
-    candidate_encoded = one_hot_encode(partition_test, candidate_vec).reshape(1, -1)
     e_pred, t_pred = predict_performance(models, candidate_encoded)
     predicted_point = np.array([[e_pred[0], t_pred[0]]], dtype=np.float64)
-
-    if normalization_bounds is not None:
-        min_vals, max_vals = normalization_bounds
-
-        if pareto_front_norm_cached is None or ref_point_norm_cached is None:
-            pareto_front_norm = normalize_objectives(pareto_front, min_vals, max_vals)
-            ref_point_norm = normalize_objectives(ref_point.reshape(1, -1), min_vals, max_vals).flatten()
-        else:
-            pareto_front_norm = pareto_front_norm_cached
-            ref_point_norm = ref_point_norm_cached
-
-        predicted_point_norm = normalize_objectives(predicted_point, min_vals, max_vals)
-
-        current_hv = current_hv_cached if current_hv_cached is not None else calculate_dominated_hypervolume(pareto_front_norm, ref_point_norm)
-        new_front_norm = np.vstack([pareto_front_norm, predicted_point_norm])
-        new_hv = calculate_dominated_hypervolume(new_front_norm, ref_point_norm)
-    else:
-        current_hv = current_hv_cached if current_hv_cached is not None else calculate_dominated_hypervolume(pareto_front, ref_point)
-        new_front = np.vstack([pareto_front, predicted_point])
-        new_hv = calculate_dominated_hypervolume(new_front, ref_point)
-
-    return float(max(0.0, new_hv - current_hv))
+    return hv_ctx.ehvi_for_point(predicted_point)

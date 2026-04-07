@@ -1,14 +1,12 @@
-"""GPU frequency control, distributed hardware evaluation, and cache loading."""
+"""GPU frequency control and distributed hardware evaluation."""
 
 from __future__ import annotations
 
 import os
 import time
-import json
-import random
 import argparse
 import multiprocessing as mp
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -17,13 +15,15 @@ import pynvml
 from zeus.monitor import ZeusMonitor
 from torch.multiprocessing import spawn
 
-from .encoding import (
-    encode_cfg,
-    one_hot_encode,
-    decode_vec,
-    generate_all_configurations,
-    get_unevaluated_configs,
-)
+from .encoding import decode_vec
+
+
+def get_visible_gpu_indices() -> List[int] | None:
+    """Return GPU indices from CUDA_VISIBLE_DEVICES, or None if unset/empty."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if visible is not None and len(visible.strip()) > 0:
+        return [int(x) for x in visible.split(",") if x.strip()]
+    return None
 
 
 def _set_gpu_frequency(target_freq_mhz: int, device_indices: List[int] | None = None) -> None:
@@ -57,12 +57,11 @@ def _dist_batch_eval_worker(
     master_port: int,
     task_list,
     results_dict,
-    eval_log_path: str,
     partition_test_runner_cls,
     sleep_after_eval: float = 5.0,
 ):
     """
-    Distributed worker that initializes tensors and fuser once and evaluates
+    Distributed worker that initializes tensors and partition once and evaluates
     a sequence of configurations provided via a shared task list.
     """
     os.environ["RANK"] = str(rank)
@@ -91,17 +90,9 @@ def _dist_batch_eval_worker(
         sm_num = int(task["sm"])
         block_size = int(task["block"])
         idx = int(task["index"])
-        selection_flags = task.get("selection_flags") or {}
-        predicted_values = task.get("predicted_values") or {}
 
         if rank == 0:
-            visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-            if visible is not None and len(visible.strip()) > 0:
-                vis_list = [int(x) for x in visible.split(",") if x.strip() != ""]
-                target_indices = vis_list
-            else:
-                target_indices = None
-            _set_gpu_frequency(freq_mhz, device_indices=target_indices)
+            _set_gpu_frequency(freq_mhz, device_indices=get_visible_gpu_indices())
 
         # Warmup
         torch.cuda.synchronize()
@@ -144,30 +135,6 @@ def _dist_batch_eval_worker(
             avg_time_s = float(result.time) / float(iterations)
             avg_energy_j = float(result.total_energy) / float(iterations) / float(world_size)
 
-            record = {
-                "freq": int(freq_mhz),
-                "overlap_start": int(overlap_window[0]),
-                "overlap_end": int(overlap_window[1]),
-                "sm": int(sm_num),
-                "block": int(block_size),
-                "time_s": avg_time_s,
-                "energy_j": avg_energy_j,
-            }
-            record.update({
-                "selected_exploit_eff": bool(selection_flags.get("selected_exploit_eff", False)),
-                "selected_exploit_real": bool(selection_flags.get("selected_exploit_real", False)),
-                "selected_time": bool(selection_flags.get("selected_time", False)),
-                "selected_explore": bool(selection_flags.get("selected_explore", False)),
-            })
-            record.update({
-                "pred_time_s": predicted_values.get("time_s"),
-                "pred_energy_eff_j": predicted_values.get("energy_eff_j"),
-                "pred_energy_real_j": predicted_values.get("energy_real_j"),
-            })
-
-            with open(eval_log_path, "a") as f:
-                f.write(json.dumps(record) + "\n")
-
             results_dict[idx] = {
                 "energy_j": float(avg_energy_j),
                 "time_s": float(avg_time_s),
@@ -187,24 +154,21 @@ def measure_batch_on_hardware(
     args: argparse.Namespace,
     partition_test,
     partition_test_runner_cls,
-    selection_flags_list: Optional[List[Optional[Dict[str, bool]]]] = None,
-    predicted_values_list: Optional[List[Optional[Dict[str, float]]]] = None,
     sleep_after_eval: float = 5.0,
 ) -> List[Tuple[float, float]]:
     """
     Evaluate a batch of configurations in a single distributed run.
 
     Returns a list of (energy_j, time_s) aligned with x_vec_list.
+    Record building and eval-log writing are handled by the caller via
+    :func:`orchestration.log_batch_eval_results`.
     """
-    eval_log_path = partition_test.eval_log_path
     master_port = partition_test.master_port
 
     manager = mp.Manager()
     task_list = manager.list()
     for i, x_vec in enumerate(x_vec_list):
         cfg = decode_vec(partition_test, x_vec)
-        flags = (selection_flags_list[i] if selection_flags_list is not None else None) or {}
-        preds = (predicted_values_list[i] if predicted_values_list is not None else None) or {}
         task_list.append({
             "index": int(i),
             "freq_mhz": int(cfg["freq"]),
@@ -212,8 +176,6 @@ def measure_batch_on_hardware(
             "overlap_end": int(cfg["overlap"][1]),
             "sm": int(cfg["sm"]),
             "block": int(cfg["block"]),
-            "selection_flags": flags,
-            "predicted_values": preds,
         })
 
     results_dict = manager.dict()
@@ -225,7 +187,6 @@ def measure_batch_on_hardware(
             master_port,
             task_list,
             results_dict,
-            eval_log_path,
             partition_test_runner_cls,
             sleep_after_eval,
         ),
@@ -239,126 +200,3 @@ def measure_batch_on_hardware(
         t_s = float(results_dict[i]["time_s"])
         results.append((e_j, t_s))
     return results
-
-
-def try_load_initial_from_cache(
-    args: argparse.Namespace,
-    p2p_power_w: float,
-    n_init: int,
-    acq_batch: int,
-    partition_test,
-    partition_test_runner_cls,
-):
-    """
-    Try to load cached configurations and measurements from eval_results.jsonl.
-
-    Returns tuple:
-      (use_cached_initial, X_train, X_train_encoded, init_time, init_eff_energy,
-       init_avg_energy, all_records, skipped_batches)
-    """
-    eval_log_path = partition_test.eval_log_path
-
-    init_time: List[float] = []
-    init_eff_energy: List[float] = []
-    init_avg_energy: List[float] = []
-    all_records: List[Tuple[int, int, int, int, int, float, float, float]] = []
-
-    if not os.path.exists(eval_log_path):
-        return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records, 0
-
-    try:
-        with open(eval_log_path, "r") as f:
-            lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-        parsed = [json.loads(ln) for ln in lines]
-        seen = set()
-        unique: List[dict] = []
-        for r in parsed:
-            key = (int(r["freq"]), int(r["overlap_start"]), int(r["overlap_end"]), int(r["sm"]))
-            if key not in seen:
-                seen.add(key)
-                unique.append(r)
-        if len(unique) == 0:
-            return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records, 0
-
-        total_cached = len(unique)
-        print(f"Found cached measurements for {total_cached} unique configs at {eval_log_path}")
-
-        X_train_list: List[np.ndarray] = []
-        for i in range(total_cached):
-            r = unique[i]
-            cfg = {
-                "freq": int(r["freq"]),
-                "sm": int(r["sm"]),
-                "block": int(r["block"]),
-                "overlap": (int(r["overlap_start"]), int(r["overlap_end"]))
-            }
-            vec = encode_cfg(partition_test, cfg)
-            X_train_list.append(vec)
-            t_s = float(r["time_s"])
-            e_j = float(r["energy_j"])
-            eff_e_j = float(e_j) - float(p2p_power_w) * float(t_s)
-            init_time.append(t_s)
-            init_avg_energy.append(e_j)
-            init_eff_energy.append(eff_e_j)
-            all_records.append((
-                cfg['freq'],
-                cfg['overlap'][0],
-                cfg['overlap'][1],
-                cfg['sm'],
-                cfg['block'],
-                t_s,
-                e_j,
-                eff_e_j,
-            ))
-        # Top-up missing initial points
-        missing = int(n_init - total_cached)
-        if missing > 0:
-            print(f"Cached initial points {total_cached} < n_init {n_init}; generating and evaluating {missing} additional configs...")
-            all_configs = generate_all_configurations(partition_test)
-            existing = np.array(X_train_list) if len(X_train_list) > 0 else np.empty((0, 3), dtype=np.int64)
-            remaining = get_unevaluated_configs(all_configs, existing)
-            if len(remaining) == 0:
-                print("Warning: no remaining configurations available to top up initial set.")
-            else:
-                if missing > len(remaining):
-                    missing = len(remaining)
-                picked_indices = random.sample(range(len(remaining)), missing)
-                vecs_to_eval: List[np.ndarray] = []
-                cfgs_decoded: List[Dict[str, int]] = []
-                for j, idx in enumerate(picked_indices):
-                    vec = remaining[idx]
-                    cfg_dec = decode_vec(partition_test, vec)
-                    print(
-                        f"  [topup {j+1}/{missing}] freq={cfg_dec['freq']} | sm={cfg_dec['sm']} | block={cfg_dec['block']} | overlap={cfg_dec['overlap']}"
-                    )
-                    vecs_to_eval.append(vec)
-                    cfgs_decoded.append(cfg_dec)
-                    X_train_list.append(vec)
-                batch_results = measure_batch_on_hardware(
-                    x_vec_list=vecs_to_eval,
-                    args=args,
-                    partition_test=partition_test,
-                    partition_test_runner_cls=partition_test_runner_cls,
-                )
-                for k, (e_j, t_s) in enumerate(batch_results):
-                    cfg_dec = cfgs_decoded[k]
-                    eff_e_j = float(e_j) - float(p2p_power_w) * float(t_s)
-                    init_time.append(float(t_s))
-                    init_eff_energy.append(float(eff_e_j))
-                    init_avg_energy.append(float(e_j))
-                    all_records.append((cfg_dec['freq'], cfg_dec['overlap'][0], cfg_dec['overlap'][1], cfg_dec['sm'], cfg_dec['block'], float(t_s), float(e_j), float(eff_e_j)))
-        X_train = np.array(X_train_list)
-        X_train_encoded = np.array([one_hot_encode(partition_test, x) for x in X_train])
-        skipped_batches = 0
-        if total_cached > n_init:
-            extra = int(total_cached - n_init)
-            skipped_batches = int(extra // max(1, int(acq_batch)))
-            leftover = int(extra % max(1, int(acq_batch)))
-            if skipped_batches > 0:
-                print(
-                    f"Cache covers {extra} evaluations beyond initial {n_init} -> skip {skipped_batches} batch(es) (acq_batch={acq_batch}), leftover={leftover}"
-                )
-        return True, X_train, X_train_encoded, init_time, init_eff_energy, init_avg_energy, all_records, skipped_batches
-    except Exception as exc:
-        print(f"Warning: failed to parse cached evals at {eval_log_path}: {exc}. Falling back to hardware evaluation.")
-        return False, None, None, init_time, init_eff_energy, init_avg_energy, all_records, 0

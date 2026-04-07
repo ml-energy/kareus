@@ -1,4 +1,4 @@
-"""SearchSpace, BOSearchConfig, PartitionTestConfig, build_argparser, run_bo_search."""
+"""SearchSpace, BOSearchConfig, PartitionTestConfig, run_bo_search."""
 
 from __future__ import annotations
 
@@ -10,9 +10,6 @@ import argparse
 from typing import List, Tuple, Callable
 
 import numpy as np
-import torch
-from botorch.utils.multi_objective.pareto import is_non_dominated
-
 from . import (
     MODEL_REGISTRY,
     DEFAULT_GPU,
@@ -20,12 +17,17 @@ from . import (
     get_model_config,
     get_p2p_power,
 )
-from .encoding import BLOCK_SIZE, one_hot_encode, generate_all_configurations, get_unevaluated_configs
+from .encoding import (
+    BLOCK_SIZE,
+    one_hot_encode,
+    generate_all_configurations,
+    get_unevaluated_configs,
+)
 from .surrogates import (
     train_xgb_models,
     train_xgb_energy_only,
     train_xgb_ensemble,
-    predict_performance,
+    HVContext,
 )
 from .orchestration import (
     setup_initial_data,
@@ -35,8 +37,15 @@ from .orchestration import (
     update_datasets_with_results,
     save_pareto_and_results,
     save_iteration_plots,
+    pareto_mask,
+    build_selection_metadata,
+    log_batch_eval_results,
 )
-from .hardware import measure_batch_on_hardware, reset_gpu_clocks
+from .hardware import (
+    measure_batch_on_hardware,
+    reset_gpu_clocks,
+    get_visible_gpu_indices,
+)
 
 
 @dataclasses.dataclass
@@ -64,8 +73,7 @@ class BOSearchConfig:
 
 class PartitionTestConfig:
     """
-    Unified lightweight configuration holder for bo_utils compatibility.
-    Used only in parent process — does NOT initialize distributed environment.
+    Unified lightweight configuration holder for compatibility.
     """
     def __init__(self, args: argparse.Namespace, search_space: SearchSpace,
                  bo_config: BOSearchConfig, freq_values: List[int]):
@@ -82,7 +90,31 @@ class PartitionTestConfig:
         self.BLOCK_SIZE = BLOCK_SIZE
 
 
-def build_argparser(search_space: SearchSpace, bo_config: BOSearchConfig) -> argparse.ArgumentParser:
+class _TimingCSV:
+    """Manages the per-run timing CSV (creation, header, row appends)."""
+
+    def __init__(self, logs_dir: str, bo_config: BOSearchConfig):
+        self._path = os.path.join(logs_dir, f"bo_timing_{bo_config.timing_csv}.csv")
+        self._include_eval = bo_config.timing_csv == "bwd"
+        if not os.path.exists(self._path):
+            header = ["batch_idx", "train_time_s", "select_time_s", "eval_time_s"]
+            self._write_row(header)
+
+    def _write_row(self, row: list) -> None:
+        with open(self._path, "a", newline="") as f:
+            csv.writer(f).writerow(row)
+
+    def write_initial(self, eval_time_s: float) -> None:
+        self._write_row(["init", "", "", f"{eval_time_s:.6f}"])
+
+    def write_batch(self, batch_idx: int, train_time_s: float,
+                    select_time_s: float, eval_time_s: float = 0.0) -> None:
+        row: list = [batch_idx, f"{train_time_s:.6f}", f"{select_time_s:.6f}"]
+        row.append(f"{eval_time_s:.6f}" if self._include_eval else "")
+        self._write_row(row)
+
+
+def _build_argparser(search_space: SearchSpace, bo_config: BOSearchConfig) -> argparse.ArgumentParser:
     """Build the full argparse parser with per-partition defaults."""
     parser = argparse.ArgumentParser()
 
@@ -131,7 +163,7 @@ def run_bo_search(
     Each bo_search_*.py defines its own SearchSpace, BOSearchConfig, and
     PartitionTestRunner, then calls this function from __main__.
     """
-    args = build_argparser(search_space, bo_config).parse_args()
+    args = _build_argparser(search_space, bo_config).parse_args()
 
     # Attach search-space values and resolved model config to args
     args.sm_values = search_space.sm_values
@@ -181,6 +213,9 @@ def run_bo_search(
     initial_time_s = time.time() - initial_start
     print(f"Initial evaluation completed in {initial_time_s:.2f} s")
 
+    timing_csv = _TimingCSV(partition_test.logs_dir, bo_config)
+    timing_csv.write_initial(initial_time_s)
+
     y_energy_for_training = y_energy_eff if args.use_effective_energy else y_energy_real
     print(f"Using {'effective' if args.use_effective_energy else 'real'} energy for GBT training")
 
@@ -190,17 +225,6 @@ def run_bo_search(
     print("\n===============================================")
     print(f"Starting optimization loop ({args.batches} batches, {args.acq_batch} evals/batch)")
     print("===============================================")
-
-    # Timing CSV setup
-    csv_name = f"bo_timing_{bo_config.timing_csv}.csv"
-    timing_csv_path = os.path.join(partition_test.logs_dir, csv_name)
-    if not os.path.exists(timing_csv_path):
-        with open(timing_csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            header = ["batch_idx", "train_time_s", "select_time_s"]
-            if bo_config.timing_csv == "bwd":
-                header.append("eval_time_s")
-            writer.writerow(header)
 
     total_start = time.time()
     for ib in range(int(start_batch_idx), int(args.batches)):
@@ -232,12 +256,16 @@ def run_bo_search(
             args, y_energy_eff, y_energy_real, y_time
         )
 
-        current_front_eff = np.column_stack((y_energy_eff, y_time))
-        current_front_real = np.column_stack((y_energy_real, y_time))
+        hv_ctx_eff = HVContext.build(
+            np.column_stack((y_energy_eff, y_time)),
+            ref_point_eff, normalization_bounds_eff,
+        )
+        hv_ctx_real = HVContext.build(
+            np.column_stack((y_energy_real, y_time)),
+            ref_point_real, normalization_bounds_real,
+        )
         ehvi_eff_values, ehvi_real_values = score_candidates_with_ehvi(
-            candidates, cand_encoded, current_front_eff, current_front_real,
-            models_eff, models_real, ref_point_eff, ref_point_real,
-            partition_test, normalization_bounds_eff, normalization_bounds_real,
+            cand_encoded, models_eff, models_real, hv_ctx_eff, hv_ctx_real,
         )
 
         selected, final_idx, exploit_eff_idx, exploit_real_idx, time_idx, explore_idx = select_acquisition_batch(
@@ -248,26 +276,10 @@ def run_bo_search(
 
         # Evaluate selected candidates on hardware
         print(f"Evaluating selected candidates on hardware ({bo_config.banner})...")
-        sel_flags_list: List[dict] = []
-        sel_preds_list: List[dict] = []
-        for i, vec in enumerate(selected):
-            sel_idx = final_idx[i]
-            flags = {
-                "selected_exploit_eff": bool(sel_idx in exploit_eff_idx),
-                "selected_exploit_real": bool(sel_idx in exploit_real_idx),
-                "selected_time": bool(sel_idx in time_idx),
-                "selected_explore": bool(sel_idx in explore_idx),
-            }
-            cand_enc = one_hot_encode(partition_test, vec).reshape(1, -1)
-            pred_eff_e, pred_time = predict_performance(models_eff, cand_enc)
-            pred_real_e, _ = predict_performance(models_real, cand_enc)
-            preds = {
-                "time_s": float(pred_time[0]),
-                "energy_eff_j": float(pred_eff_e[0]),
-                "energy_real_j": float(pred_real_e[0]),
-            }
-            sel_flags_list.append(flags)
-            sel_preds_list.append(preds)
+        sel_flags_list, sel_preds_list = build_selection_metadata(
+            selected, final_idx, exploit_eff_idx, exploit_real_idx,
+            time_idx, explore_idx, models_eff, models_real, partition_test,
+        )
 
         eval_start = time.time()
         batch_results = measure_batch_on_hardware(
@@ -275,18 +287,15 @@ def run_bo_search(
             args=args,
             partition_test=partition_test,
             partition_test_runner_cls=runner_cls,
-            selection_flags_list=sel_flags_list,
-            predicted_values_list=sel_preds_list,
         )
         eval_time_s = time.time() - eval_start
 
-        # Write timing CSV row
-        with open(timing_csv_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            row = [ib + 1, f"{train_time_s:.6f}", f"{select_time_s:.6f}"]
-            if bo_config.timing_csv == "bwd":
-                row.append(f"{eval_time_s:.6f}")
-            writer.writerow(row)
+        log_batch_eval_results(
+            list(selected), batch_results, partition_test.eval_log_path,
+            partition_test, sel_flags_list, sel_preds_list,
+        )
+
+        timing_csv.write_batch(ib + 1, train_time_s, select_time_s, eval_time_s)
 
         X_train, X_train_encoded, y_energy_eff, y_time, y_energy_real, new_time, new_eff_energy, new_avg_energy = update_datasets_with_results(
             X_train, X_train_encoded, y_energy_eff, y_time, y_energy_real,
@@ -298,10 +307,7 @@ def run_bo_search(
         ref_point_eff = np.array([np.max(y_energy_eff) * 1.1, np.max(y_time) * 1.1], dtype=np.float64)
         ref_point_real = np.array([np.max(y_energy_real) * 1.1, np.max(y_time) * 1.1], dtype=np.float64)
 
-        Y_current = torch.tensor(np.column_stack((y_energy_eff, y_time)), dtype=torch.double)
-        neg_Y = -Y_current
-        pareto_mask = is_non_dominated(neg_Y)
-        pareto_count = int(torch.sum(pareto_mask).item())
+        pareto_count = int(np.sum(pareto_mask(np.column_stack((y_energy_eff, y_time)))))
 
         print(f"  Total evaluations so far: {X_train.shape[0]}")
         print(f"  Current Pareto points count: {pareto_count}")
@@ -332,10 +338,5 @@ def run_bo_search(
         args, partition_test, X_train, y_energy_eff, y_time, y_energy_real, all_records
     )
 
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    if visible is not None and len(visible.strip()) > 0:
-        target_indices = [int(x) for x in visible.split(",") if x.strip()]
-    else:
-        target_indices = None
-    reset_gpu_clocks(device_indices=target_indices)
+    reset_gpu_clocks(device_indices=get_visible_gpu_indices())
     print("GPU clocks reset to default.")

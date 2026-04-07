@@ -36,16 +36,17 @@ from .surrogates import (
     predict_ensemble_stats,
     predict_performance,
     calculate_dominated_hypervolume,
-    normalize_objectives,
     expected_hypervolume_improvement,
 )
 
 from .hardware import (
+    get_visible_gpu_indices,
     measure_batch_on_hardware,
-    try_load_initial_from_cache,
 )
 
 from .orchestration import (
+    log_batch_eval_results,
+    build_selection_metadata,
     setup_initial_data,
     compute_normalization_bounds,
     score_candidates_with_ehvi,
@@ -53,13 +54,13 @@ from .orchestration import (
     update_datasets_with_results,
     save_pareto_and_results,
     save_iteration_plots,
+    pareto_mask,
 )
 
 from .runner import (
     SearchSpace,
     BOSearchConfig,
     PartitionTestConfig,
-    build_argparser,
     run_bo_search,
 )
 
