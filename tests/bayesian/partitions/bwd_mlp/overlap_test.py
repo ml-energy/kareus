@@ -6,7 +6,7 @@ Communication: ALL_REDUCE on grad_main channel
 
 import os
 import sys
-import traceback
+
 
 import torch
 import torch.distributed as dist
@@ -127,33 +127,3 @@ class PartitionTest:
         self.executor.execute(overlap_window, sm_configs)
 
 
-if __name__ == "__main__":
-    import argparse
-    import random
-    from torch.multiprocessing import spawn
-
-    def _run(rank, world_size, args, master_port):
-        os.environ.update(RANK=str(rank), WORLD_SIZE=str(world_size),
-                          LOCAL_RANK=str(rank), MASTER_ADDR="localhost",
-                          MASTER_PORT=str(master_port))
-        test = PartitionTest(args, rank, world_size)
-        try:
-            for ow in [(-1, -1), (0, 6), (2, 6), (3, 6)]:
-                for sm in range(3, 31, 3):
-                    print(f"Overlap {ow} - SM: {sm}")
-                    for _ in range(10):
-                        test.test_config(ow, (sm, 1024))
-        except Exception as e:
-            traceback.print_exc()
-        finally:
-            if dist.is_initialized():
-                dist.destroy_process_group()
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, required=True)
-    parser.add_argument("--batch_size", "-b", type=int, required=True)
-    parser.add_argument("--seq_len", "-s", type=int, required=True)
-    parser.add_argument("--context_parallel_size", "-cp", type=int, required=True)
-    parser.add_argument("--model_name", "-m", type=str, required=True)
-    args = parser.parse_args()
-    spawn(_run, args=(args.world_size, args, random.randint(8000, 65535)), nprocs=args.world_size, join=True)

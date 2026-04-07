@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 import pynvml
 from zeus.monitor import ZeusMonitor
+from zeus.profile import measure as zeus_measure
 from torch.multiprocessing import spawn
 
 from .encoding import decode_vec
@@ -58,7 +59,8 @@ def _dist_batch_eval_worker(
     task_list,
     results_dict,
     partition_test_runner_cls,
-    sleep_after_eval: float = 5.0,
+    measurement_duration: float = 5.0,
+    cooldown_duration: float = 5.0,
 ):
     """
     Distributed worker that initializes tensors and partition once and evaluates
@@ -72,18 +74,13 @@ def _dist_batch_eval_worker(
 
     partition_test = partition_test_runner_cls(args, rank, world_size)
 
-    monitor = ZeusMonitor(gpu_indices=list(range(world_size))) if rank == 0 else None
+    monitor = ZeusMonitor(gpu_indices=[rank])
 
     num_tasks = len(task_list)
     for ti in range(num_tasks):
+        task = task_list[ti]
         if rank == 0:
-            task = task_list[ti]
             print(f"Evaluating task {ti} of {num_tasks}: freq={task['freq_mhz']} | overlap={task['overlap_start']}-{task['overlap_end']} | sm={task['sm']} | block={task['block']}")
-        else:
-            task = None
-        obj = [task]
-        dist.broadcast_object_list(obj, src=0, group=partition_test.group)
-        task = obj[0]
 
         freq_mhz = int(task["freq_mhz"])
         overlap_window = (int(task["overlap_start"]), int(task["overlap_end"]))
@@ -94,57 +91,25 @@ def _dist_batch_eval_worker(
         if rank == 0:
             _set_gpu_frequency(freq_mhz, device_indices=get_visible_gpu_indices())
 
-        # Warmup
-        torch.cuda.synchronize()
         dist.barrier()
-        for i in range(10):
+
+        def target_fn():
             partition_test.test_config(overlap_window, (sm_num, block_size))
-        torch.cuda.current_stream().synchronize()
-        time_start = time.time()
-        for i in range(8):
-            partition_test.test_config(overlap_window, (sm_num, block_size))
-        torch.cuda.synchronize()
-        dist.barrier()
-        time_end = time.time()
-        duration = (time_end - time_start) / 8.0
+
+        trial = zeus_measure(
+            target_function=target_fn,
+            zeus_monitor=monitor,
+            measurement_duration=measurement_duration,
+            cooldown_duration=cooldown_duration,
+        )
 
         if rank == 0:
-            iterations = int(max(1, round(5.0 / max(duration, 1e-6))))
-            obj_list = [iterations]
-            print(f"Duration: {duration * 1000} ms, Required iterations: {iterations}")
-        else:
-            obj_list = [None]
-        dist.broadcast_object_list(obj_list, src=0, group=partition_test.group)
-        iterations = obj_list[0]
-
-        # Measure
-        torch.cuda.synchronize()
-        dist.barrier()
-        if rank == 0 and monitor is not None:
-            monitor.begin_window("step")
-        for _ in range(iterations):
-            partition_test.test_config(overlap_window, (sm_num, block_size))
-        torch.cuda.synchronize()
-        dist.barrier()
-        if hasattr(partition_test, "clean"):
-            print(f"Cleaning up partition test")
-            partition_test.clean()
-
-        if rank == 0 and monitor is not None:
-            result = monitor.end_window("step")
-            avg_time_s = float(result.time) / float(iterations)
-            avg_energy_j = float(result.total_energy) / float(iterations) / float(world_size)
-
             results_dict[idx] = {
-                "energy_j": float(avg_energy_j),
-                "time_s": float(avg_time_s),
+                "energy_j": float(trial.energy_per_iter) / float(world_size),
+                "time_s": float(trial.time_per_iter),
             }
-        time.sleep(sleep_after_eval)
 
-    if rank == 0:
-        pid = os.getpid()
-        print(f"Killing process group {pid}")
-        os.system(f'pkill -P {pid}')
+    del monitor
     if dist.is_initialized():
         dist.destroy_process_group()
 
@@ -154,7 +119,8 @@ def measure_batch_on_hardware(
     args: argparse.Namespace,
     partition_test,
     partition_test_runner_cls,
-    sleep_after_eval: float = 5.0,
+    measurement_duration: float = 5.0,
+    cooldown_duration: float = 5.0,
 ) -> List[Tuple[float, float]]:
     """
     Evaluate a batch of configurations in a single distributed run.
@@ -188,7 +154,8 @@ def measure_batch_on_hardware(
             task_list,
             results_dict,
             partition_test_runner_cls,
-            sleep_after_eval,
+            measurement_duration,
+            cooldown_duration,
         ),
         nprocs=args.world_size,
         join=True,

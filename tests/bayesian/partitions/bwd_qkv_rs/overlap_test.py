@@ -6,7 +6,7 @@ Communication: REDUCE_SCATTER_KV on grad_key/grad_value channels.
 
 import os
 import sys
-import traceback
+
 
 import torch
 import torch.distributed as dist
@@ -174,28 +174,3 @@ class PartitionTest:
         self.executor.execute(overlap_window, sm_configs)
 
 
-if __name__ == "__main__":
-    import argparse
-    import random
-    from torch.multiprocessing import spawn
-
-    def _run(rank, ws, args, port):
-        os.environ.update(RANK=str(rank), WORLD_SIZE=str(ws), LOCAL_RANK=str(rank),
-                          MASTER_ADDR="localhost", MASTER_PORT=str(port))
-        test = PartitionTest(args, rank, ws)
-        for ow in [(0, 5), (2, 5), (4, 5)]:
-            for sm in range(1, 21):
-                for _ in range(5):
-                    test.test_config(ow, (sm, 1024))
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, required=True)
-    parser.add_argument("--tensor_parallel_size", "-tp", type=int, required=True)
-    parser.add_argument("--context_parallel_size", "-cp", type=int, required=True)
-    parser.add_argument("--batch_size", "-b", type=int, required=True)
-    parser.add_argument("--seq_len", "-s", type=int, required=True)
-    parser.add_argument("--model_name", "-m", type=str, required=True)
-    args = parser.parse_args()
-    spawn(_run, args=(args.world_size, args, random.randint(8000, 65535)), nprocs=args.world_size, join=True)

@@ -33,9 +33,7 @@ BO_CONFIG = BOSearchConfig(
         f"logs/{args.model_name}/cp{args.context_parallel_size}"
         f"-tp{args.tensor_parallel_size}-bs{args.batch_size}-seq{args.seq_len}/bwd_qkv_ar"
     ),
-    eval_log_filename="eval_results_bwd.jsonl",
     world_size_default="tp",
-    timing_csv="bwd",
 )
 
 

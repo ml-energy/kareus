@@ -6,8 +6,7 @@ Communication: ALL_REDUCE after FC2 output (main channel)
 
 import os
 import sys
-import time
-import traceback
+
 
 import torch
 import torch.distributed as dist
@@ -134,44 +133,3 @@ class PartitionTest:
         self.executor.execute(overlap_window, sm_configs)
 
 
-def overlap_test(rank, world_size, args, master_port):
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(master_port)
-
-    test = PartitionTest(args, rank, world_size)
-    try:
-        for ow in [(-1, -1), (0, 6), (2, 6), (4, 6)]:
-            for sm in range(3, 31, 3):
-                for bs in [512, 1024]:
-                    print(f"Overlap {ow} - SM: {sm}, Block: {bs}")
-                    for _ in range(10):
-                        test.test_config(ow, (sm, bs))
-    except Exception as e:
-        print(f"Error: {e}")
-        traceback.print_exc()
-    finally:
-        if rank == 0:
-            os.system(f'pkill -P {os.getpid()}')
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-
-if __name__ == "__main__":
-    import argparse
-    import random
-    from torch.multiprocessing import spawn
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--world_size", "-w", type=int, required=True)
-    parser.add_argument("--batch_size", "-b", type=int, required=True)
-    parser.add_argument("--seq_len", "-s", type=int, required=True)
-    parser.add_argument("--context_parallel_size", "-cp", type=int, required=True)
-    parser.add_argument("--model_name", "-m", type=str, required=True)
-    args = parser.parse_args()
-
-    print(f"fwd_mlp overlap test: world_size={args.world_size}, bs={args.batch_size}, seq={args.seq_len}")
-    spawn(overlap_test, args=(args.world_size, args, random.randint(8000, 65535)),
-          nprocs=args.world_size, join=True)

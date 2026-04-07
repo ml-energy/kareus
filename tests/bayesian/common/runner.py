@@ -65,11 +65,11 @@ class SearchSpace:
 @dataclasses.dataclass
 class BOSearchConfig:
     """Per-file output/logging configuration."""
-    banner: str                           # e.g. "Attention Fuser (forward)"
+    banner: str                           # e.g. "Attention-AllReduce Partition"
     logs_dir_fn: Callable                 # (args) -> str
     eval_log_filename: str = "eval_results.jsonl"
+    timing_csv_filename: str = "bo_timing.csv"
     world_size_default: str = "tp"        # "tp" or "cp"
-    timing_csv: str = "fwd"              # "fwd" (3 cols) or "bwd" (4 cols)
 
 
 class PartitionTestConfig:
@@ -94,9 +94,8 @@ class PartitionTestConfig:
 class _TimingCSV:
     """Manages the per-run timing CSV (creation, header, row appends)."""
 
-    def __init__(self, logs_dir: str, bo_config: BOSearchConfig):
-        self._path = os.path.join(logs_dir, f"bo_timing_{bo_config.timing_csv}.csv")
-        self._include_eval = bo_config.timing_csv == "bwd"
+    def __init__(self, logs_dir: str, filename: str = "bo_timing.csv"):
+        self._path = os.path.join(logs_dir, filename)
         if not os.path.exists(self._path):
             header = ["batch_idx", "train_time_s", "select_time_s", "eval_time_s"]
             self._write_row(header)
@@ -110,8 +109,7 @@ class _TimingCSV:
 
     def write_batch(self, batch_idx: int, train_time_s: float,
                     select_time_s: float, eval_time_s: float = 0.0) -> None:
-        row: list = [batch_idx, f"{train_time_s:.6f}", f"{select_time_s:.6f}"]
-        row.append(f"{eval_time_s:.6f}" if self._include_eval else "")
+        row: list = [batch_idx, f"{train_time_s:.6f}", f"{select_time_s:.6f}", f"{eval_time_s:.6f}"]
         self._write_row(row)
 
 
@@ -186,6 +184,7 @@ def run_bo_search(
     print(f"Objective normalization: {'Enabled' if args.normalize_objectives else 'Disabled'}")
     unc_frac = max(0.0, 1.0 - args.real_fraction - args.dynamic_fraction - args.time_fraction)
     print(f"Acquisition fractions: real={args.real_fraction}, dynamic={args.dynamic_fraction}, time={args.time_fraction}, uncertainty={unc_frac:.2f}")
+    total_start = time.time()
 
     # Compute frequency values based on GPU type
     gpu_cfg = GPU_CONFIGS[args.gpu_type]
@@ -205,7 +204,6 @@ def run_bo_search(
           f"{len(search_space.overlap_windows)} overlap values")
 
     # Setup initial data (load from cache or evaluate fresh)
-    initial_start = time.time()
     X_train, X_train_encoded, y_energy_eff, y_time, y_energy_real, all_records, start_batch_idx = setup_initial_data(
         args=args,
         partition_test=partition_test,
@@ -214,10 +212,12 @@ def run_bo_search(
         all_configs=all_configs,
         n_init=n_init,
     )
-    initial_time_s = time.time() - initial_start
+    initial_end = time.time()
+    train_start = initial_end
+    initial_time_s = initial_end - total_start
     print(f"Initial evaluation completed in {initial_time_s:.2f} s")
 
-    timing_csv = _TimingCSV(partition_test.logs_dir, bo_config)
+    timing_csv = _TimingCSV(partition_test.logs_dir, bo_config.timing_csv_filename)
     timing_csv.write_initial(initial_time_s)
 
     y_energy_for_training = y_energy_eff if args.use_effective_energy else y_energy_real
@@ -230,10 +230,8 @@ def run_bo_search(
     print(f"Starting optimization loop ({args.batches} batches, {args.acq_batch} evals/batch)")
     print("===============================================")
 
-    total_start = time.time()
     for ib in range(int(start_batch_idx), int(args.batches)):
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
-        train_start = time.time()
         energy_model_eff, time_model = train_xgb_models(X_train_encoded, y_energy_eff, y_time)
         energy_model_real = train_xgb_energy_only(X_train_encoded, y_energy_real)
         models_eff = (energy_model_eff, time_model)
@@ -246,8 +244,8 @@ def run_bo_search(
             ensemble_size=args.ensemble_size,
             bootstrap_frac=args.bootstrap_frac,
         )
-        train_time_s = time.time() - train_start
-        select_start = time.time()
+        train_end = time.time()
+        train_time_s = train_end - train_start
 
         candidates = get_unevaluated_configs(all_configs, X_train)
         if len(candidates) == 0:
@@ -276,7 +274,8 @@ def run_bo_search(
             candidates, cand_encoded, ehvi_eff_values, ehvi_real_values,
             ensemble_models, models_eff, args, partition_test,
         )
-        select_time_s = time.time() - select_start
+        select_end = time.time()
+        select_time_s = select_end - train_end
 
         # Evaluate selected candidates on hardware
         print(f"Evaluating selected candidates on hardware ({bo_config.banner})...")
@@ -285,20 +284,21 @@ def run_bo_search(
             time_idx, explore_idx, models_eff, models_real, partition_test,
         )
 
-        eval_start = time.time()
         batch_results = measure_batch_on_hardware(
             x_vec_list=list(selected),
             args=args,
             partition_test=partition_test,
             partition_test_runner_cls=runner_cls,
         )
-        eval_time_s = time.time() - eval_start
 
         log_batch_eval_results(
             list(selected), batch_results, partition_test.eval_log_path,
             partition_test, sel_flags_list, sel_preds_list,
         )
 
+        eval_end = time.time()
+        train_start = eval_end
+        eval_time_s = eval_end - select_end
         timing_csv.write_batch(ib + 1, train_time_s, select_time_s, eval_time_s)
 
         X_train, X_train_encoded, y_energy_eff, y_time, y_energy_real, new_time, new_eff_energy, new_avg_energy = update_datasets_with_results(
