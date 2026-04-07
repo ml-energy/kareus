@@ -189,9 +189,4 @@ class SelfAttention(Attention):
         )
 
     def get_query_key_value_tensors_ops(self) -> List:
-        ops = [self.linear_qkv, self.qkv_postprocess_op]
-        if self.q_layernorm is not None:
-            ops.append(self.q_layernorm)
-        if self.k_layernorm is not None:
-            ops.append(self.k_layernorm)
-        return ops
+        return [self.linear_qkv, self.qkv_postprocess_op]

@@ -27,6 +27,8 @@ class ModelConfig:
     vocab_size: int = 128256
     drop_rate: float = 0.0
     layernorm_epsilon: float = 1e-5
+    qk_layernorm: bool = False
+    add_bias_linear: bool = False
 
     def create_transformer_config(
         self,
@@ -52,7 +54,7 @@ class ModelConfig:
             "layernorm_epsilon": self.layernorm_epsilon,
             "hidden_dropout": self.drop_rate,
             "attention_dropout": self.drop_rate,
-            "qk_layernorm": False,
+            "qk_layernorm": self.qk_layernorm,
             "apply_query_key_layer_scaling": False,
             "rotary_interleaved": False,
             "flash_decode": False,
@@ -60,7 +62,7 @@ class ModelConfig:
             "params_dtype": dtype,
             "tensor_model_parallel_size": tensor_parallel_size,
             "context_parallel_size": context_parallel_size,
-            "add_bias_linear": False,
+            "add_bias_linear": self.add_bias_linear,
         }
 
         if partition_type == "mlp":
@@ -91,7 +93,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         name="qwen3_1.7b",
         hidden_size=2048, num_attention_heads=16, head_dim=128,
         num_query_groups=8, ffn_hidden_size=6144, num_layers=28,
-        vocab_size=151936,
+        vocab_size=151936, layernorm_epsilon=1e-6, qk_layernorm=True,
     ),
 }
 

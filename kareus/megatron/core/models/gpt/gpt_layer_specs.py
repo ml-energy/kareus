@@ -11,7 +11,6 @@ import warnings
 from typing import Optional
 
 from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import (
     TransformerLayer,
@@ -117,8 +116,8 @@ def get_gpt_layer_with_transformer_engine_spec(
                         linear_qkv=TEColumnParallelLinearOp,
                         core_attention=TEDotProductAttentionOp,
                         linear_proj=TERowParallelLinearOp,
-                        q_layernorm=TENormOp if qk_layernorm else IdentityOp,
-                        k_layernorm=TENormOp if qk_layernorm else IdentityOp,
+                        q_layernorm=TENormOp if qk_layernorm else None,
+                        k_layernorm=TENormOp if qk_layernorm else None,
                     ),
                 ),
                 self_attn_bda=BiasDropoutAddOp,

@@ -81,10 +81,10 @@ def _build_eval_record(
     }
     if selection_flags is not None:
         record.update({
-            "selected_exploit_eff": bool(selection_flags.get("selected_exploit_eff", False)),
-            "selected_exploit_real": bool(selection_flags.get("selected_exploit_real", False)),
+            "selected_dynamic": bool(selection_flags.get("selected_dynamic", False)),
+            "selected_real": bool(selection_flags.get("selected_real", False)),
             "selected_time": bool(selection_flags.get("selected_time", False)),
-            "selected_explore": bool(selection_flags.get("selected_explore", False)),
+            "selected_uncertainty": bool(selection_flags.get("selected_uncertainty", False)),
         })
     if predicted_values is not None:
         record.update({
@@ -199,8 +199,8 @@ def _compute_skip_batches(n_cached: int, n_init: int, acq_batch: int) -> int:
 def build_selection_metadata(
     selected: np.ndarray,
     final_idx: List[int],
-    exploit_eff_idx: List[int],
-    exploit_real_idx: List[int],
+    dynamic_idx: List[int],
+    real_idx: List[int],
     time_idx: List[int],
     explore_idx: List[int],
     models_eff,
@@ -213,10 +213,10 @@ def build_selection_metadata(
     for i, vec in enumerate(selected):
         sel_idx = final_idx[i]
         flags = {
-            "selected_exploit_eff": bool(sel_idx in exploit_eff_idx),
-            "selected_exploit_real": bool(sel_idx in exploit_real_idx),
+            "selected_dynamic": bool(sel_idx in dynamic_idx),
+            "selected_real": bool(sel_idx in real_idx),
             "selected_time": bool(sel_idx in time_idx),
-            "selected_explore": bool(sel_idx in explore_idx),
+            "selected_uncertainty": bool(sel_idx in explore_idx),
         }
         cand_enc = one_hot_encode(partition_test, vec).reshape(1, -1)
         pred_eff_e, pred_time = predict_performance(models_eff, cand_enc)
@@ -416,37 +416,6 @@ def _compute_uncertainty(args: argparse.Namespace,
     return t_std
 
 
-def _select_exploit(
-    ehvi_eff: np.ndarray, ehvi_real: np.ndarray, k_exploit: int,
-) -> Tuple[List[int], List[int], List[int]]:
-    """Pick exploit candidates split 40/60 between eff- and real-energy EHVI."""
-    if k_exploit <= 0:
-        return [], [], []
-
-    k_eff = int(round(0.4 * k_exploit))
-    k_real = k_exploit - k_eff
-    exclude: set = set()
-
-    eff_idx = _pick_top_k(ehvi_eff, k_eff, exclude)
-    exclude.update(eff_idx)
-    real_idx = _pick_top_k(ehvi_real, k_real, exclude)
-    exclude.update(real_idx)
-
-    # Back-fill from combined EHVI if duplicates reduced count
-    exploit_idx = eff_idx + real_idx
-    if len(exploit_idx) < k_exploit:
-        combined = np.maximum(ehvi_eff, ehvi_real)
-        for idx in _pick_top_k(combined, k_exploit - len(exploit_idx), exclude):
-            if ehvi_eff[idx] >= ehvi_real[idx]:
-                eff_idx.append(idx)
-            else:
-                real_idx.append(idx)
-            exploit_idx.append(idx)
-            exclude.add(idx)
-
-    return exploit_idx, eff_idx, real_idx
-
-
 def select_acquisition_batch(
     candidates: np.ndarray,
     cand_encoded: np.ndarray,
@@ -457,23 +426,21 @@ def select_acquisition_batch(
     args: argparse.Namespace,
     partition_test,
 ):
-    """Assemble the next acquisition batch via a three-way budget split.
+    """Assemble the next acquisition batch via a four-way budget split.
 
-    The *acq_batch* budget is divided into three groups:
-      - **time**: candidates with the lowest predicted latency (pure speed).
-      - **exploit**: candidates with the highest EHVI scores, split 40/60
-        between effective-energy and real-energy fronts, expanding the
-        Pareto front where the surrogate is most confident.
-      - **explore**: candidates with the highest ensemble uncertainty,
-        reducing model error in under-sampled regions.
+    The *acq_batch* budget is divided into four groups selected in order:
+      1. **real**: candidates with the highest real-energy EHVI.
+      2. **dynamic**: candidates with the highest effective/dynamic-energy EHVI.
+      3. **time**: candidates with the lowest predicted latency.
+      4. **uncertainty**: candidates with the highest ensemble uncertainty
+         (remainder after the first three groups).
 
-    Fractions are controlled by ``args.time_fraction`` and
-    ``args.explore_fraction``; any shortfall is back-filled from the
-    combined EHVI ranking.
+    Fractions are controlled by ``args.real_fraction``,
+    ``args.dynamic_fraction``, and ``args.time_fraction``; any shortfall
+    is back-filled from the combined EHVI ranking.
 
     Returns:
-        (selected, final_idx, exploit_eff_idx, exploit_real_idx,
-         time_idx, explore_idx)
+        (selected, final_idx, dynamic_idx, real_idx, time_idx, explore_idx)
         giving the chosen vectors, their indices into *candidates*, and
         per-category index lists for logging.
     """
@@ -482,38 +449,47 @@ def select_acquisition_batch(
     unc_score = _compute_uncertainty(args, e_std, t_std)
 
     k_total = int(args.acq_batch)
+    k_real = int(round(args.real_fraction * k_total))
+    k_dynamic = int(round(args.dynamic_fraction * k_total))
     k_time = int(round(args.time_fraction * k_total))
-    k_remaining = max(0, k_total - k_time)
-    k_explore = int(round(args.explore_fraction * k_remaining))
-    k_exploit = max(0, k_remaining - k_explore)
+    k_uncertainty = max(0, k_total - k_real - k_dynamic - k_time)
 
-    exploit_idx, exploit_eff_idx, exploit_real_idx = _select_exploit(
-        ehvi_eff_values, ehvi_real_values, k_exploit,
-    )
-    used = set(exploit_idx)
-    time_idx = _pick_top_k(pred_time_single, k_time, used, descending=False)
-    used.update(time_idx)
-    explore_idx = _pick_top_k(unc_score, k_explore, used)
-    used.update(explore_idx)
+    exclude: set = set()
+    real_idx = _pick_top_k(ehvi_real_values, k_real, exclude)
+    exclude.update(real_idx)
+    dynamic_idx = _pick_top_k(ehvi_eff_values, k_dynamic, exclude)
+    exclude.update(dynamic_idx)
+    time_idx = _pick_top_k(pred_time_single, k_time, exclude, descending=False)
+    exclude.update(time_idx)
+    explore_idx = _pick_top_k(unc_score, k_uncertainty, exclude)
+    exclude.update(explore_idx)
 
-    final_idx = exploit_idx + time_idx + explore_idx
+    final_idx = real_idx + dynamic_idx + time_idx + explore_idx
     if len(final_idx) < k_total:
         combined = np.maximum(ehvi_eff_values, ehvi_real_values)
-        final_idx.extend(_pick_top_k(combined, k_total - len(final_idx), used))
+        final_idx.extend(_pick_top_k(combined, k_total - len(final_idx), exclude))
 
     selected = candidates[final_idx]
 
-    exploit_set = set(exploit_idx)
+    real_set = set(real_idx)
+    dynamic_set = set(dynamic_idx)
     time_set = set(time_idx)
-    print("Selected candidates (exploit + time + explore):")
+    print("Selected candidates (real + dynamic + time + uncertainty):")
     for i, idx in enumerate(final_idx):
         cfg = decode_vec(partition_test, candidates[idx])
-        tag = "exploit" if idx in exploit_set else ("time" if idx in time_set else "explore")
+        if idx in real_set:
+            tag = "real"
+        elif idx in dynamic_set:
+            tag = "dynamic"
+        elif idx in time_set:
+            tag = "time"
+        else:
+            tag = "uncertainty"
         print(
             f"  {i+1}: [{tag}] EHVI_eff={ehvi_eff_values[idx]:.6g} | EHVI_real={ehvi_real_values[idx]:.6g} | UNC={unc_score[idx]:.6g} | freq={cfg['freq']} | sm={cfg['sm']} | block={cfg['block']} | overlap={cfg['overlap']}"
         )
 
-    return selected, final_idx, exploit_eff_idx, exploit_real_idx, time_idx, explore_idx
+    return selected, final_idx, dynamic_idx, real_idx, time_idx, explore_idx
 
 
 def update_datasets_with_results(
@@ -662,13 +638,13 @@ def _plot_pareto_frontier(
             plt.plot(front_sorted[:, 1], front_sorted[:, 0], "-", c=pareto_color, label=pareto_label)
     if new_time.size > 0:
         if np.any(cat_eff):
-            plt.scatter(new_time[cat_eff], new_energy[cat_eff], marker="x", c="#d62728", s=50, label="Exploit eff")
+            plt.scatter(new_time[cat_eff], new_energy[cat_eff], marker="x", c="#d62728", s=50, label="Dynamic")
         if np.any(cat_real):
-            plt.scatter(new_time[cat_real], new_energy[cat_real], marker="+", c="#1f77b4", s=60, label="Exploit real")
+            plt.scatter(new_time[cat_real], new_energy[cat_real], marker="+", c="#1f77b4", s=60, label="Real")
         if np.any(cat_time):
-            plt.scatter(new_time[cat_time], new_energy[cat_time], marker="o", facecolors="none", edgecolors="#2ca02c", s=60, label="Time picks")
+            plt.scatter(new_time[cat_time], new_energy[cat_time], marker="o", facecolors="none", edgecolors="#2ca02c", s=60, label="Time")
         if np.any(cat_explore):
-            plt.scatter(new_time[cat_explore], new_energy[cat_explore], marker="s", c="#9467bd", s=40, label="Explore")
+            plt.scatter(new_time[cat_explore], new_energy[cat_explore], marker="s", c="#9467bd", s=40, label="Uncertainty")
     plt.xlabel("Time (s)")
     plt.ylabel(ylabel)
     plt.title(title)
@@ -695,10 +671,10 @@ def save_iteration_plots(
     new_time: List[float],
     new_eff_energy: List[float],
     new_real_energy: List[float],
-    cat_exploit_eff: List[bool],
-    cat_exploit_real: List[bool],
+    cat_dynamic: List[bool],
+    cat_real: List[bool],
     cat_time: List[bool],
-    cat_explore: List[bool],
+    cat_uncertainty: List[bool],
 ) -> None:
     """Save per-iteration Pareto frontier plots for effective and real energy."""
     base_logs_dir = partition_test.logs_dir + "/figures"
@@ -708,15 +684,15 @@ def save_iteration_plots(
     Y_real_prev = np.column_stack((prev_energy_real, prev_time)) if len(prev_time) > 0 else np.empty((0, 2))
 
     new_time_arr = np.array(new_time, dtype=float)
-    cat_eff = np.array(cat_exploit_eff, dtype=bool)
-    cat_real = np.array(cat_exploit_real, dtype=bool)
+    cat_eff = np.array(cat_dynamic, dtype=bool)
+    cat_real_arr = np.array(cat_real, dtype=bool)
     cat_time_arr = np.array(cat_time, dtype=bool)
-    cat_explore_arr = np.array(cat_explore, dtype=bool)
+    cat_explore_arr = np.array(cat_uncertainty, dtype=bool)
 
     _plot_pareto_frontier(
         Y_prev=Y_eff_prev, pareto_mask=pareto_mask(Y_eff_prev),
         new_time=new_time_arr, new_energy=np.array(new_eff_energy, dtype=float),
-        cat_eff=cat_eff, cat_real=cat_real, cat_time=cat_time_arr, cat_explore=cat_explore_arr,
+        cat_eff=cat_eff, cat_real=cat_real_arr, cat_time=cat_time_arr, cat_explore=cat_explore_arr,
         pareto_color="#1f77b4", pareto_label="Pareto prev (eff)",
         ylabel="Effective energy (J)",
         title=f"Iter {ib+1}: Time vs Effective energy (measured)",
@@ -725,7 +701,7 @@ def save_iteration_plots(
     _plot_pareto_frontier(
         Y_prev=Y_real_prev, pareto_mask=pareto_mask(Y_real_prev),
         new_time=new_time_arr, new_energy=np.array(new_real_energy, dtype=float),
-        cat_eff=cat_eff, cat_real=cat_real, cat_time=cat_time_arr, cat_explore=cat_explore_arr,
+        cat_eff=cat_eff, cat_real=cat_real_arr, cat_time=cat_time_arr, cat_explore=cat_explore_arr,
         pareto_color="#ff7f0e", pareto_label="Pareto prev (real)",
         ylabel="Real energy (J)",
         title=f"Iter {ib+1}: Time vs Real energy (measured)",

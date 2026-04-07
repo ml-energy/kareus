@@ -57,7 +57,8 @@ class SearchSpace:
     batches: int = 4
     acq_batch: int = 32
     master_port: int = 9002
-    explore_fraction: float = 0.2
+    real_fraction: float = 0.4
+    dynamic_fraction: float = 0.2
     time_fraction: float = 0.2
 
 
@@ -137,8 +138,12 @@ def _build_argparser(search_space: SearchSpace, bo_config: BOSearchConfig) -> ar
     parser.add_argument("--normalize_objectives", action=argparse.BooleanOptionalAction, default=True,
                         help="Normalize energy and time objectives to [0,1] range")
 
-    parser.add_argument("--explore_fraction", type=float, default=search_space.explore_fraction,
-                        help="Fraction of each acquisition batch reserved for exploration (0..1)")
+    parser.add_argument("--real_fraction", type=float, default=search_space.real_fraction,
+                        help="Fraction of each acquisition batch for real-energy EHVI candidates (0..1)")
+    parser.add_argument("--dynamic_fraction", type=float, default=search_space.dynamic_fraction,
+                        help="Fraction of each acquisition batch for dynamic/effective-energy EHVI candidates (0..1)")
+    parser.add_argument("--time_fraction", type=float, default=search_space.time_fraction,
+                        help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
     parser.add_argument("--ensemble_size", type=int, default=5,
                         help="Size of the XGBoost ensemble for predictive uncertainty")
     parser.add_argument("--bootstrap_frac", type=float, default=0.8,
@@ -146,8 +151,6 @@ def _build_argparser(search_space: SearchSpace, bo_config: BOSearchConfig) -> ar
     parser.add_argument("--uncertainty_metric", type=str,
                         choices=["sum", "max", "energy_std", "time_std"], default="sum",
                         help="How to combine energy/time std into uncertainty score")
-    parser.add_argument("--time_fraction", type=float, default=search_space.time_fraction,
-                        help="Fraction of each acquisition batch reserved for time-optimal candidates (0..1)")
 
     return parser
 
@@ -181,7 +184,8 @@ def run_bo_search(
     print(f"Initial points: {args.n_init}, Batches: {args.batches}, Per-batch evals: {args.acq_batch}")
     print(f"Energy type for GBT training: {'Effective' if args.use_effective_energy else 'Real'}")
     print(f"Objective normalization: {'Enabled' if args.normalize_objectives else 'Disabled'}")
-    print(f"Acquisition fractions: explore={args.explore_fraction}, time={args.time_fraction}")
+    unc_frac = max(0.0, 1.0 - args.real_fraction - args.dynamic_fraction - args.time_fraction)
+    print(f"Acquisition fractions: real={args.real_fraction}, dynamic={args.dynamic_fraction}, time={args.time_fraction}, uncertainty={unc_frac:.2f}")
 
     # Compute frequency values based on GPU type
     gpu_cfg = GPU_CONFIGS[args.gpu_type]
@@ -268,7 +272,7 @@ def run_bo_search(
             cand_encoded, models_eff, models_real, hv_ctx_eff, hv_ctx_real,
         )
 
-        selected, final_idx, exploit_eff_idx, exploit_real_idx, time_idx, explore_idx = select_acquisition_batch(
+        selected, final_idx, dynamic_idx, real_idx, time_idx, explore_idx = select_acquisition_batch(
             candidates, cand_encoded, ehvi_eff_values, ehvi_real_values,
             ensemble_models, models_eff, args, partition_test,
         )
@@ -277,7 +281,7 @@ def run_bo_search(
         # Evaluate selected candidates on hardware
         print(f"Evaluating selected candidates on hardware ({bo_config.banner})...")
         sel_flags_list, sel_preds_list = build_selection_metadata(
-            selected, final_idx, exploit_eff_idx, exploit_real_idx,
+            selected, final_idx, dynamic_idx, real_idx,
             time_idx, explore_idx, models_eff, models_real, partition_test,
         )
 
@@ -325,10 +329,10 @@ def run_bo_search(
             new_time=new_time,
             new_eff_energy=new_eff_energy,
             new_real_energy=new_avg_energy,
-            cat_exploit_eff=[(i in exploit_eff_idx) for i in final_idx],
-            cat_exploit_real=[(i in exploit_real_idx) for i in final_idx],
+            cat_dynamic=[(i in dynamic_idx) for i in final_idx],
+            cat_real=[(i in real_idx) for i in final_idx],
             cat_time=[(i in time_idx) for i in final_idx],
-            cat_explore=[(i in explore_idx) for i in final_idx],
+            cat_uncertainty=[(i in explore_idx) for i in final_idx],
         )
 
     total_time = time.time() - total_start

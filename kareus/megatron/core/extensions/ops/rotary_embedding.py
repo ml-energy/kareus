@@ -9,6 +9,7 @@ from kareus.megatron.core.partitions.tensor_graph import (
     Channel,
     PartitionableOperator,
 )
+from kareus.megatron.core.extensions.ops.utils import merge_sub_contexts, restore_sub_contexts
 # from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -121,17 +122,8 @@ class RotaryEmbeddingOp(BasicOperation, PartitionableOperator):
                     key_ctx, key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv
                 )
 
-            # Save contexts and metadata for backward pass
             assert q_pos_emb is not None and k_pos_emb is not None
-            to_save = []
-            for ctx_ in [query_ctx, key_ctx]:
-                range_start = len(to_save)
-                if ctx_.to_save is not None:
-                    to_save.extend(ctx_.to_save)
-                range_end = len(to_save)
-                ctx_.to_save = None
-                ctx_._saved_tensors_range = (range_start, range_end)
-            ctx.save_for_backward(*to_save)
+            merge_sub_contexts(ctx, [query_ctx, key_ctx])
             ctx.query_ctx = query_ctx
             ctx.key_ctx = key_ctx
             # ctx.has_prev_op = prev_op is not None
@@ -161,9 +153,7 @@ class RotaryEmbeddingOp(BasicOperation, PartitionableOperator):
         grad_query_input = grad_query
         grad_key_input = grad_key
 
-        for ctx_ in [ctx.query_ctx, ctx.key_ctx]:
-            if ctx_._saved_tensors_range is not None:
-                ctx_.saved_tensors = ctx.saved_tensors[slice(*ctx_._saved_tensors_range)]
+        restore_sub_contexts(ctx, [ctx.query_ctx, ctx.key_ctx])
 
         if hasattr(ctx, 'query_ctx'):
             grad_query_input, _ = apply_rotary_pos_emb_backward(

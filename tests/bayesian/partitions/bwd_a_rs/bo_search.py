@@ -22,7 +22,8 @@ SEARCH_SPACE = SearchSpace(
     batches=3,
     acq_batch=16,
     master_port=9306,
-    explore_fraction=0.2,
+    real_fraction=0.4,
+    dynamic_fraction=0.2,
     time_fraction=0.2,
 )
 

@@ -8,6 +8,7 @@ from kareus.megatron.core.partitions.tensor_graph import (
     Channel,
     PartitionableOperator,
 )
+from kareus.megatron.core.extensions.ops.utils import merge_sub_contexts, restore_sub_contexts
 
 
 class QKVPostProcessOp(BasicOperation, PartitionableOperator):
@@ -25,9 +26,9 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
         Number of attention heads per partition
     hidden_size_per_attention_head : int
         Hidden size per attention head
-    q_layernorm : Optional[torch.nn.Module], default = None
+    q_layernorm : Optional[BasicOperation], default = None
         Query layer normalization module
-    k_layernorm : Optional[torch.nn.Module], default = None
+    k_layernorm : Optional[BasicOperation], default = None
         Key layer normalization module
     run_tests_fn : Optional[callable], default = None
         Function to run consistency tests
@@ -46,8 +47,8 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
         num_query_groups_per_partition: int,
         num_attention_heads_per_partition: int,
         hidden_size_per_attention_head: int,
-        q_layernorm: Optional[torch.nn.Module] = None,
-        k_layernorm: Optional[torch.nn.Module] = None,
+        q_layernorm: Optional[BasicOperation] = None,
+        k_layernorm: Optional[BasicOperation] = None,
         run_tests_fn: Optional[Callable] = None,
         test_mode: bool = False,
     ) -> None:
@@ -56,10 +57,8 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
         self.num_query_groups_per_partition = num_query_groups_per_partition
         self.num_attention_heads_per_partition = num_attention_heads_per_partition
         self.hidden_size_per_attention_head = hidden_size_per_attention_head
-        # self.q_layernorm = q_layernorm
-        # self.k_layernorm = k_layernorm
-        if q_layernorm is not None or k_layernorm is not None:
-            raise NotImplementedError("q_layernorm and k_layernorm not supported")
+        self.q_layernorm = q_layernorm
+        self.k_layernorm = k_layernorm
         
         self.run_tests_fn = run_tests_fn
         self.test_mode = test_mode
@@ -109,81 +108,23 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
         # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
         query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
 
-        # # Apply layer normalization if provided
-        # if self.q_layernorm is not None:
-        #     query = self.q_layernorm(query)
+        # Apply layernorm with sub-contexts (following RotaryEmbeddingOp pattern)
+        q_ln_ctx = OperationContext()
+        k_ln_ctx = OperationContext()
 
-        # if self.k_layernorm is not None:
-        #     key = self.k_layernorm(key)
+        if self.q_layernorm is not None:
+            query = self.q_layernorm.op_forward(q_ln_ctx, query)
+        if self.k_layernorm is not None:
+            key = self.k_layernorm.op_forward(k_ln_ctx, key)
 
-        # Run consistency tests if configured
+        merge_sub_contexts(ctx, [q_ln_ctx, k_ln_ctx])
+        ctx.q_ln_ctx = q_ln_ctx
+        ctx.k_ln_ctx = k_ln_ctx
+
         if self.test_mode and self.run_tests_fn is not None:
             self.run_tests_fn()
-
-        # Save all tensors for backward pass
-        # ctx.save_for_backward(query, key, value)
         
         return query, key, value
-
-    # def op_backward(
-    #     self,
-    #     ctx: OperationContext,
-    #     grad_output: torch.Tensor,
-    # ) -> torch.Tensor:
-    #     """Backward pass for QKV post-processing.
-        
-    #     Args:
-    #         ctx: Operation context with saved tensors
-    #         grad_output: Gradient w.r.t. query tensor [sq, b, np, hn]
-            
-    #     Returns:
-    #         grad_mixed_qkv: Gradient w.r.t. input mixed_qkv tensor [sq, b, hp]
-    #     """
-        
-    #     # Retrieve saved tensors (query, key, value)
-    #     query, key, value = ctx.saved_tensors
-        
-    #     # Initialize gradients for key and value (these would come from the attention computation)
-    #     # For now, we'll assume they are zeros, but in practice they would be provided
-    #     grad_key = torch.zeros_like(key)
-    #     grad_value = torch.zeros_like(value)
-        
-    #     # Apply layer norm backward if it was used
-    #     if self.q_layernorm is not None:
-    #         # grad_output is w.r.t. normalized query, need to get grad w.r.t. unnormalized query
-    #         # This is a simplified version - actual implementation would need proper layernorm backward
-    #         grad_query = grad_output
-    #     else:
-    #         grad_query = grad_output
-            
-    #     if self.k_layernorm is not None:
-    #         # Similar for key layernorm - this would be handled by the actual layernorm backward
-    #         pass
-        
-    #     # Reshape query gradient back to grouped format
-    #     # [sq, b, np, hn] -> [sq, b, ng, np/ng * hn]
-    #     grad_query_reshaped = grad_query.reshape(
-    #         grad_query.size(0), 
-    #         grad_query.size(1), 
-    #         self.num_query_groups_per_partition,
-    #         (self.num_attention_heads_per_partition // self.num_query_groups_per_partition) * self.hidden_size_per_attention_head
-    #     )
-        
-    #     # Concatenate gradients along the last dimension to reconstruct mixed_qkv gradient
-    #     # [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn] -> [sq, b, ng, (np/ng + 2) * hn]
-    #     grad_mixed_qkv_reshaped = torch.cat([grad_query_reshaped, grad_key, grad_value], dim=3)
-        
-    #     # Reshape back to original mixed_qkv shape
-    #     # [sq, b, ng, (np/ng + 2) * hn] -> [sq, b, hp]
-    #     original_shape = grad_mixed_qkv_reshaped.size()[:-2] + (
-    #         self.num_query_groups_per_partition * (
-    #             (self.num_attention_heads_per_partition // self.num_query_groups_per_partition + 2)
-    #             * self.hidden_size_per_attention_head
-    #         ),
-    #     )
-    #     grad_mixed_qkv = grad_mixed_qkv_reshaped.view(*original_shape)
-        
-    #     return grad_mixed_qkv
 
     def op_backward(
         self,
@@ -191,7 +132,7 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
         grad_query: torch.Tensor,
         grad_key: torch.Tensor,
         grad_value: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Tuple]:
         """Backward pass for QKV post-processing with gradients for all outputs.
         
         Args:
@@ -202,12 +143,24 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
             
         Returns:
             grad_mixed_qkv: Gradient w.r.t. input mixed_qkv tensor [sq, b, hp]
+            grad_params: Tuple of layernorm weight gradients (empty when no layernorms)
         """
+
+        restore_sub_contexts(ctx, [ctx.q_ln_ctx, ctx.k_ln_ctx])
+
+        # Backprop through layernorms — each returns (grad_input, (grad_weight,))
+        grad_params = []
+        if self.q_layernorm is not None:
+            grad_query, q_weight_grads = self.q_layernorm.op_backward(
+                ctx.q_ln_ctx, grad_query
+            )
+            grad_params.extend(q_weight_grads)
+        if self.k_layernorm is not None:
+            grad_key, k_weight_grads = self.k_layernorm.op_backward(
+                ctx.k_ln_ctx, grad_key
+            )
+            grad_params.extend(k_weight_grads)
         
-        # Retrieve saved tensors (query, key, value)
-        # query, key, value = ctx.saved_tensors
-        
-        # Reshape query gradient back to grouped format
         # [sq, b, np, hn] -> [sq, b, ng, np/ng * hn]
         grad_query_reshaped = grad_query.reshape(
             grad_query.size(0), 
@@ -216,11 +169,9 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
             (self.num_attention_heads_per_partition // self.num_query_groups_per_partition) * self.hidden_size_per_attention_head
         )
         
-        # Concatenate gradients along the last dimension to reconstruct mixed_qkv gradient
         # [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn] -> [sq, b, ng, (np/ng + 2) * hn]
         grad_mixed_qkv_reshaped = torch.cat([grad_query_reshaped, grad_key, grad_value], dim=3)
         
-        # Reshape back to original mixed_qkv shape
         # [sq, b, ng, (np/ng + 2) * hn] -> [sq, b, hp]
         original_shape = grad_mixed_qkv_reshaped.size()[:-2] + (
             self.num_query_groups_per_partition * (
@@ -230,7 +181,7 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
         )
         grad_mixed_qkv = grad_mixed_qkv_reshaped.view(*original_shape)
         
-        return grad_mixed_qkv
+        return grad_mixed_qkv, tuple(grad_params)
 
     def fuser_forward(
         self,
@@ -284,23 +235,21 @@ class QKVPostProcessOp(BasicOperation, PartitionableOperator):
             grad_extra_outputs: Gradients w.r.t. extra outputs
         """
         
-        # Get gradients w.r.t. key and value
         grad_key, grad_value = basic_op_grad_extra_outputs[0]
         
-        # Perform backward pass with all gradients
-        grad_mixed_qkv = self.op_backward(
+        grad_mixed_qkv, grad_params = self.op_backward(
             basic_op_ctxs[0], grad_output, grad_key, grad_value
         )
         
-        return grad_mixed_qkv, [], [()]
+        return grad_mixed_qkv, [grad_params], [()]
 
 
 def create_qkv_postprocess_op(
     num_query_groups_per_partition: int,
     num_attention_heads_per_partition: int,
     hidden_size_per_attention_head: int,
-    q_layernorm: Optional[torch.nn.Module] = None,
-    k_layernorm: Optional[torch.nn.Module] = None,
+    q_layernorm: Optional[BasicOperation] = None,
+    k_layernorm: Optional[BasicOperation] = None,
     run_tests_fn: Optional[Callable] = None,
     test_mode: bool = False,
 ) -> QKVPostProcessOp:
@@ -310,8 +259,8 @@ def create_qkv_postprocess_op(
         num_query_groups_per_partition: Number of query groups per partition
         num_attention_heads_per_partition: Number of attention heads per partition
         hidden_size_per_attention_head: Hidden size per attention head
-        q_layernorm: Optional query layer normalization module
-        k_layernorm: Optional key layer normalization module
+        q_layernorm: Optional query layer normalization BasicOperation
+        k_layernorm: Optional key layer normalization BasicOperation
         run_tests_fn: Optional function to run consistency tests
         test_mode: Whether to run tests during forward pass
         

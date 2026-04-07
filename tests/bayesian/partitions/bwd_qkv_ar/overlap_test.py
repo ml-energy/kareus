@@ -116,11 +116,19 @@ class PartitionTest:
             device=self.device, dtype=self.dtype, bias=self.config.add_bias_linear, return_bias=False,
             tensor_parallel_mode=None, tensor_parallel_group=None, tensor_parallel_size=None,
         )
+        q_ln = PartitionableRMSNorm(
+            self.head_dim, eps=self.config.layernorm_epsilon,
+            device=self.device, dtype=self.dtype,
+        ) if self.config.qk_layernorm else None
+        k_ln = PartitionableRMSNorm(
+            self.head_dim, eps=self.config.layernorm_epsilon,
+            device=self.device, dtype=self.dtype,
+        ) if self.config.qk_layernorm else None
         qkv_post = QKVPostProcessOp(
             num_query_groups_per_partition=self.num_query_groups // tp,
             num_attention_heads_per_partition=self.num_attention_heads // tp,
             hidden_size_per_attention_head=self.head_dim,
-            q_layernorm=None, k_layernorm=None, run_tests_fn=None, test_mode=False,
+            q_layernorm=q_ln, k_layernorm=k_ln, run_tests_fn=None, test_mode=False,
         )
         rotary = RotaryEmbeddingOp(config=self.config)
 
