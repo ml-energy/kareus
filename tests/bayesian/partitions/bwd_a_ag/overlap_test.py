@@ -1,7 +1,7 @@
-"""Backward A-AG partition overlap test (CP, ALL_GATHER_KV).
+"""Backward A-AG partition overlap test (CP+TP, ALL_GATHER_KV).
 
 Backward of attention.
-Operators: Attention → Linear(proj) (backward direction)
+Operators (backward order): Attention
 Communication: ALL_GATHER_KV on grad_key/grad_value channels
 """
 
@@ -19,7 +19,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import AllGatherK
 from megatron.core.transformer.enums import AttnMaskType
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
-from common import PartitionableLinear, PartitionExecutor  # noqa: E402
+from common import PartitionExecutor  # noqa: E402
 from common import get_model_config  # noqa: E402
 
 
@@ -104,9 +104,9 @@ class PartitionTest:
         nb = self.batch_size // 2
         sl = self.local_seq_length
         tp = self.tensor_parallel_size
+        proj_in = (self.head_dim * self.num_attention_heads) // tp
         local_qg = self.num_query_groups // tp
-        local_hidden = self.hidden_size // tp
-        output_grad = torch.randn(sl, nb, local_hidden, dtype=self.dtype, device=self.device)
+        output_grad = torch.randn(sl, nb, proj_in, dtype=self.dtype, device=self.device)
         gk = torch.randn(sl, nb, local_qg, self.head_dim, dtype=self.dtype, device=self.device)
         gv = torch.randn(sl, nb, local_qg, self.head_dim, dtype=self.dtype, device=self.device)
         return output_grad, gk, gv
@@ -122,23 +122,16 @@ class PartitionTest:
             profiling_mode=True, cp_size=self.context_parallel_size, rank=self.rank,
         )
 
-        proj_in = (self.head_dim * self.num_attention_heads) // tp
-        linear_proj = PartitionableLinear(
-            in_features=proj_in, out_features=self.hidden_size,
-            device=self.device, dtype=self.dtype, bias=self.config.add_bias_linear, return_bias=True,
-            tensor_parallel_mode=None, tensor_parallel_group=None, tensor_parallel_size=None,
-        )
-
-        new_size = list(self.ag_value.size())
-        new_size[0] = self.seq_length
+        nb = self.batch_size // 2
+        kv_size = [self.seq_length, nb, local_qg, self.head_dim]
         allgather = AllGatherKV(
             process_group=self.cp_group, async_op=True, backend="msccl",
             rank=self.rank, world_size=self.world_size,
-            tensor_size=new_size, device=self.device, dtype=self.dtype,
+            tensor_size=kv_size, device=self.device, dtype=self.dtype,
             batch_idx=1,
         )
 
-        return [attn, linear_proj], allgather
+        return [attn], allgather
 
     def _create_executor(self):
         return PartitionExecutor(

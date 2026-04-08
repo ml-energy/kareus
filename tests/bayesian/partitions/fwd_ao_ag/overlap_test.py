@@ -100,7 +100,6 @@ class PartitionTest:
 
     def _create_operations(self):
         tp = self.tensor_parallel_size
-        local_qg = self.num_query_groups // tp
 
         attn = TEDotProductAttentionOp(
             config=self.config, layer_number=0,
@@ -140,5 +139,3 @@ class PartitionTest:
 
     def test_config(self, overlap_window, sm_configs):
         self.executor.execute(overlap_window, sm_configs)
-
-

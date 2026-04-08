@@ -28,7 +28,7 @@ SEARCH_SPACE = SearchSpace(
 )
 
 BO_CONFIG = BOSearchConfig(
-    banner="Backward QKV-AR Partition (CP, ALL_REDUCE)",
+    banner="Backward QKV-AR Partition (CP+TP, ALL_REDUCE)",
     logs_dir_fn=lambda args: (
         f"logs/{args.model_name}/cp{args.context_parallel_size}"
         f"-tp{args.tensor_parallel_size}-bs{args.batch_size}-seq{args.seq_len}/bwd_qkv_ar"

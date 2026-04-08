@@ -1,6 +1,6 @@
 """Backward attention partition overlap test (TP, ALL_REDUCE).
 
-Operators (backward order): Linear(proj) → Attention → Rotary → QKVPost → Linear(QKV) → RMSNorm → BDA
+Operators (backward order): RMSNorm → BDA → Linear(proj) → Attention → Rotary → QKVPost → Linear(QKV)
 Communication: ALL_REDUCE on grad_main channel
 """
 
@@ -116,11 +116,6 @@ class PartitionTest:
         tp = self.tensor_parallel_size
         nb = self.batch_size // 2
 
-        bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
-        norm = PartitionableRMSNorm(
-            normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
-            device=self.device, dtype=self.dtype,
-        )
         qkv_size = (self.num_attention_heads * self.head_dim
                      + 2 * self.num_query_groups * self.head_dim) // tp
         linear_qkv = PartitionableLinear(
@@ -154,6 +149,12 @@ class PartitionTest:
             device=self.device, dtype=self.dtype, bias=self.config.add_bias_linear, return_bias=True,
             tensor_parallel_mode=None, tensor_parallel_group=None, tensor_parallel_size=None,
         )
+        # Norm is from the next layer
+        bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
+        norm = PartitionableRMSNorm(
+            normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
+            device=self.device, dtype=self.dtype,
+        )
 
         allreduce = AllReduce(
             process_group=self.tp_group, async_op=True, backend="msccl",
@@ -163,7 +164,7 @@ class PartitionTest:
             device=self.device, dtype=self.dtype,
         )
 
-        comp_ops = [bda, norm, linear_qkv, qkv_post, rotary, attn, linear_proj]
+        comp_ops = [linear_qkv, qkv_post, rotary, attn, linear_proj, bda, norm]
         return comp_ops, allreduce
 
     def _create_executor(self):

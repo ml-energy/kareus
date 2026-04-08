@@ -25,7 +25,7 @@ class ModelConfig:
     ffn_hidden_size: int
     num_layers: int
     vocab_size: int = 128256
-    drop_rate: float = 0.0
+    drop_rate: float = 0.1
     layernorm_epsilon: float = 1e-5
     qk_layernorm: bool = False
     add_bias_linear: bool = False

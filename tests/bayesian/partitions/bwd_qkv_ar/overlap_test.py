@@ -1,6 +1,6 @@
-"""Backward QKV-AR partition overlap test (CP, ALL_REDUCE).
+"""Backward QKV-AR partition overlap test (CP+TP, ALL_REDUCE).
 
-Same operators as fwd_qkv_ar but in backward direction.
+Operators (backward order): Rotary → QKVPostProcess → Linear(QKV)
 Communication: ALL_REDUCE on grad_main channel
 """
 
@@ -14,7 +14,6 @@ import torch.distributed as dist
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
 
 from kareus.megatron.core.extensions.ops import (
-    BiasDropoutAddOp,
     PartitionableRMSNorm,
     QKVPostProcessOp,
     RotaryEmbeddingOp,
@@ -62,11 +61,11 @@ class PartitionTest:
             tensor_parallel_size=self.tensor_parallel_size,
         )
 
-        self.hidden_states, self.residual, self.rotary_pos_emb, self.allreduce_inputs = self._create_tensors()
+        self.hidden_states, self.rotary_pos_emb, self.allreduce_inputs = self._create_tensors()
         self.output_grad, self.key_grad, self.value_grad, self.allreduce_grad = self._create_grad_tensors()
         self.comp_ops, self.comm_op = self._create_operations()
         self.executor = self._create_executor()
-        self.executor.run_forward_setup({"main": self.hidden_states, "residual": self.residual,
+        self.executor.run_forward_setup({"main": self.hidden_states,
                                          "rotary_pos_emb": self.rotary_pos_emb})
         self.executor.setup_contexts(
             compute_tensors={"grad_main": self.output_grad,
@@ -79,13 +78,12 @@ class PartitionTest:
         nb = self.batch_size // 2
         sl = self.local_seq_length
         h = torch.randn(sl, nb, self.hidden_size, dtype=self.dtype, device=self.device, requires_grad=True)
-        r = torch.randn(sl, nb, self.hidden_size, dtype=self.dtype, device=self.device, requires_grad=True)
         seq = torch.arange(sl, device=self.device, dtype=torch.float32)
         inv_freq = 1.0 / (10000 ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=self.device) / self.head_dim))
         freqs = torch.outer(seq, inv_freq)
         rotary = torch.cat((freqs, freqs), dim=-1)[:, None, None, :]
         ar = torch.randn(sl, nb, self.hidden_size, dtype=self.dtype, device=self.device, requires_grad=True)
-        return h, r, rotary, ar
+        return h, rotary, ar
 
     def _create_grad_tensors(self):
         nb = self.batch_size // 2
@@ -105,11 +103,6 @@ class PartitionTest:
         nb = self.batch_size // 2
         sl = self.local_seq_length
 
-        bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
-        norm = PartitionableRMSNorm(
-            normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
-            device=self.device, dtype=self.dtype,
-        )
         qkv_size = (self.num_attention_heads * self.head_dim + 2 * self.num_query_groups * self.head_dim) // tp
         linear_qkv = PartitionableLinear(
             in_features=self.hidden_size, out_features=qkv_size,
@@ -140,7 +133,7 @@ class PartitionTest:
             device=self.device, dtype=self.dtype,
         )
 
-        return [bda, norm, linear_qkv, qkv_post, rotary], allreduce
+        return [linear_qkv, qkv_post, rotary], allreduce
 
     def _create_executor(self):
         return PartitionExecutor(
@@ -150,10 +143,8 @@ class PartitionTest:
             partition_key="bwd_qkv_ar",
             comm_type=CommunicationType.ALL_REDUCE,
             initial_channel_names=["grad_main", "grad_key", "grad_value"],
-            fwd_initial_channel_names=["main", "residual", "rotary_pos_emb"],
+            fwd_initial_channel_names=["main", "rotary_pos_emb"],
         )
 
     def test_config(self, overlap_window, sm_configs):
         self.executor.execute(overlap_window, sm_configs)
-
-

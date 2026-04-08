@@ -1,7 +1,7 @@
-"""Backward O-AR partition overlap test (TP, ALL_REDUCE).
+"""Backward O-AR partition overlap test (CP+TP, ALL_REDUCE).
 
 Backward of oproj (ALL_REDUCE in the backward graph).
-Operators: Attention → Linear(proj) (backward direction)
+Operators (backward order): RMSNorm → BDA → Linear(proj)
 Communication: ALL_REDUCE on grad_main channel
 world_size = tensor_parallel_size; context_parallel_size from args (profiling_mode).
 """
@@ -14,11 +14,10 @@ import torch
 import torch.distributed as dist
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
-from kareus.megatron.core.extensions.ops import TEDotProductAttentionOp
-from kareus.megatron.core.partitions.tensor_graph import Channel, CommunicationType
+
+from kareus.megatron.core.extensions.ops import BiasDropoutAddOp, PartitionableRMSNorm
+from kareus.megatron.core.partitions.tensor_graph import CommunicationType
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
-from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import K_TO_SAVE, V_TO_SAVE, K_AG, V_AG
-from megatron.core.transformer.enums import AttnMaskType
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from common import PartitionableLinear, PartitionExecutor  # noqa: E402
@@ -61,67 +60,41 @@ class PartitionTest:
             tensor_parallel_size=self.tensor_parallel_size,
         )
 
-        self.query, self.ag_key, self.ag_value = self._create_tensors()
-        self.output_grad, self.grad_key, self.grad_value = self._create_grad_tensors()
-        self._prepopulate_kv_globals()
+        self.hidden_states, self.residual, self.allreduce_inputs = self._create_tensors()
+        self.output_grad, self.allreduce_grad = self._create_grad_tensors()
         self.comp_ops, self.comm_op = self._create_operations()
         self.executor = self._create_executor()
-        self.executor.run_forward_setup({"main": self.query, "key": self.ag_key, "value": self.ag_value})
+        self.executor.run_forward_setup({"main": self.hidden_states, "residual": self.residual})
         self.executor.setup_contexts(
             compute_tensors={"grad_main": self.output_grad},
-            comm_tensors=[self.allreduce_inputs],
+            comm_tensors=[self.allreduce_grad],
         )
 
     def _create_tensors(self):
         nb = self.batch_size // 2
         sl = self.local_seq_length
         tp = self.tensor_parallel_size
-        local_heads = self.num_attention_heads // tp
-        local_qg = self.num_query_groups // tp
+        proj_in = (self.head_dim * self.num_attention_heads) // tp
 
-        query = torch.randn(sl, nb, local_heads, self.head_dim,
-                             dtype=self.dtype, device=self.device, requires_grad=True)
-        ag_key = torch.randn(sl, nb, local_qg, self.head_dim,
-                              dtype=self.dtype, device=self.device, requires_grad=True)
-        ag_value = torch.randn(sl, nb, local_qg, self.head_dim,
-                                dtype=self.dtype, device=self.device, requires_grad=True)
-        return query, ag_key, ag_value
-
-    def _prepopulate_kv_globals(self):
-        """Pre-populate AllGatherKV globals needed by TEDotProductAttentionOp."""
-        nb = self.batch_size // 2
-        sl = self.local_seq_length
-        tp = self.tensor_parallel_size
-        local_qg = self.num_query_groups // tp
-        K_TO_SAVE[0] = torch.randn(sl, nb, local_qg, self.head_dim,
-                                    dtype=self.dtype, device=self.device)
-        V_TO_SAVE[0] = torch.randn(sl, nb, local_qg, self.head_dim,
-                                    dtype=self.dtype, device=self.device)
-        K_AG[0] = torch.randn(self.seq_length, nb, local_qg, self.head_dim,
-                               dtype=self.dtype, device=self.device)
-        V_AG[0] = torch.randn(self.seq_length, nb, local_qg, self.head_dim,
-                               dtype=self.dtype, device=self.device)
+        hidden_states = torch.randn(sl, nb, proj_in,
+                                    dtype=self.dtype, device=self.device, requires_grad=True)
+        residual = torch.randn(sl, nb, self.hidden_size,
+                               dtype=self.dtype, device=self.device, requires_grad=True)
+        ar = torch.randn(sl, nb, self.hidden_size,
+                         dtype=self.dtype, device=self.device, requires_grad=True)
+        return hidden_states, residual, ar
 
     def _create_grad_tensors(self):
         nb = self.batch_size // 2
         sl = self.local_seq_length
-        tp = self.tensor_parallel_size
-        local_qg = self.num_query_groups // tp
         output_grad = torch.randn(sl, nb, self.hidden_size, dtype=self.dtype, device=self.device)
-        gk = torch.randn(sl, nb, local_qg, self.head_dim, dtype=self.dtype, device=self.device)
-        gv = torch.randn(sl, nb, local_qg, self.head_dim, dtype=self.dtype, device=self.device)
-        return output_grad, gk, gv
+        allreduce_grad = torch.randn(sl, nb, self.hidden_size, dtype=self.dtype, device=self.device)
+        return output_grad, allreduce_grad
 
     def _create_operations(self):
         tp = self.tensor_parallel_size
-        local_qg = self.num_query_groups // tp
-
-        attn = TEDotProductAttentionOp(
-            config=self.config, layer_number=0,
-            attn_mask_type=AttnMaskType.causal, attention_type="self",
-            cp_comm_type="all_gather",
-            profiling_mode=True, cp_size=self.context_parallel_size, rank=self.rank,
-        )
+        nb = self.batch_size // 2
+        sl = self.local_seq_length
 
         proj_in = (self.head_dim * self.num_attention_heads) // tp
         linear_proj = PartitionableLinear(
@@ -129,20 +102,22 @@ class PartitionTest:
             device=self.device, dtype=self.dtype, bias=self.config.add_bias_linear, return_bias=True,
             tensor_parallel_mode=None, tensor_parallel_group=None, tensor_parallel_size=None,
         )
+        # Norm is from the next layer
+        bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
+        norm = PartitionableRMSNorm(
+            normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
+            device=self.device, dtype=self.dtype,
+        )
 
-        nb = self.batch_size // 2
-        sl = self.local_seq_length
-        allreduce_inputs = torch.randn(sl, nb, self.hidden_size, dtype=self.dtype, device=self.device, requires_grad=True)
-        self.allreduce_inputs = allreduce_inputs
         allreduce = AllReduce(
             process_group=self.tp_group, async_op=True, backend="msccl",
             rank=self.rank, world_size=self.world_size,
-            use_persistent_output=True, input_buffer=allreduce_inputs,
+            use_persistent_output=True, input_buffer=self.allreduce_inputs,
             tensor_size=[sl, nb, self.hidden_size],
             device=self.device, dtype=self.dtype,
         )
 
-        return [attn, linear_proj], allreduce
+        return [linear_proj, bda, norm], allreduce
 
     def _create_executor(self):
         return PartitionExecutor(
@@ -152,10 +127,8 @@ class PartitionTest:
             partition_key="bwd_o_ar",
             comm_type=CommunicationType.ALL_REDUCE,
             initial_channel_names=["grad_main"],
-            fwd_initial_channel_names=["main", "key", "value"],
+            fwd_initial_channel_names=["main", "residual"],
         )
 
     def test_config(self, overlap_window, sm_configs):
         self.executor.execute(overlap_window, sm_configs)
-
-

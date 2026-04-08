@@ -141,5 +141,3 @@ class PartitionTest:
 
     def test_config(self, overlap_window, sm_configs):
         self.executor.execute(overlap_window, sm_configs)
-
-

@@ -89,6 +89,7 @@ class PartitionTest:
         tp = self.tensor_parallel_size
         nb = self.batch_size // 2
 
+        # BDA is from the previous layer
         bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
         norm = PartitionableRMSNorm(
             normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
@@ -131,5 +132,3 @@ class PartitionTest:
 
     def test_config(self, overlap_window, sm_configs):
         self.executor.execute(overlap_window, sm_configs)
-
-

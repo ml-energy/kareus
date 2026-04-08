@@ -105,6 +105,7 @@ class PartitionTest:
         tp = self.tensor_parallel_size
         nano_batch_size = self.batch_size // 2
 
+        # BDA is from the previous layer
         bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
         norm = PartitionableRMSNorm(
             normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
@@ -167,42 +168,3 @@ class PartitionTest:
 
     def test_config(self, overlap_window, sm_configs):
         self.executor.execute(overlap_window, sm_configs)
-
-    def run_overlap_test(self, frequency="default"):
-        from zeus.monitor import ZeusMonitor
-
-        monitor = None
-        if self.rank == 0:
-            monitor = ZeusMonitor(gpu_indices=list(range(self.world_size)))
-            os.makedirs(f"logs/tp{self.tensor_parallel_size}-bs{self.batch_size}-seq{self.seq_length}/{frequency}", exist_ok=True)
-
-        overlap_windows = [(-1, -1), (0, 8), (2, 8), (4, 8), (6, 8)]
-        for ow in overlap_windows:
-            for sm_num in range(3, 31, 3):
-                for block_size in [512, 1024]:
-                    sm_configs = (sm_num, block_size)
-                    print(f"Overlap {ow} - SM: {sm_num}, Block: {block_size}")
-
-                    # Warmup
-                    torch.cuda.synchronize()
-                    dist.barrier()
-                    for _ in range(10):
-                        self.test_config(ow, sm_configs)
-                    torch.cuda.synchronize()
-                    dist.barrier()
-
-                    if self.rank == 0:
-                        monitor.begin_window("step")
-                    iterations = 100
-                    for _ in range(iterations):
-                        self.test_config(ow, sm_configs)
-                    torch.cuda.synchronize()
-                    dist.barrier()
-
-                    if self.rank == 0:
-                        result = monitor.end_window("step")
-                        t = result.time / iterations
-                        e = result.total_energy / iterations
-                        print(f"  Time: {t*1000:.3f} ms, Energy: {e:.4f} J")
-
-

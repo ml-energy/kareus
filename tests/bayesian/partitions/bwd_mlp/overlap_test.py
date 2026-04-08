@@ -1,6 +1,6 @@
 """Backward MLP partition overlap test (TP, ALL_REDUCE).
 
-Operators (backward order): Linear(FC2) → BiasSwiglu → Linear(FC1) → RMSNorm → BDA
+Operators (backward order): RMSNorm → BDA → Linear(FC2) → BiasSwiglu → Linear(FC1)
 Communication: ALL_REDUCE on grad_main channel
 """
 
@@ -83,11 +83,6 @@ class PartitionTest:
         tp = self.tensor_parallel_size
         nb = self.batch_size // 2
 
-        bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
-        norm = PartitionableRMSNorm(
-            normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
-            device=self.device, dtype=self.dtype,
-        )
         fc1_size = 2 * self.ffn_hidden_size // tp
         linear_fc1 = PartitionableLinear(
             in_features=self.hidden_size, out_features=fc1_size,
@@ -101,6 +96,12 @@ class PartitionTest:
             device=self.device, dtype=self.dtype, bias=self.config.add_bias_linear, return_bias=True,
             tensor_parallel_mode=None, tensor_parallel_group=None, tensor_parallel_size=None,
         )
+        # Norm is from the next layer
+        bda = BiasDropoutAddOp(has_bias=self.config.add_bias_linear, dropout_prob=self.config.hidden_dropout, training=True)
+        norm = PartitionableRMSNorm(
+            normalized_shape=self.hidden_size, eps=self.config.layernorm_epsilon,
+            device=self.device, dtype=self.dtype,
+        )
 
         allreduce = AllReduce(
             process_group=self.tp_group, async_op=True, backend="msccl",
@@ -110,7 +111,7 @@ class PartitionTest:
             device=self.device, dtype=self.dtype,
         )
 
-        return [bda, norm, linear_fc1, swiglu, linear_fc2], allreduce
+        return [linear_fc1, swiglu, linear_fc2, bda, norm], allreduce
 
     def _create_executor(self):
         return PartitionExecutor(
@@ -125,5 +126,3 @@ class PartitionTest:
 
     def test_config(self, overlap_window, sm_configs):
         self.executor.execute(overlap_window, sm_configs)
-
-
