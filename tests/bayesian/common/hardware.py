@@ -83,7 +83,7 @@ def _dist_batch_eval_worker(
             print(f"Evaluating task {ti} of {num_tasks}: freq={task['freq_mhz']} | overlap={task['overlap_start']}-{task['overlap_end']} | sm={task['sm']} | block={task['block']}")
 
         freq_mhz = int(task["freq_mhz"])
-        overlap_window = (int(task["overlap_start"]), int(task["overlap_end"]))
+        overlap_window = (task["overlap_start"], task["overlap_end"])
         sm_num = int(task["sm"])
         block_size = int(task["block"])
         idx = int(task["index"])
@@ -138,8 +138,8 @@ def measure_batch_on_hardware(
         task_list.append({
             "index": int(i),
             "freq_mhz": int(cfg["freq"]),
-            "overlap_start": int(cfg["overlap"][0]),
-            "overlap_end": int(cfg["overlap"][1]),
+            "overlap_start": cfg["overlap"][0],
+            "overlap_end": cfg["overlap"][1],
             "sm": int(cfg["sm"]),
             "block": int(cfg["block"]),
         })

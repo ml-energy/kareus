@@ -10,7 +10,7 @@ from dataclasses import dataclass
 __all__ = ["PipelineCommScheduler"]
 
 
-OverlapWindow = Tuple[int, int]
+OverlapWindow = Tuple[Union[int, str], Union[int, str]]
 ResourceShape = Tuple[int, int]
 
 @dataclass(frozen=True)
@@ -46,15 +46,40 @@ MicrobatchPair = Tuple[ScheduleItem, ScheduleItem]
 
 
 def _parse_config_string(cfg: str) -> CommConfig:
+    """Parse a comm config string.
+
+    Supports two formats for the overlap window:
+      - Legacy integer: ``"0-8-16-1024"`` (possibly with negatives: ``"-1--1-16-1024"``)
+      - Slot names: ``"norm_0-linear_1-16-1024"`` or ``"none-none-16-1024"``
+    """
+    # Try legacy all-integer format first (allows negative numbers).
     match = re.match(r"^(-?\d+)-(-?\d+)-(-?\d+)-(-?\d+)$", cfg)
-    if not match:
-        raise ValueError(
-            f"Config string must match 'overlap_start-overlap_end-sm_num-block_size' with integers, got: {cfg}"
+    if match:
+        return CommConfig(
+            (int(match.group(1)), int(match.group(2))),
+            (int(match.group(3)), int(match.group(4))),
         )
-    overlap_start = int(match.group(1))
-    overlap_end = int(match.group(2))
-    sm_num = int(match.group(3))
-    block_size = int(match.group(4))
+
+    # Slot-name format: split off the last two numeric fields (sm, block).
+    parts = cfg.rsplit("-", 2)
+    if len(parts) != 3:
+        raise ValueError(
+            f"Config string must have format 'overlap_start-overlap_end-sm_num-block_size', got: {cfg}"
+        )
+    overlap_part, sm_str, block_str = parts
+    sm_num = int(sm_str)
+    block_size = int(block_str)
+
+    # Split overlap_part into (start, end) slot names. Slot names never
+    # contain '-' (they use '_' for numbering), so split on the first '-'.
+    sep_idx = overlap_part.find("-")
+    if sep_idx == -1:
+        raise ValueError(
+            f"Overlap part must contain 'start-end', got: {overlap_part!r}"
+        )
+    overlap_start = overlap_part[:sep_idx]
+    overlap_end = overlap_part[sep_idx + 1:]
+
     return CommConfig((overlap_start, overlap_end), (sm_num, block_size))
 
 

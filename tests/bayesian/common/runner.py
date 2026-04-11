@@ -7,7 +7,7 @@ import csv
 import time
 import dataclasses
 import argparse
-from typing import List, Tuple, Callable
+from typing import List, Tuple, Union, Callable
 
 import numpy as np
 from . import (
@@ -51,7 +51,7 @@ from .hardware import (
 @dataclasses.dataclass
 class SearchSpace:
     """Per-partition search space constants."""
-    overlap_windows: List[Tuple[int, int]]
+    overlap_windows: List[Tuple[Union[int, str], Union[int, str]]]
     sm_values: List[int]
     n_init: int = 96
     batches: int = 4

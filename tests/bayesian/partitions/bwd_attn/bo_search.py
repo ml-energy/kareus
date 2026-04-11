@@ -16,7 +16,7 @@ from common import SearchSpace, BOSearchConfig, run_bo_search  # noqa: E402
 
 
 SEARCH_SPACE = SearchSpace(
-    overlap_windows=[(0, 8), (2, 8), (3, 8), (5, 8)],
+    overlap_windows=[("norm_0", "none"), ("linear_0", "none"), ("attn_0", "none"), ("rope_0", "none")],
     sm_values=list(range(3, 31, 3)),
     n_init=96,
     batches=4,
@@ -24,7 +24,7 @@ SEARCH_SPACE = SearchSpace(
     master_port=9003,
     real_fraction=0.4,
     dynamic_fraction=0.2,
-    time_fraction=0.25,
+    time_fraction=0.2,
 )
 
 BO_CONFIG = BOSearchConfig(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -11,8 +11,71 @@ if TYPE_CHECKING:
     from .context_manager import NanoBatchContext
     from .tensor_graph import CommunicationOp, ComputeOp
 
-OverlapWindow = Tuple[int, int]   # (comm_start, comm_end) — fused_idx to launch/finish comm
+OverlapWindow = Tuple[int, int]   # (comm_start, comm_end) — op_idx to launch/finish comm
 ResourceShape = Tuple[int, int]   # (sm_num, block_size) — SM allocation for comm
+
+# ---------------------------------------------------------------------------
+# Overlap slot builder: maps operator class names to semantic groups.
+# Memory-bound ops with the same group merge into one slot (first occurrence).
+# Compute-bound ops each get their own slot.
+# ---------------------------------------------------------------------------
+_GROUP_BY_CLASS: Dict[str, str] = {
+    "BiasDropoutAddOp": "norm",
+    "PartitionableRMSNorm": "norm",
+    "QKVPostProcessOp": "rope",
+    "RotaryEmbeddingOp": "rope",
+    "BiasSwigluOp": "activation",
+    "PartitionableLinear": "linear",
+    "Linear": "linear",
+    "TEDotProductAttentionOp": "attn",
+}
+_MEMORY_BOUND_GROUPS = frozenset({"norm", "rope", "activation"})
+
+
+def _build_overlap_slots(comp_ops: List[ComputeOp]) -> Dict[str, int]:
+    """Build a mapping from semantic slot names to op_idx positions.
+
+    Memory-bound groups merge consecutive ops into one slot (keyed by
+    the first occurrence).  Compute-bound ops each get their own slot.
+
+    Returns:
+        ``{"norm_0": 0, "linear_0": 2, ...}`` — slot name → op_idx.
+    """
+    slots: Dict[str, int] = {}
+    group_counter: Dict[str, int] = {}
+    prev_group: Optional[str] = None
+
+    for op_idx, op in enumerate(comp_ops):
+        cls_name = type(op.operator).__name__
+        group = _GROUP_BY_CLASS.get(cls_name)
+        if group is None:
+            raise ValueError(
+                f"Unknown operator class {cls_name!r} — add it to _GROUP_BY_CLASS"
+            )
+
+        if group in _MEMORY_BOUND_GROUPS:
+            if group == prev_group:
+                continue  # merge into the existing slot
+            prev_group = group
+        else:
+            prev_group = None
+
+        seq = group_counter.get(group, 0)
+        group_counter[group] = seq + 1
+        slots[f"{group}_{seq}"] = op_idx
+
+    return slots
+
+
+def _resolve_slot(slots: Dict[str, int], name: str) -> int:
+    """Resolve a slot name to its op_idx, or ``-1`` for the ``"none"`` sentinel."""
+    if name == "none":
+        return -1
+    if name not in slots:
+        raise KeyError(
+            f"Unknown overlap slot {name!r}. Available: {sorted(slots)}"
+        )
+    return slots[name]
 
 
 @dataclass
@@ -44,6 +107,11 @@ class PartitionBase:
     # used by TransformerEngine's _OperationFuserAutogradFunction.
     is_grad_enabled: bool = True
 
+    def __post_init__(self) -> None:
+        # Precompute semantic overlap slots so _setup_comm doesn't have to
+        # rebuild them on every partition execution.
+        self._overlap_slots: Dict[str, int] = _build_overlap_slots(self.comp_ops)
+
     def load_schedule(self, schedule) -> None:
         """Load overlap_window and resource_shape from the scheduler's current_schedule.
 
@@ -57,10 +125,20 @@ class PartitionBase:
                 config.resource_shape,
             )
 
-    def get_comm_config(self) -> Tuple[OverlapWindow, ResourceShape]:
-        if self._schedule_config:
-            return self._schedule_config
-        return ((-1, -1), (None, None))
+    def _get_comm_config(self) -> Tuple[Tuple[int, int], ResourceShape]:
+        """Return ``((comm_start, comm_end), (sm_num, block_size))``.
+
+        Resolves string slot names in the overlap window to integer op_idx
+        via the cached ``_overlap_slots`` map.
+        """
+        if not self._schedule_config:
+            return ((-1, -1), (None, None))
+        (comm_start, comm_end), resource_shape = self._schedule_config
+
+        if isinstance(comm_start, str):
+            comm_start = _resolve_slot(self._overlap_slots, comm_start)
+            comm_end = _resolve_slot(self._overlap_slots, comm_end)
+        return ((comm_start, comm_end), resource_shape)
 
     def _setup_comm(self) -> Tuple[int, int, Optional[int], Optional[int]]:
         """Parse comm config and emit the initial event_record if needed.
@@ -70,10 +148,16 @@ class PartitionBase:
         current_stream = torch.cuda.current_stream()
 
         if self.comm_op is not None:
-            (comm_start, comm_end), (sm_num, block_size) = self.get_comm_config()
+            (comm_start, comm_end), (sm_num, block_size) = self._get_comm_config()
         else:
             comm_start, comm_end = -1, -1
             sm_num, block_size = None, None
+
+        if comm_end != -1:
+            raise ValueError(
+                f"comm_end must be -1 (sentinel 'none'); got {comm_end}. "
+                "Partition execution does not use comm_end — set overlap_end to 'last'."
+            )
 
         if comm_start == 0:
             self.comm_op.event_record(current_stream)

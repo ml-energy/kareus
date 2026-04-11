@@ -61,7 +61,7 @@ class BackwardPartition(PartitionBase):
         grad_params: Dict[int, List] = {}
 
         # Iterate compute ops
-        for fused_idx, op in enumerate(self.comp_ops):
+        for op_idx, op in enumerate(self.comp_ops):
 
             # 1. Retrieve OperationContext saved during forward.
             op_ctx = ctx.get_op_context(op.op_id)
@@ -80,8 +80,8 @@ class BackwardPartition(PartitionBase):
                     ctx.tensor_store.get(p.tensor_id) for p in op.input_ports[1:]
                 )]
 
-            # 3. Launch overlapped backward comm at the scheduled fused_idx
-            if comm_start == fused_idx:
+            # 3. Launch overlapped backward comm at the scheduled op_idx
+            if comm_start == op_idx:
                 comm_output, comm_extra_outputs = self._launch_comm(
                     pre_ctx, sm_num, block_size, backward=True,
                 )
@@ -103,7 +103,7 @@ class BackwardPartition(PartitionBase):
                 op_ctx.saved_tensors = None
 
             # 6. Record event for next comm window
-            if fused_idx == comm_start - 1:
+            if op_idx == comm_start - 1:
                 self.comm_op.event_record(current_stream)
 
             # 7. Write grad output tensors via port tensor_ids to THIS nanobatch.

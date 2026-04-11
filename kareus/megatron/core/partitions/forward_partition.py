@@ -47,7 +47,7 @@ class ForwardPartition(PartitionBase):
         comm_extra_outputs: list = []
 
         # Iterate compute ops
-        for fused_idx, op in enumerate(self.comp_ops):
+        for op_idx, op in enumerate(self.comp_ops):
 
             # 1. Create OperationContext for autograd save/restore.
             #    Keyed by op.op_id so backward can retrieve it.
@@ -81,8 +81,8 @@ class ForwardPartition(PartitionBase):
             if requires_grad != x.requires_grad:
                 x = x.requires_grad_() if requires_grad else x.detach()
 
-            # 4. Launch overlapped comm at the scheduled fused_idx
-            if comm_start == fused_idx:
+            # 4. Launch overlapped comm at the scheduled op_idx
+            if comm_start == op_idx:
                 comm_output, comm_extra_outputs = self._launch_comm(
                     pre_ctx, sm_num, block_size,
                 )
@@ -98,7 +98,7 @@ class ForwardPartition(PartitionBase):
             )
 
             # 6. Record event for next comm window
-            if fused_idx == comm_start - 1:
+            if op_idx == comm_start - 1:
                 self.comm_op.event_record(current_stream)
 
             # 7. Write output tensors via port tensor_ids to THIS nanobatch.
