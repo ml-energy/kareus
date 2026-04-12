@@ -21,7 +21,7 @@ import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf, open_dict
 
 import sys
-sys.path.append("/workspaces/Kareus")
+sys.path.append("/workspaces/osdi/Kareus")
 
 from nemo.collections.nlp.parts.megatron_trainer_builder import MegatronTrainerBuilder
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector

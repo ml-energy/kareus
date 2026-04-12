@@ -11,8 +11,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
 from kareus.megatron.core.models.common.embedding.rope_utils import (
     _apply_rotary_pos_emb_bshd,
     _apply_rotary_pos_emb_bshd_backward,
-    RotaryPosEmbFunction,
-    apply_rotary_pos_emb_bshd_with_grad,
 )
 
 # Import the RotaryEmbeddingOp to test

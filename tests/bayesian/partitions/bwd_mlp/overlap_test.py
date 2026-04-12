@@ -42,6 +42,9 @@ class PartitionTest:
         self.dtype = torch.bfloat16
         self.rank = rank
         self.world_size = world_size
+        assert world_size == args.tensor_parallel_size, (
+            f"bwd_mlp: world_size ({world_size}) must equal tensor_parallel_size ({args.tensor_parallel_size})"
+        )
         self.tensor_parallel_size = world_size
 
         self.tp_group = init_distributed(rank, world_size)

@@ -43,6 +43,9 @@ class PartitionTest:
         self.dtype = torch.bfloat16
         self.rank = rank
         self.world_size = world_size
+        assert world_size == args.context_parallel_size, (
+            f"fwd_qkv_ag: world_size ({world_size}) must equal context_parallel_size ({args.context_parallel_size})"
+        )
         self.context_parallel_size = world_size
         self.tensor_parallel_size = args.tensor_parallel_size
 
