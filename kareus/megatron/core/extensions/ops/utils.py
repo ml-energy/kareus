@@ -16,12 +16,11 @@ def merge_sub_contexts(
     """
     to_save = []
     for sub_ctx in sub_contexts:
-        range_start = len(to_save)
         if sub_ctx.to_save is not None:
+            range_start = len(to_save)
             to_save.extend(sub_ctx.to_save)
-        range_end = len(to_save)
-        sub_ctx.to_save = None
-        sub_ctx._saved_tensors_range = (range_start, range_end)
+            sub_ctx._saved_tensors_range = (range_start, len(to_save))
+            sub_ctx.to_save = None
     if to_save:
         ctx.save_for_backward(*to_save)
 
@@ -35,6 +34,8 @@ def restore_sub_contexts(
     Reverses the packing done by :func:`merge_sub_contexts` so each
     sub-context sees only its own saved tensors during the backward pass.
     """
+    if ctx.saved_tensors is None:
+        return
     for sub_ctx in sub_contexts:
         if sub_ctx._saved_tensors_range is not None:
             sub_ctx.saved_tensors = ctx.saved_tensors[

@@ -11,7 +11,6 @@ import sys
 
 
 import torch
-import torch.distributed as dist
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
 
@@ -21,16 +20,7 @@ from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from common import PartitionableLinear, PartitionExecutor  # noqa: E402
-from common import get_model_config  # noqa: E402
-
-
-def init_distributed(rank, world_size, backend='nccl'):
-    if world_size <= 1:
-        return None
-    if not dist.is_initialized():
-        torch.cuda.set_device(rank)
-        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
-    return dist.new_group(list(range(world_size)))
+from common import get_model_config, init_distributed  # noqa: E402
 
 
 class PartitionTest:

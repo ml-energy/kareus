@@ -19,6 +19,28 @@ from torch.multiprocessing import spawn
 from .encoding import decode_vec
 
 
+def init_distributed(
+    rank: int,
+    world_size: int,
+    backend: str = "nccl",
+) -> dist.ProcessGroup | None:
+    """Initialize torch.distributed and return a process group spanning all ranks.
+
+    Returns ``None`` when *world_size* <= 1 (single-GPU, no communication needed).
+    """
+    if world_size <= 1:
+        return None
+    if not dist.is_initialized():
+        torch.cuda.set_device(rank)
+        dist.init_process_group(
+            backend=backend,
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device(f"cuda:{rank}"),
+        )
+    return dist.new_group(list(range(world_size)))
+
+
 def get_visible_gpu_indices() -> List[int] | None:
     """Return GPU indices from CUDA_VISIBLE_DEVICES, or None if unset/empty."""
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
@@ -110,6 +132,7 @@ def _dist_batch_eval_worker(
             }
 
     del monitor
+    os.system(f'pkill -P {os.getpid()}')
     if dist.is_initialized():
         dist.destroy_process_group()
 

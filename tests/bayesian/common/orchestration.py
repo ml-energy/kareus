@@ -72,8 +72,8 @@ def _build_eval_record(
     """Build a single JSONL-compatible evaluation record from a decoded config."""
     record = {
         "freq": int(cfg["freq"]),
-        "overlap_start": int(cfg["overlap"][0]),
-        "overlap_end": int(cfg["overlap"][1]),
+        "overlap_start": cfg["overlap"][0],
+        "overlap_end": cfg["overlap"][1],
         "sm": int(cfg["sm"]),
         "block": int(cfg["block"]),
         "time_s": avg_time_s,

@@ -25,13 +25,15 @@ wait_all() {
 }
 
 run_tp_only() {
-    local model=$1 tp=$2 bs=$3 seq=$4
+    local gpus=$1 model=$2 tp=$3 bs=$4 seq=$5
     local tag="${model}_tp${tp}_bs${bs}_seq${seq}"
     echo ">>> TP-only: ${tag}"
     for part in "${TP8_PARTS[@]}"; do
-        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python partitions/${part}/bo_search.py \
+        local log_dir="logs/${model}/cp1-tp${tp}-bs${bs}-seq${seq}/${part}"
+        mkdir -p "$log_dir"
+        CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
             -m "$model" -w "$tp" -tp "$tp" -cp 1 -b "$bs" -s "$seq" \
-            > "partitions/${part}/bo_${tag}.log" 2>&1
+            > "${log_dir}/bo_${tag}.log" 2>&1
     done
 }
 
@@ -39,9 +41,11 @@ run_cptp_tp() {
     local gpus=$1 model=$2 tp=$3 cp=$4 bs=$5 seq=$6
     local tag="${model}_cp${cp}_tp${tp}_bs${bs}_seq${seq}"
     for part in "${CPTP_TP_PARTS[@]}"; do
+        local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
+        mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
             -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "partitions/${part}/bo_${tag}.log" 2>&1
+            > "${log_dir}/bo_${tag}.log" 2>&1
     done
 }
 
@@ -49,9 +53,11 @@ run_cptp_cp() {
     local gpus=$1 model=$2 tp=$3 cp=$4 bs=$5 seq=$6
     local tag="${model}_cp${cp}_tp${tp}_bs${bs}_seq${seq}"
     for part in "${CPTP_CP_PARTS[@]}"; do
+        local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
+        mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
             -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "partitions/${part}/bo_${tag}.log" 2>&1
+            > "${log_dir}/bo_${tag}.log" 2>&1
     done
 }
 
@@ -62,9 +68,11 @@ run_cptp_cp_a() {
     local gpus=$1 model=$2 tp=$3 cp=$4 bs=$5 seq=$6
     local tag="${model}_cp${cp}_tp${tp}_bs${bs}_seq${seq}"
     for part in "${CPTP_CP_PARTS_A[@]}"; do
+        local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
+        mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
             -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "partitions/${part}/bo_${tag}.log" 2>&1
+            > "${log_dir}/bo_${tag}.log" 2>&1
     done
 }
 
@@ -72,36 +80,65 @@ run_cptp_cp_b() {
     local gpus=$1 model=$2 tp=$3 cp=$4 bs=$5 seq=$6
     local tag="${model}_cp${cp}_tp${tp}_bs${bs}_seq${seq}"
     for part in "${CPTP_CP_PARTS_B[@]}"; do
+        local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
+        mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
             -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "partitions/${part}/bo_${tag}.log" 2>&1
+            > "${log_dir}/bo_${tag}.log" 2>&1
     done
+}
+
+run_nonpartition() {
+    local gpus=$1 model=$2 tp=$3 cp=$4 bs=$5 seq=$6
+    local tag="${model}_cp${cp}_tp${tp}_bs${bs}_seq${seq}"
+    local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/nonpartition"
+    mkdir -p "$log_dir"
+    echo ">>> nonpartition: ${tag}  GPUs=${gpus}"
+    CUDA_VISIBLE_DEVICES=$gpus python nonpartition/profile_nonpartition.py \
+        -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
+        > "${log_dir}/nonpartition_${tag}.log" 2>&1
 }
 
 ###############################################################################
 # Phase 1 — TP-only (8 GPUs, sequential)
 ###############################################################################
 echo "===== Phase 1: TP-only (8 GPUs) ====="
-run_tp_only llama3.2_3b 8 8  4096
-run_tp_only qwen3_1.7b  8 8  4096
-run_tp_only qwen3_1.7b  8 8  8192
-run_tp_only qwen3_1.7b  8 16 4096
+run_tp_only 0,1,2,3,4,5,6,7 llama3.2_3b 8 8  4096
+run_nonpartition 0,1,2,3,4,5,6,7 llama3.2_3b 8 1 8  4096
+run_tp_only 0,1,2,3,4,5,6,7 qwen3_1.7b  8 8  4096
+run_nonpartition 0,1,2,3,4,5,6,7 qwen3_1.7b  8 1 8  4096
+run_tp_only 0,1,2,3,4,5,6,7 qwen3_1.7b  8 8  8192
+run_nonpartition 0,1,2,3,4,5,6,7 qwen3_1.7b  8 1 8  8192
+run_tp_only 0,1,2,3,4,5,6,7 qwen3_1.7b  8 16 4096
+run_nonpartition 0,1,2,3,4,5,6,7 qwen3_1.7b  8 1 16 4096
 
 ###############################################################################
 # Phase 2 — CP+TP TP-side partitions (4 GPUs each, 2 in parallel)
 ###############################################################################
-echo "===== Phase 2: CP+TP TP partitions (2×4 GPUs) ====="
+echo "===== Phase 2: CP+TP TP partitions + nonpartition (2×4 GPUs) ====="
 pids=()
 run_cptp_tp 0,1,2,3 llama3.2_3b 4 2 8  4096 & pids+=($!)
 run_cptp_tp 4,5,6,7 llama3.2_3b 4 2 8  8192 & pids+=($!)
+wait_all "${pids[@]}"; pids=()
+
+run_nonpartition 0,1,2,3 llama3.2_3b 4 2 8  4096 & pids+=($!)
+run_nonpartition 4,5,6,7 llama3.2_3b 4 2 8  8192 & pids+=($!)
 wait_all "${pids[@]}"; pids=()
 
 run_cptp_tp 0,1,2,3 llama3.2_3b 4 2 16 4096 & pids+=($!)
 run_cptp_tp 4,5,6,7 qwen3_1.7b  4 2 8  4096 & pids+=($!)
 wait_all "${pids[@]}"; pids=()
 
+run_nonpartition 0,1,2,3 llama3.2_3b 4 2 16 4096 & pids+=($!)
+run_nonpartition 4,5,6,7 qwen3_1.7b  4 2 8  4096 & pids+=($!)
+wait_all "${pids[@]}"; pids=()
+
 run_cptp_tp 0,1,2,3 qwen3_1.7b  4 2 8  8192 & pids+=($!)
 run_cptp_tp 4,5,6,7 qwen3_1.7b  4 2 16 4096 & pids+=($!)
+wait_all "${pids[@]}"; pids=()
+
+run_nonpartition 0,1,2,3 qwen3_1.7b  4 2 8  8192 & pids+=($!)
+run_nonpartition 4,5,6,7 qwen3_1.7b  4 2 16 4096 & pids+=($!)
 wait_all "${pids[@]}"; pids=()
 
 ###############################################################################

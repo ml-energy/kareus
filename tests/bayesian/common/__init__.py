@@ -40,6 +40,7 @@ from .surrogates import (
 )
 
 from .hardware import (
+    init_distributed,
     get_visible_gpu_indices,
     measure_batch_on_hardware,
 )

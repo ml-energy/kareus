@@ -29,6 +29,8 @@ class ModelConfig:
     layernorm_epsilon: float = 1e-5
     qk_layernorm: bool = False
     add_bias_linear: bool = False
+    num_layers_in_first_pipeline_stage: int | None = None
+    num_layers_in_last_pipeline_stage: int | None = None
 
     def create_transformer_config(
         self,
@@ -77,23 +79,21 @@ class ModelConfig:
 
 
 MODEL_REGISTRY: Dict[str, ModelConfig] = {
-    "llama3.3_70b": ModelConfig(
-        name="llama3.3_70b",
-        hidden_size=8192, num_attention_heads=64, head_dim=128,
-        num_query_groups=8, ffn_hidden_size=28672, num_layers=80,
-        vocab_size=128256,
-    ),
     "llama3.2_3b": ModelConfig(
         name="llama3.2_3b",
         hidden_size=3072, num_attention_heads=24, head_dim=128,
         num_query_groups=8, ffn_hidden_size=8192, num_layers=28,
         vocab_size=128256,
+        num_layers_in_first_pipeline_stage=15,
+        num_layers_in_last_pipeline_stage=13,
     ),
     "qwen3_1.7b": ModelConfig(
         name="qwen3_1.7b",
         hidden_size=2048, num_attention_heads=16, head_dim=128,
         num_query_groups=8, ffn_hidden_size=6144, num_layers=28,
         vocab_size=151936, layernorm_epsilon=1e-6, qk_layernorm=True,
+        num_layers_in_first_pipeline_stage=15,
+        num_layers_in_last_pipeline_stage=13,
     ),
 }
 

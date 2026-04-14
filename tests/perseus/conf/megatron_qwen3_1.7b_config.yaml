@@ -1,0 +1,191 @@
+name: megatron_qwen3_1.7b
+trainer:
+  devices: 8
+  num_nodes: 2
+  accelerator: gpu
+  precision: bf16
+  logger: false
+  enable_checkpointing: false
+  use_distributed_sampler: false
+  max_epochs: 1
+  max_steps: 30
+  log_every_n_steps: 40
+  val_check_interval: 40
+  limit_val_batches: 1
+  limit_test_batches: 1
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  benchmark: false
+  enable_model_summary: false
+  num_sanity_val_steps: 0
+
+exp_manager:
+  explicit_log_dir: null
+  exp_dir: null
+  name: megatron_qwen3_1.7b
+  create_wandb_logger: false
+  wandb_logger_kwargs:
+    project: null
+    name: null
+  resume_if_exists: false
+  resume_ignore_no_checkpoint: true
+  create_checkpoint_callback: false
+  checkpoint_callback_params:
+    monitor: val_loss
+    save_top_k: 10
+    mode: min
+    always_save_nemo: false
+    save_nemo_on_train_end: false
+    filename: 'megatron_gpt--{val_loss:.2f}-{step}-{consumed_samples}'
+    model_parallel_size: ${multiply:${model.tensor_model_parallel_size}, ${model.pipeline_model_parallel_size}}
+
+model:
+  restore_from_path: null
+  restore_from_ckpt: null
+
+  mcore_gpt: true
+  micro_batch_size: 8
+  global_batch_size: 64
+  tensor_model_parallel_size: 8
+  pipeline_model_parallel_size: 2
+  context_parallel_size: 1
+  cp_comm_type: all_gather
+  virtual_pipeline_model_parallel_size: null
+  num_layers_in_first_pipeline_stage: 15
+
+  encoder_seq_length: 4096
+  max_position_embeddings: ${.encoder_seq_length}
+  num_layers: 28
+  hidden_size: 2048
+  ffn_hidden_size: 6144
+  num_attention_heads: 16
+  init_method_std: 0.02
+  use_scaled_init_method: true
+  hidden_dropout: 0.1
+  attention_dropout: 0.0
+  ffn_dropout: 0.0
+  kv_channels: 128
+  apply_query_key_layer_scaling: true
+  normalization: 'rmsnorm'
+  layernorm_epsilon: 1e-6
+  do_layer_norm_weight_decay: false
+  make_vocab_size_divisible_by: 128
+  pre_process: true
+  post_process: true
+  persist_layer_norm: true
+  bias: false
+  activation: 'fast-swiglu'
+  headscale: false
+  transformer_block_type: 'pre_ln'
+  openai_gelu: false
+  normalize_attention_scores: true
+  position_embedding_type: 'rope'
+  rotary_percentage: 1.0
+  attention_type: 'multihead'
+  share_embeddings_and_output_weights: true
+  overlap_p2p_comm: false
+  batch_p2p_comm: true
+  num_query_groups: 8
+  qk_layernorm: true
+
+  enable_megatron_timers: false
+  megatron_timer_kwargs:
+    enable_energy_monitoring: true
+
+  enable_zeus_monitor: true
+  enable_power_monitor: false
+  enable_perseus_optimizer: false
+  enable_kareus_scheduler: false
+
+  tokenizer:
+    library: 'huggingface'
+    type: 'Qwen/Qwen2.5-1.5B-Instruct'
+    use_fast: true
+    trust_remote_code: true
+    delimiter: null
+    sentencepiece_legacy: false
+
+  native_amp_init_scale: 4294967296
+  native_amp_growth_interval: 1000
+  hysteresis: 2
+  fp32_residual_connection: false
+  fp16_lm_cross_entropy: false
+
+  megatron_amp_O2: true
+  grad_allreduce_chunk_size_mb: 125
+
+  grad_div_ar_fusion: true
+  gradient_accumulation_fusion: false
+  bias_activation_fusion: true
+  bias_dropout_add_fusion: true
+  masked_softmax_fusion: true
+  get_attention_mask_from_fusion: true
+  apply_rope_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: 'te'
+
+  seed: 1234
+  resume_from_checkpoint: null
+  use_cpu_initialization: false
+  onnx_safe: false
+  apex_transformer_log_level: 30
+  gradient_as_bucket_view: true
+  sync_batch_comm: false
+
+  activations_checkpoint_granularity: 'full'
+  activations_checkpoint_method: 'uniform'
+  activations_checkpoint_num_layers: 1
+  num_micro_batches_with_partial_activation_checkpoints: null
+  activations_checkpoint_layers_per_pipeline: null
+
+  sequence_parallel: false
+
+  transformer_engine: true
+  fp8: false
+  fp8_e4m3: false
+  fp8_hybrid: true
+  fp8_margin: 0
+  fp8_interval: 1
+  fp8_amax_history_len: 1024
+  fp8_amax_compute_algo: max
+  reduce_amax: true
+  use_emha: false
+
+  data:
+    data_prefix:
+      - 1.0
+      - /workspaces/Kareus/tests/data/qwen_dataset_text_document
+    index_mapping_dir: null
+    data_impl: mmap
+    splits_string: 900,50,50
+    seq_length: ${model.encoder_seq_length}
+    skip_warmup: true
+    num_workers: 2
+    dataloader_type: single
+    reset_position_ids: false
+    reset_attention_mask: false
+    eod_mask_loss: false
+    validation_drop_last: true
+    no_seqlen_plus_one_input_tokens: false
+    pad_samples_to_global_batch_size: false
+    shuffle_documents: true
+
+  nsys_profile:
+    enabled: false
+    start_step: 5
+    end_step: 6
+    ranks: [0]
+    gen_shape: false
+
+  optim:
+    name: mcore_distributed_optim
+    lr: 0.0002
+    weight_decay: 0.01
+    betas:
+    - 0.9
+    - 0.98
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 500
+      constant_steps: 50000
+      min_lr: 2.0e-05
