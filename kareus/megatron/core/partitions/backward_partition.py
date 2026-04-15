@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
+from transformer_engine.pytorch.utils import clear_tensor_data
 
 from .partition_base import PartitionBase
 
@@ -36,6 +37,7 @@ class BackwardPartition(PartitionBase):
         self,
         ctx: NanoBatchContext,
         pre_ctx: NanoBatchContext,
+        protected_tensor_ids: Optional[set] = None,
     ) -> Dict[int, List]:
         """Execute backward partition with automatic tensor routing.
 
@@ -45,6 +47,9 @@ class BackwardPartition(PartitionBase):
                 - ``op_contexts``: saved from forward, contains ``saved_tensors``.
             pre_ctx: NanoBatchContext for the OTHER nanobatch.
                 - ``tensor_store``: comm op reads/writes grad tensors here.
+            protected_tensor_ids: Python ``id()`` values of tensors shared
+                across nanobatches (e.g. rotary_pos_emb, attention_mask)
+                that must not be cleared.
 
         Returns:
             ``grad_params``: mapping from ``op_id`` to list of parameter gradients.
@@ -100,6 +105,13 @@ class BackwardPartition(PartitionBase):
                 t for param_tuple in fused_op_grad_params for t in param_tuple
             ]
             if not self.profiling_mode:
+                if op_ctx.saved_tensors is not None:
+                    if protected_tensor_ids:
+                        to_clear = [t for t in op_ctx.saved_tensors
+                                    if t is not None and id(t) not in protected_tensor_ids]
+                        clear_tensor_data(*to_clear)
+                    else:
+                        clear_tensor_data(*op_ctx.saved_tensors)
                 op_ctx.saved_tensors = None
 
             # 6. Record event for next comm window

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .tensor_graph import TensorPort
 
 from transformer_engine.pytorch.ops.op import OperationContext
+from transformer_engine.pytorch.utils import clear_tensor_data
 
 
 @dataclass
@@ -183,4 +184,23 @@ class NanoBatchContext:
             ctx = self.op_contexts[op_id]
             if ctx.to_save is not None and len(ctx.to_save) > 0:
                 ctx.saved_tensors = tuple(ctx.to_save)
+                ctx.to_save = None
+    
+    def clear_saved_tensors_except(self, protected: set) -> None:
+        """Clear saved activations except those in *protected*.
+
+        Args:
+            protected: Set of Python ``id()`` values for tensor objects
+                that must not be cleared.
+        """
+        for ctx in self.op_contexts.values():
+            if ctx.saved_tensors is not None:
+                to_clear = [t for t in ctx.saved_tensors
+                            if t is not None and id(t) not in protected]
+                clear_tensor_data(*to_clear)
+                ctx.saved_tensors = None
+            if ctx.to_save is not None:
+                to_clear = [t for t in ctx.to_save
+                            if t is not None and id(t) not in protected]
+                clear_tensor_data(*to_clear)
                 ctx.to_save = None
