@@ -96,6 +96,8 @@ model:
   enable_power_monitor: false
   enable_perseus_optimizer: false
   enable_kareus_scheduler: false
+  kareus_scheduler_kwargs:
+    solution_path: null
 
   tokenizer:
     library: 'huggingface'
@@ -177,7 +179,7 @@ model:
     shuffle_documents: True
 
   nsys_profile:
-    enabled: False
+    enabled: True
     start_step: 5
     end_step: 6
     ranks: [0]

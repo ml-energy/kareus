@@ -20,13 +20,15 @@ ResourceShape = Tuple[int, int]   # (sm_num, block_size) — SM allocation for c
 # Compute-bound ops each get their own slot.
 # ---------------------------------------------------------------------------
 _GROUP_BY_CLASS: Dict[str, str] = {
+    "ResidualForkOp": "norm",
     "BiasDropoutAddOp": "norm",
     "PartitionableRMSNorm": "norm",
     "QKVPostProcessOp": "rope",
     "RotaryEmbeddingOp": "rope",
     "BiasSwigluOp": "activation",
     "PartitionableLinear": "linear",
-    "Linear": "linear",
+    "TEColumnParallelLinearOp": "linear",
+    "TERowParallelLinearOp": "linear",
     "TEDotProductAttentionOp": "attn",
 }
 _MEMORY_BOUND_GROUPS = frozenset({"norm", "rope", "activation"})
@@ -132,7 +134,7 @@ class PartitionBase:
         via the cached ``_overlap_slots`` map.
         """
         if not self._schedule_config:
-            return ((-1, -1), (None, None))
+            return ((0, -1), (None, None))
         (comm_start, comm_end), resource_shape = self._schedule_config
 
         if isinstance(comm_start, str):
@@ -156,7 +158,7 @@ class PartitionBase:
         if comm_end != -1:
             raise ValueError(
                 f"comm_end must be -1 (sentinel 'none'); got {comm_end}. "
-                "Partition execution does not use comm_end — set overlap_end to 'last'."
+                "Partition execution does not use comm_end — set overlap_end to 'none'."
             )
 
         if comm_start == 0:

@@ -10,7 +10,6 @@ import sys
 
 import torch
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
 from kareus.megatron.core.extensions.ops import (
     BiasDropoutAddOp,
     PartitionableRMSNorm,

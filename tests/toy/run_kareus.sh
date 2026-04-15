@@ -49,7 +49,7 @@ nemo_model_name="${CFG%_config}"
 
 KAREUS_DIR="${SCRIPT_DIR}/../kareus"
 BAYESIAN_DIR="${SCRIPT_DIR}/../bayesian"
-PREPOST_DIR="${SCRIPT_DIR}/../bayesian/nonpartition"
+PREPOST_DIR="${SCRIPT_DIR}/../bayesian"
 
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
 config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
@@ -67,7 +67,7 @@ echo ""
 # Phase 1: CSV generation              #
 ########################################
 
-PROFILE_CSV="profile_${MODEL_NAME}_cp${CP}_tp${TP}_bs${MBS}_seq${SEQ}.csv"
+PROFILE_CSV="${OUTPUT_DIR}/profile.csv"
 
 if [[ ! -f "${PROFILE_CSV}" ]]; then
     echo "Generating profile CSV..."
@@ -79,7 +79,8 @@ if [[ ! -f "${PROFILE_CSV}" ]]; then
         --tensor_parallel_size="${TP}" \
         --pipeline_parallel_size="${PP}" \
         --batch_size="${MBS}" \
-        --seq_len="${SEQ}"
+        --seq_len="${SEQ}" \
+        --output_dir="${OUTPUT_DIR}"
 else
     echo "Profile CSV exists: ${PROFILE_CSV}"
 fi
@@ -114,6 +115,17 @@ fi
 
 echo "Using freqs solution: ${freqs_path}"
 echo "Using scheds solution: ${scheds_path}"
+
+cleanup() {
+    echo "Resetting GPU clocks"
+    nvidia-smi -i 0,1,2,3 --reset-gpu-clocks || true
+    if [[ -n "${PFO_PID:-}" ]] && ps -p "${PFO_PID}" > /dev/null 2>&1; then
+        echo "Stopping PFO server PID ${PFO_PID}"
+        kill "${PFO_PID}" || true
+        wait "${PFO_PID}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 server_log="${OUTPUT_DIR}/pfo_server.log"
 echo "Starting PFO server on localhost:${PFO_PORT}"
@@ -151,10 +163,13 @@ torchrun \
     model.enable_perseus_optimizer=True \
     model.enable_kareus_scheduler=True \
     "model.kareus_scheduler_kwargs.solution_path=${scheds_path}" \
-    2>&1 | tee "${TRAIN_LOG}"
+    2>&1 | tee "${TRAIN_LOG}" || true
+TRAIN_EXIT=${PIPESTATUS[0]}
 
-echo "Resetting GPU clocks"
-nvidia-smi -i 0,1,2,3 --reset-gpu-clocks
+if [[ "${TRAIN_EXIT}" -ne 0 ]]; then
+    echo "ERROR: Training failed with exit code ${TRAIN_EXIT}"
+    exit "${TRAIN_EXIT}"
+fi
 
 ########################################
 # Phase 6: Collect outputs + cleanup   #
@@ -179,12 +194,6 @@ fi
 
 if compgen -G "${NEMO_DIR}/*.txt" > /dev/null; then
     mv "${NEMO_DIR}"/*.txt "${OUTPUT_DIR}/"
-fi
-
-if ps -p "${PFO_PID}" > /dev/null 2>&1; then
-    echo "Stopping PFO server PID ${PFO_PID}"
-    kill "${PFO_PID}" || true
-    wait "${PFO_PID}" 2>/dev/null || true
 fi
 
 echo "Done — outputs: ${OUTPUT_DIR}"

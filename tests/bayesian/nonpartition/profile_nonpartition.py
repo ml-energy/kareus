@@ -9,8 +9,6 @@ import torch.distributed as dist
 import multiprocessing as mp
 from torch.multiprocessing import spawn
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
-
 # Add tests/bayesian/ so the "common" package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 

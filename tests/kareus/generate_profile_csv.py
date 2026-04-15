@@ -132,8 +132,8 @@ def _read_bo_jsonl(
                 continue
 
             frequency = int(row["freq"])
-            overlap_start = int(row["overlap_start"])
-            overlap_end = int(row["overlap_end"])
+            overlap_start = row["overlap_start"]
+            overlap_end = row["overlap_end"]
             sm = int(row["sm"])
             block = int(row["block"])
             time_val = float(row["time_s"])
@@ -242,6 +242,7 @@ def _main_non_cp(
     use_activation_checkpointing: bool,
     model_name: str,
     scale_time_energy: bool,
+    output_dir: str = ".",
 ) -> None:
     """Non-CP mode: 2 fwd partitions (attn, mlp) + 2 bwd partitions."""
     attention_fwd_map = _read_bo_jsonl(
@@ -275,9 +276,12 @@ def _main_non_cp(
         batch_size, seq_len, freqs, model_name,
     )
 
-    profile_csv = open(
-        f"profile_{model_name}_cp{context_parallel_size}_tp{tensor_parallel_size}_bs{batch_size}_seq{seq_len}.csv", "w"
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(
+        output_dir,
+        f"profile_{model_name}_cp{context_parallel_size}_tp{tensor_parallel_size}_bs{batch_size}_seq{seq_len}.csv",
     )
+    profile_csv = open(csv_path, "w")
     if use_activation_checkpointing:
         profile_csv.write("stage,instruction,frequency,recompute_attention_configs,recompute_mlp_configs,attention_configs,mlp_configs,time,energy\n")
     else:
@@ -409,7 +413,7 @@ def _main_non_cp(
                 )
 
     profile_csv.close()
-    print("Profile CSV saved.")
+    print(f"Profile CSV saved: {csv_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +435,7 @@ def _main_cp(
     use_activation_checkpointing: bool,
     model_name: str,
     scale_time_energy: bool,
+    output_dir: str = ".",
 ) -> None:
     """CP mode: 5 fwd + 7 bwd CP sub-partitions."""
     common = dict(
@@ -473,9 +478,12 @@ def _main_cp(
         batch_size, seq_len, freqs, model_name,
     )
 
-    profile_csv = open(
-        f"profile_{model_name}_cp{context_parallel_size}_tp{tensor_parallel_size}_bs{batch_size}_seq{seq_len}.csv", "w"
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(
+        output_dir,
+        f"profile_{model_name}_cp{context_parallel_size}_tp{tensor_parallel_size}_bs{batch_size}_seq{seq_len}.csv",
     )
+    profile_csv = open(csv_path, "w")
     profile_csv.write(
         "stage,instruction,frequency,"
         "fwd_qkv_ar,fwd_qkv_ag,fwd_ao_ag,fwd_ao_ar,fwd_mlp,"
@@ -665,7 +673,7 @@ def _main_cp(
                 )
 
     profile_csv.close()
-    print("Profile CSV saved.")
+    print(f"Profile CSV saved: {csv_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -678,13 +686,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model_name", required=True, help="Name of the model (must exist in model_config.MODEL_REGISTRY).")
     parser.add_argument("--bayesian_profile_dir", default="../bayesian", help="Directory containing BO results.")
-    parser.add_argument("--prepost_profile_dir", default="../bayesian/nonpartition", help="Directory containing nonpartition prepost profiling results.")
+    parser.add_argument("--prepost_profile_dir", default="../bayesian", help="Directory containing nonpartition prepost profiling results.")
     parser.add_argument("--tensor_parallel_size", required=True, type=int, help="Tensor-parallel size.")
     parser.add_argument("--context_parallel_size", required=True, type=int, help="Context-parallel size. 1 = non-CP mode, >1 = CP mode.")
     parser.add_argument("--pipeline_parallel_size", required=True, type=int, help="Number of pipeline-parallel stages.")
     parser.add_argument("--batch_size", required=True, type=int, help="Micro batch size.")
     parser.add_argument("--seq_len", required=True, type=int, help="Sequence length.")
 
+    parser.add_argument("--output_dir", default=".", help="Directory to write the output profile CSV into.")
     parser.add_argument("--gpu_type", default="A100", choices=list(GPU_CONFIGS), help="GPU type for p2p_power lookup.")
     parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="Generate backward candidates with recompute-forward configs.")
     parser.add_argument("--scale_time_energy", default=True, type=bool, help="Scale sum_time and sum_energy by 1.15.")
@@ -713,6 +722,7 @@ if __name__ == "__main__":
         use_activation_checkpointing=args.use_activation_checkpointing,
         model_name=args.model_name,
         scale_time_energy=args.scale_time_energy,
+        output_dir=args.output_dir,
     )
 
     if args.context_parallel_size == 1:

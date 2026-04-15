@@ -94,6 +94,8 @@ model:
   enable_power_monitor: false
   enable_perseus_optimizer: false
   enable_kareus_scheduler: false
+  kareus_scheduler_kwargs:
+    solution_path: null
 
   tokenizer:
     library: 'huggingface'

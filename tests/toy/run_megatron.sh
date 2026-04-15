@@ -27,7 +27,7 @@ GBS=$(( MBS * NUM_MICROBATCHES ))
 SEQ=2048
 
 nemo_model_name="${CFG%_config}"
-config_tag="tp${TP}_mbs${MBS}_seq${SEQ}"
+config_tag="cp1_tp${TP}_mbs${MBS}_seq${SEQ}"
 
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
 OUTPUT_DIR="${NEMO_DIR}/${config_tag}/megatron"

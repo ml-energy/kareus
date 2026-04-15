@@ -184,7 +184,6 @@ class SelfAttention(Attention):
             hidden_size_per_attention_head=self.hidden_size_per_attention_head,
             q_layernorm=self.q_layernorm,
             k_layernorm=self.k_layernorm,
-            run_tests_fn=self.run_realtime_tests,
             test_mode=self.config.test_mode,
         )
 

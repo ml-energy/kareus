@@ -19,12 +19,16 @@ class CommConfig:
     resource_shape: ResourceShape
 
 
+_TRAIL_CONFIG = CommConfig(overlap_window=("norm", "none"), resource_shape=(20, 1024))
+
 @dataclass(frozen=True)
 class ScheduleItem:
     fwd_attn: Optional[CommConfig]
     fwd_mlp: Optional[CommConfig]
     bwd_attn: Optional[CommConfig]
     bwd_mlp: Optional[CommConfig]
+    fwd_trail: Optional[CommConfig] = _TRAIL_CONFIG
+    bwd_trail: Optional[CommConfig] = _TRAIL_CONFIG
 
 @dataclass(frozen=True)
 class ScheduleItemCP:
@@ -41,6 +45,9 @@ class ScheduleItemCP:
     bwd_o_ag: Optional[CommConfig]
     bwd_o_ar: Optional[CommConfig]
     bwd_mlp: Optional[CommConfig]
+
+    fwd_trail: Optional[CommConfig] = _TRAIL_CONFIG
+    bwd_trail: Optional[CommConfig] = _TRAIL_CONFIG
 
 MicrobatchPair = Tuple[ScheduleItem, ScheduleItem]
 

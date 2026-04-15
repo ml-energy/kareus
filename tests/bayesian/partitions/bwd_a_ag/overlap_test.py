@@ -11,7 +11,6 @@ import sys
 
 import torch
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
 from kareus.megatron.core.extensions.ops import TEDotProductAttentionOp
 from kareus.megatron.core.partitions.tensor_graph import Channel, CommunicationType
 from kareus.transformer_engine.pytorch.ops.basic.all_gather_kv import AllGatherKV, K_TO_SAVE, V_TO_SAVE, K_AG, V_AG

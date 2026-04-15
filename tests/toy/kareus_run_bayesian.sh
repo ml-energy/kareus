@@ -53,14 +53,14 @@ run_parts() {
     done
 }
 
-# echo "===== Toy Bayesian Test (${TAG}) ====="
-# echo "  Group A (GPUs 0,1): ${PARTS_A[*]}"
-# echo "  Group B (GPUs 2,3): ${PARTS_B[*]}"
+echo "===== Toy Bayesian Test (${TAG}) ====="
+echo "  Group A (GPUs 0,1): ${PARTS_A[*]}"
+echo "  Group B (GPUs 2,3): ${PARTS_B[*]}"
 
-# pids=()
-# run_parts 0,1 "${PARTS_A[@]}" & pids+=($!)
-# run_parts 2,3 "${PARTS_B[@]}" & pids+=($!)
-# wait_all "${pids[@]}"
+pids=()
+run_parts 0,1 "${PARTS_A[@]}" & pids+=($!)
+run_parts 2,3 "${PARTS_B[@]}" & pids+=($!)
+wait_all "${pids[@]}"
 
 echo "===== Nonpartition (GPUs 0,1) ====="
 NP_LOG_DIR="${LOGS_DIR}/nonpartition"

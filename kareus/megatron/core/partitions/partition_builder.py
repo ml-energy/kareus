@@ -58,27 +58,31 @@ class PartitionBuilder:
         self.forward_graph = forward_graph
         self.backward_graph = backward_graph
 
-    def build_forward_partitions(self) -> List[ForwardPartition]:
+    def build_forward_partitions(
+        self, partition_keys: List[str],
+    ) -> List[ForwardPartition]:
         """Form interleaved forward partitions from the forward graph."""
         return self._form_partitions(
             self.forward_graph.ops,
             ForwardPartition,
-            direction="fwd",
+            partition_keys=partition_keys,
         )
 
-    def build_backward_partitions(self) -> List[BackwardPartition]:
+    def build_backward_partitions(
+        self, partition_keys: List[str],
+    ) -> List[BackwardPartition]:
         """Form interleaved backward partitions from the backward graph."""
         return self._form_partitions(
             self.backward_graph.ops,
             BackwardPartition,
-            direction="bwd",
+            partition_keys=partition_keys,
         )
 
     def _form_partitions(
         self,
         ops: List[Union[ComputeOp, CommunicationOp]],
         partition_class: Type[PartitionBase],
-        direction: str,
+        partition_keys: List[str],
     ) -> list:
         """Form interleaved 2-nanobatch partitions from a flat op list.
 
@@ -89,12 +93,34 @@ class PartitionBuilder:
           (wait for NB0's comm from this segment)
 
         The first partition always has ``comm_op=None`` (nothing to wait for).
+
+        Args:
+            partition_keys: List of semantic keys (one per partition,
+                i.e. 2 per segment). Keys are used as-is for ``partition_key``
+                on each partition (e.g. ``"fwd_attn"``, ``"bwd_mlp"``).
         """
         segments = self._split_by_communications(ops)
+
+        expected = 2 * len(segments)
+        if len(partition_keys) != expected:
+            raise RuntimeError(
+                f"Partition key count mismatch: "
+                f"expected {expected} keys "
+                f"(2 x {len(segments)} segments), "
+                f"got {len(partition_keys)}."
+            )
+
         partitions: list = []
         prev_comm: Optional[CommunicationOp] = None
+        key_idx = 0
 
-        for seg_idx, (comp_ops, comm_after) in enumerate(segments):
+        for comp_ops, comm_after in segments:
+            nb0_key = partition_keys[key_idx] or ""
+            key_idx += 1
+
+            nb1_key = partition_keys[key_idx] or ""
+            key_idx += 1
+
             # NB0 partition
             # Clone prev_comm so this partition has its own CommunicationOp
             # instance with an independent ``operator`` slot.  Without this,
@@ -102,7 +128,7 @@ class PartitionBuilder:
             # _assign_comm_operators would clobber one of them.
             partitions.append(partition_class(
                 partition_id=len(partitions),
-                partition_key=f"{direction}_seg{seg_idx}_nb0",
+                partition_key=nb0_key,
                 nano_batch_idx=0,
                 comp_ops=comp_ops,
                 comm_op=_clone_comm(prev_comm) if prev_comm is not None else None,
@@ -111,7 +137,7 @@ class PartitionBuilder:
             # NB1 partition
             partitions.append(partition_class(
                 partition_id=len(partitions),
-                partition_key=f"{direction}_seg{seg_idx}_nb1",
+                partition_key=nb1_key,
                 nano_batch_idx=1,
                 comp_ops=comp_ops,
                 comm_op=_clone_comm(comm_after) if comm_after is not None else None,

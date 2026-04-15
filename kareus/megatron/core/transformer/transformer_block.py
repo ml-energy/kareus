@@ -181,13 +181,37 @@ class TransformerBlock(MegatronModule):
 
         self.backward_tensor_graph = bwd_builder.build()
 
-        # Step 4: Form interleaved partitions
+        # Step 4: Form interleaved partitions with semantic partition keys
         builder = PartitionBuilder(
             forward_graph=self.forward_tensor_graph,
             backward_graph=self.backward_tensor_graph,
         )
-        self.forward_partitions = builder.build_forward_partitions()
-        self.backward_partitions = builder.build_backward_partitions()
+
+        num_layers = len(self.layers)
+
+        if self.config.context_parallel_size > 1:
+            fwd_keys = (
+                ["fwd_qkv_ar", "fwd_qkv_ag", "fwd_ao_ag", "fwd_ao_ar",
+                 "fwd_mlp", "fwd_mlp"] * num_layers
+                + ["fwd_trail", ""]
+            )
+            bwd_keys = (
+                ["bwd_mlp", "bwd_mlp", "bwd_o_ar", "bwd_o_ag",
+                 "bwd_a_ag", "bwd_a_rs", "bwd_qkv_rs", "bwd_qkv_ar"] * num_layers
+                + ["bwd_trail", ""]
+            )
+        else:
+            fwd_keys = (
+                ["fwd_attn", "fwd_attn", "fwd_mlp", "fwd_mlp"] * num_layers
+                + ["fwd_trail", ""]
+            )
+            bwd_keys = (
+                ["bwd_mlp", "bwd_mlp", "bwd_attn", "bwd_attn"] * num_layers
+                + ["bwd_trail", ""]
+            )
+
+        self.forward_partitions = builder.build_forward_partitions(partition_keys=fwd_keys)
+        self.backward_partitions = builder.build_backward_partitions(partition_keys=bwd_keys)
 
         # Step 5: Create SeedConfig (defaults match the initial channels above)
         self.seed_config = SeedConfig()

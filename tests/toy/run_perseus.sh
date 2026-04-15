@@ -44,9 +44,10 @@ GBS=$(( MBS * NUM_MICROBATCHES ))
 nemo_model_name="${CFG%_config}"
 
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
-PROFILE_DIR="${NEMO_DIR}/tp${TP}_mbs${MBS}_seq${SEQ}/profiling"
-RESULTS_DIR="${NEMO_DIR}/tp${TP}_mbs${MBS}_seq${SEQ}/lowtime"
-OUTPUT_DIR="${NEMO_DIR}/tp${TP}_mbs${MBS}_seq${SEQ}/perseus"
+config_tag="cp1_tp${TP}_mbs${MBS}_seq${SEQ}"
+PROFILE_DIR="${NEMO_DIR}/${config_tag}/perseus/profiling"
+RESULTS_DIR="${NEMO_DIR}/${config_tag}/perseus/lowtime"
+OUTPUT_DIR="${NEMO_DIR}/${config_tag}/perseus"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
 mkdir -p "${PROFILE_DIR}" "${RESULTS_DIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
@@ -124,7 +125,7 @@ echo "PFO server PID: ${PFO_PID}"
 # Phase 6: Perseus training            #
 ########################################
 
-TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_tp${TP}_mbs${MBS}_seq${SEQ}_perseus.log"
+TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_perseus.log"
 
 echo "Running Perseus training..."
 

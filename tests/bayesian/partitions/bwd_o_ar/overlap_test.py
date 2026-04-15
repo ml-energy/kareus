@@ -12,8 +12,6 @@ import sys
 
 import torch
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
-
 from kareus.megatron.core.extensions.ops import BiasDropoutAddOp, PartitionableRMSNorm
 from kareus.megatron.core.partitions.tensor_graph import CommunicationType
 from kareus.transformer_engine.pytorch.ops.basic.all_reduce import AllReduce
