@@ -60,60 +60,32 @@ class SeedConfig:
     bwd_output_channel: str = "grad_main"
 
 
-def _combine_param_grads(
-    grad_params_nb1: Dict[int, List],
-    grad_params_nb2: Dict[int, List],
+def _flatten_grad_params(
+    grad_params: Dict[int, List],
     num_params: int,
 ) -> List[Optional[Tensor]]:
-    """Sum parameter gradients from both nanobatches.
+    """Flatten per-op_id parameter gradients into a flat list.
 
     Iterates ``op_id`` values in sorted order (matching the parameter
-    collection order used by the transformer block).  For each
-    ``op_id``, element-wise sums ``g_nb0 + g_nb1`` in-place.
+    collection order used by the transformer block).
 
     Args:
-        grad_params_nb1: ``{op_id: [grad, ...]}`` accumulated from
-            all NB0 backward partitions.
-        grad_params_nb2: ``{op_id: [grad, ...]}`` accumulated from
-            all NB1 backward partitions.
-        num_params: Expected total count (must match ``len(*params)``
-            from forward).
+        grad_params: ``{op_id: [grad, ...]}`` accumulated from
+            backward partitions for one nanobatch.
+        num_params: Expected total count.
 
     Returns:
-        Flat list of combined gradients in ``*params`` order.
+        Flat list of gradients in ``*params`` order.
     """
-    combined: List[Optional[Tensor]] = []
-    all_op_ids = sorted(
-        set(grad_params_nb1.keys()) | set(grad_params_nb2.keys())
-    )
+    flat: List[Optional[Tensor]] = []
+    for op_id in sorted(grad_params.keys()):
+        flat.extend(grad_params[op_id])
 
-    for op_id in all_op_ids:
-        grads_1 = grad_params_nb1.get(op_id, [])
-        grads_2 = grad_params_nb2.get(op_id, [])
-        max_len = max(len(grads_1), len(grads_2))
-        assert len(grads_1) == len(grads_2), (
-            f"Gradient length mismatch: {len(grads_1)} != {len(grads_2)}"
-        )
-
-        for i in range(max_len):
-            g1 = grads_1[i] if i < len(grads_1) else None
-            g2 = grads_2[i] if i < len(grads_2) else None
-
-            if g1 is not None and g2 is not None:
-                combined.append(g1.add_(g2))
-            elif g1 is not None:
-                combined.append(g1)
-            elif g2 is not None:
-                combined.append(g2)
-            else:
-                combined.append(None)
-
-    assert len(combined) == num_params, (
+    assert len(flat) == num_params, (
         f"Parameter gradient count mismatch: expected {num_params}, "
-        f"got {len(combined)}"
+        f"got {len(flat)}"
     )
-
-    return combined
+    return flat
 
 
 class TransformerBlockAutogradFunction(torch.autograd.Function):
@@ -129,7 +101,12 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
                 forward_partitions, backward_partitions,
                 forward_tensor_graph, backward_tensor_graph,
                 scheduler, config, seed_config, is_grad_enabled,
-                checkpoint_activations, *params)
+                checkpoint_activations,
+                *params_nb1, *params_nb2)  # same tensors, passed twice
+
+    Parameters are passed twice (same tensor objects) so that backward
+    can return separate gradient lists per nanobatch copy, and PyTorch's
+    autograd engine accumulates them natively via ``AccumulateGrad`` nodes.
 
     Backward return (matches forward arg order)::
 
@@ -138,7 +115,8 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
          None, None,               # forward_tensor_graph, backward_tensor_graph
          None, None, None,         # scheduler, config, seed_config
          None, None,               # is_grad_enabled, checkpoint_activations
-         *combined_grad_params)
+         *grad_params_nb1,         # grads for first copy of params
+         *grad_params_nb2)         # grads for second copy of params
     """
 
     @staticmethod
@@ -210,7 +188,11 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         func_ctx.backward_tensor_graph = backward_tensor_graph
         func_ctx.scheduler = scheduler
         func_ctx.seed_config = seed_config
-        func_ctx.num_params = len(params)
+        assert len(params) % 2 == 0, (
+            f"Expected even number of params (doubled for nanobatch "
+            f"gradient accumulation), got {len(params)}"
+        )
+        func_ctx.num_params = len(params) // 2
         func_ctx.rotary_pos_emb = rotary_pos_emb
         func_ctx.attention_mask = attention_mask
 
@@ -223,10 +205,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             # Free forward intermediates — they will be recomputed in backward.
             # Protect tensors aliased by save_for_backward and return values.
             protected = {id(h1), id(h2), id(h1_out), id(h2_out)}
-            if rotary_pos_emb is not None:
-                protected.add(id(rotary_pos_emb))
-            if attention_mask is not None:
-                protected.add(id(attention_mask))
+            protected.update(id(t) for t in (rotary_pos_emb, attention_mask) if t is not None)
             ctx_nb1.tensor_store = TensorStore()
             ctx_nb2.tensor_store = TensorStore()
             ctx_nb1.clear_saved_tensors_except(protected)
@@ -328,11 +307,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         all_grad_params_nb1: Dict[int, List] = {}
         all_grad_params_nb2: Dict[int, List] = {}
 
-        protected_tensor_ids: set = set()
-        if func_ctx.rotary_pos_emb is not None:
-            protected_tensor_ids.add(id(func_ctx.rotary_pos_emb))
-        if func_ctx.attention_mask is not None:
-            protected_tensor_ids.add(id(func_ctx.attention_mask))
+        protected_tensor_ids = {id(t) for t in (func_ctx.rotary_pos_emb, func_ctx.attention_mask) if t is not None}
 
         for partition in func_ctx.backward_partitions:
             if current_schedule is not None:
@@ -366,12 +341,10 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             else None
         )
 
-        # 5. Combine parameter gradients from both nanobatches
-        combined = _combine_param_grads(
-            all_grad_params_nb1,
-            all_grad_params_nb2,
-            func_ctx.num_params,
-        )
+        # 5. Build separate gradient lists for each nanobatch copy of params
+        num_params = func_ctx.num_params
+        grad_list_nb1 = _flatten_grad_params(all_grad_params_nb1, num_params)
+        grad_list_nb2 = _flatten_grad_params(all_grad_params_nb2, num_params)
 
         # 6. Return gradients
         # Must match forward signature:
@@ -379,7 +352,7 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
         #   forward_partitions, backward_partitions,
         #   forward_tensor_graph, backward_tensor_graph,
         #   scheduler, config, seed_config, is_grad_enabled,
-        #   checkpoint_activations, *params
+        #   checkpoint_activations, *params_nb1, *params_nb2
         return (
             dh1,     # h1
             dh2,     # h2
@@ -394,5 +367,6 @@ class TransformerBlockAutogradFunction(torch.autograd.Function):
             None,    # seed_config
             None,    # is_grad_enabled
             None,    # checkpoint_activations
-            *combined,
+            *grad_list_nb1,   # grads for first copy of params (nb1)
+            *grad_list_nb2,   # grads for second copy of params (nb2)
         )

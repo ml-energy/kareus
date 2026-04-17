@@ -376,9 +376,11 @@ class TransformerBlock(MegatronModule):
         """Get all parameters in op_id order for autograd tracking.
 
         Iterates operators in the same order as ``get_all_operators()``
-        (which matches forward graph op_id assignment order), so the
-        returned list is aligned with how ``_combine_param_grads``
-        accumulates backward gradients.
+        (which matches forward graph op_id assignment order).  The
+        returned list is passed twice to
+        ``TransformerBlockAutogradFunction.apply()`` so that backward
+        can return separate gradient lists per nanobatch, and PyTorch's
+        autograd engine accumulates them natively.
         """
         params = []
         for layer in self.layers:
@@ -507,6 +509,7 @@ class TransformerBlock(MegatronModule):
             self.seed_config,
             is_grad_enabled,
             checkpoint_activations,
+            *all_params,
             *all_params,
         )
 
