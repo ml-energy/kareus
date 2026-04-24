@@ -74,10 +74,7 @@ class BasicLinearBias(BasicLinear):
         accumulate_into_main_grad: bool = False,
         userbuffers_options=None,
         bias_fusable: bool = False,
-        use_persistent_output=False,
-        num_batches: int = 1,
-        batch_size=None,
-        seq_length=None,
+        use_allreduce_buffer: tuple[bool, bool] = (False, False),
     ) -> None:
         super().__init__(
             in_features=in_features,
@@ -92,10 +89,7 @@ class BasicLinearBias(BasicLinear):
             accumulate_into_main_grad=accumulate_into_main_grad,
             userbuffers_options=userbuffers_options,
             bias_fusable=bias_fusable,
-            use_persistent_output=use_persistent_output,
-            num_batches=num_batches,
-            batch_size=batch_size,
-            seq_length=seq_length,
+            use_allreduce_buffer=use_allreduce_buffer,
         )
 
         self.has_bias: bool = has_bias
@@ -179,9 +173,9 @@ class BasicLinearBias(BasicLinear):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
 
-        # Persistent output for backward reuse
-        if self.use_persistent_output_fwd and input_requires_grad:
-            persist_out = self.persistent_outputs_fwd[batch_idx]
+        # Persistent output for backward reuse (shared with AllReduce buffer)
+        if self.use_allreduce_buffer_fwd and input_requires_grad:
+            persist_out = self._get_persistent_output(batch_idx)
         else:
             persist_out = None
 
@@ -239,9 +233,9 @@ class BasicLinearBias(BasicLinear):
         else:
             accumulate_into_main_grad = False
 
-        # Persistent output for backward reuse
-        if self.use_persistent_output_bwd and ctx.input_requires_grad:
-            persist_out = self.persistent_outputs_bwd[ctx.batch_idx]
+        # Persistent output for backward reuse (shared with AllReduce buffer)
+        if self.use_allreduce_buffer_bwd and ctx.input_requires_grad:
+            persist_out = self._get_persistent_output(ctx.batch_idx)
         else:
             persist_out = None
 

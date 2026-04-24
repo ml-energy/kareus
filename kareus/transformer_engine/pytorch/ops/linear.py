@@ -16,7 +16,7 @@ Changes:
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -87,10 +87,7 @@ class Linear(BasicLinearBias):
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
-        use_persistent_output: Union[bool, Tuple[bool, bool]] = False,
-        num_batches: Optional[int] = 1,
-        batch_size: Optional[int] = None,
-        seq_length: Optional[int] = None,
+        use_allreduce_buffer: Tuple[bool, bool] = (False, False),
     ) -> None:
 
         apply_bias = bias and not return_bias
@@ -134,10 +131,7 @@ class Linear(BasicLinearBias):
             rng_state_tracker_function=rng_state_tracker_function,
             accumulate_into_main_grad=accumulate_into_main_grad,
             bias_fusable=bias_fusable,
-            use_persistent_output=use_persistent_output,
-            num_batches=num_batches,
-            batch_size=batch_size,
-            seq_length=seq_length,
+            use_allreduce_buffer=use_allreduce_buffer,
         )
 
         if sequence_parallel:

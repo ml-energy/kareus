@@ -98,7 +98,6 @@ class PartitionTest:
         allreduce = AllReduce(
             process_group=self.tp_group, async_op=True, backend="msccl",
             rank=self.rank, world_size=self.world_size,
-            use_persistent_output=True, input_buffer=self.allreduce_inputs,
             tensor_size=[self.seq_length, nb, self.hidden_size],
             device=self.device, dtype=self.dtype,
         )

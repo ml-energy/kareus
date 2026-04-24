@@ -2,13 +2,14 @@
 Modified from TransformerEngine
 (transformer_engine/pytorch/ops/basic/basic_linear.py).
 Changes:
-- Adds persistent output buffers (``persistent_outputs_fwd`` /
-  ``persistent_outputs_bwd``) that are pre-allocated once and reused
-  across micro-batches, eliminating per-step allocation overhead.
+- Adds ``use_allreduce_buffer`` flag that aliases the GEMM output
+  (forward) / grad_input (backward) tensor to the global ``X_AR[batch_idx]``
+  buffer registered by ``AllReduce`` (msccl backend), eliminating both the
+  per-step allocation and the post-GEMM copy into the registered AR buffer.
   ``op_forward`` / ``op_backward`` accept a ``batch_idx`` parameter to
   index into the correct buffer, and ``_functional_forward`` /
   ``_functional_backward`` accept ``out`` / ``grad_input`` arguments to
-  write directly into these pre-allocated tensors.
+  write directly into the shared tensor.
 - Adds ``bias_fusable`` flag so the downstream
   ``ForwardLinearBiasActivation`` fuser can decide whether cuBLAS
   GEMM+bias fusion is safe.
@@ -25,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 import math
-from typing import Any, Optional, List, Tuple, Union
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -50,6 +51,8 @@ from transformer_engine.pytorch.ops._common import (
     devices_match,
 )
 from transformer_engine.pytorch.utils import clear_tensor_data
+
+from .all_reduce import get_allreduce_buffer
 
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -119,10 +122,7 @@ class BasicLinear(BasicOperation):
         accumulate_into_main_grad: bool = False,
         userbuffers_options: Optional[dict[str, Any]] = None,
         bias_fusable: bool = False,
-        use_persistent_output: Union[bool, Tuple[bool, bool]] = False,
-        num_batches: int = 1,
-        batch_size: Optional[int] = None,
-        seq_length: Optional[int] = None,
+        use_allreduce_buffer: Tuple[bool, bool] = (False, False),
     ) -> None:
         super().__init__()
 
@@ -186,44 +186,27 @@ class BasicLinear(BasicOperation):
         # Whether bias is fusable
         self.bias_fusable: bool = bias_fusable
 
-        self.num_batches: int = num_batches
-        self.persistent_outputs_fwd: List[torch.Tensor] = []
-        self.persistent_outputs_bwd: List[torch.Tensor] = []
+        # Share the GEMM output (forward) / grad_input (backward) tensor with
+        # the registered AllReduce buffer X_AR[batch_idx]. Set independently
+        # for forward and backward; the buffer itself is owned and allocated
+        # by AllReduce.__init__ before any forward/backward runs.
+        assert (
+            isinstance(use_allreduce_buffer, tuple)
+            and len(use_allreduce_buffer) == 2
+            and all(isinstance(b, bool) for b in use_allreduce_buffer)
+        ), f"use_allreduce_buffer must be a (bool, bool) tuple, got {use_allreduce_buffer!r}"
+        self.use_allreduce_buffer_fwd: bool = use_allreduce_buffer[0]
+        self.use_allreduce_buffer_bwd: bool = use_allreduce_buffer[1]
 
-        if isinstance(use_persistent_output, bool):
-            use_persistent_output_fwd = use_persistent_output
-            use_persistent_output_bwd = use_persistent_output
-        else:
-            use_persistent_output_fwd = use_persistent_output[0]
-            use_persistent_output_bwd = use_persistent_output[1]
-        self.use_persistent_output_fwd: bool = use_persistent_output_fwd
-        self.use_persistent_output_bwd: bool = use_persistent_output_bwd
+    def _get_persistent_output(self, batch_idx: int) -> torch.Tensor:
+        """Return the AllReduce-shared persistent output buffer for ``batch_idx``.
 
-        if use_persistent_output_fwd:
-            assert batch_size is not None and seq_length is not None, "batch_size and seq_length must be provided when use_persistent_output is True"
-            for _ in range(num_batches):
-                persistent_output = torch.empty(
-                    seq_length,
-                    batch_size,
-                    self.local_out_features,
-                    device=device,
-                    dtype=dtype,
-                    memory_format=torch.contiguous_format
-                )
-                self.persistent_outputs_fwd.append(persistent_output)
-
-        if use_persistent_output_bwd:
-            assert batch_size is not None and seq_length is not None, "batch_size and seq_length must be provided when use_persistent_output is True"
-            for i in range(num_batches):
-                persistent_output = torch.empty(
-                    seq_length,
-                    batch_size,
-                    self.local_in_features,
-                    device=device,
-                    dtype=dtype,
-                    memory_format=torch.contiguous_format
-                )
-                self.persistent_outputs_bwd.append(persistent_output)
+        Used in both forward and backward — the lookup is identical because
+        ``X_AR[batch_idx]`` is a single buffer (shape ``[seq, batch, hidden]``)
+        that satisfies both the row-parallel forward output and the
+        column-parallel backward grad_input.
+        """
+        return get_allreduce_buffer(batch_idx)
 
     @classmethod
     def _canonicalize_tensor_parallelism(
@@ -974,8 +957,8 @@ class BasicLinear(BasicOperation):
             dtype = torch.get_autocast_dtype("cuda")
 
         # Linear forward
-        if self.use_persistent_output_fwd and input_requires_grad:
-            persist_out = self.persistent_outputs_fwd[batch_idx]
+        if self.use_allreduce_buffer_fwd and input_requires_grad:
+            persist_out = self._get_persistent_output(batch_idx)
         else:
             persist_out = None
         output, x_local, _ = BasicLinear._functional_forward(
@@ -1033,8 +1016,8 @@ class BasicLinear(BasicOperation):
             accumulate_into_main_grad = False
 
         # Linear backward pass
-        if self.use_persistent_output_bwd and ctx.input_requires_grad:
-            persist_out = self.persistent_outputs_bwd[ctx.batch_idx]
+        if self.use_allreduce_buffer_bwd and ctx.input_requires_grad:
+            persist_out = self._get_persistent_output(ctx.batch_idx)
         else:
             persist_out = None
         grad_input, grad_weight = BasicLinear._functional_backward(

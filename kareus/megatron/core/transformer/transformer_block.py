@@ -125,11 +125,12 @@ class TransformerBlock(MegatronModule):
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
 
-        # Scheduler (from config)
-        self.scheduler = getattr(self.config, 'kareus_scheduler', None)
-
         # Build tensor graphs and partitions
         self._build_partitions()
+
+    @property
+    def scheduler(self):
+        return getattr(self.config, 'kareus_scheduler', None)
 
     def _build_partitions(self):
         """Build TensorGraphs and form interleaved nanobatch partitions.

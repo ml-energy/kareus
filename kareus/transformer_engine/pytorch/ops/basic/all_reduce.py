@@ -29,6 +29,24 @@ import kareus.msccl.msccl_comm as msccl_comm
 
 X_AR: list[torch.Tensor | None] = [None, None]
 
+
+def get_allreduce_buffer(batch_idx: int) -> torch.Tensor:
+    """Return the persistent all-reduce buffer for ``batch_idx``.
+
+    The buffer is allocated by ``AllReduce.__init__`` (msccl backend), which
+    is constructed via ``transformer_block.set_tensor_parallel_group`` before
+    any forward/backward pass runs. ``BasicLinear`` (and friends) consume the
+    buffer via this getter when ``use_allreduce_buffer`` is set.
+    """
+    buf = X_AR[batch_idx]
+    assert buf is not None, (
+        f"X_AR[{batch_idx}] not allocated. AllReduce(batch_idx={batch_idx}) "
+        "must be constructed (via transformer_block.set_tensor_parallel_group) "
+        "before any BasicLinear with use_allreduce_buffer=True runs."
+    )
+    return buf
+
+
 class AllReduce(BasicOperation):
     """Modified from TransformerEngine's ``AllReduce``: adds MSCCl backend
     support, explicit stream/event synchronisation helpers, and per-batch
@@ -59,8 +77,6 @@ class AllReduce(BasicOperation):
         backend: str = "nccl",
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
-        use_persistent_output: bool = False,
-        input_buffer: Optional[torch.Tensor] = None,
         batch_idx: int = 0,
         tensor_size: Optional[list[int]] = None,
         device: Optional[torch.device] = None,
@@ -92,7 +108,7 @@ class AllReduce(BasicOperation):
 
         if self.backend == "msccl":
             if X_AR[self.batch_idx] is None:
-                X_AR[self.batch_idx] = torch.randn(
+                X_AR[self.batch_idx] = torch.empty(
                     *tensor_size, dtype=dtype, device=device,
                 )
             self.input_buffer = X_AR[self.batch_idx]

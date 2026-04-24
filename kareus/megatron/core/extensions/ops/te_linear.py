@@ -45,8 +45,6 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import is_te_min_version
 
 from megatron.core.extensions.transformer_engine import _get_extra_te_kwargs, condition_init_method
-from megatron.core.num_microbatches_calculator import get_micro_batch_size
-
 from kareus.transformer_engine.pytorch.ops import Linear
 
 
@@ -184,16 +182,11 @@ class TELinearOp(Linear):
             if parallel_mode != "duplicated":
                 rng_tracker_fn = _get_cuda_rng_tracker_fn()
         
-        # if parallel_mode == "row":
-        #     use_persistent_output_fwd = True
-        #     use_persistent_output_bwd = False
-        # else:
-        #     use_persistent_output_fwd = False
-        #     use_persistent_output_bwd = True
-        # TODO: pass allreduce buffer to Linear
-        use_persistent_output_fwd = False
-        use_persistent_output_bwd = False
-        seq_length = config.max_sequence_length // config.context_parallel_size
+        # Share the GEMM output (row-parallel forward) / grad_input
+        # (column-parallel backward) tensor with the AllReduce buffer
+        # X_AR[batch_idx] that immediately follows / precedes this linear.
+        use_ar_buffer_fwd = parallel_mode == "row" and tp_size > 1
+        use_ar_buffer_bwd = parallel_mode == "column" and tp_size > 1
 
         # Initialize the FusedOperation-based Linear layer
         super().__init__(
@@ -209,10 +202,7 @@ class TELinearOp(Linear):
             sequence_parallel=config.sequence_parallel,
             rng_state_tracker_function=rng_tracker_fn,
             accumulate_into_main_grad=False,  # Let Megatron handle gradient accumulation
-            use_persistent_output=(use_persistent_output_fwd, use_persistent_output_bwd),
-            num_batches=2,  # 2 nanobatches per microbatch
-            batch_size=get_micro_batch_size() // 2, # nanobatch size
-            seq_length=seq_length,
+            use_allreduce_buffer=(use_ar_buffer_fwd, use_ar_buffer_bwd),
         )
 
         # Handle CPU initialization if needed
