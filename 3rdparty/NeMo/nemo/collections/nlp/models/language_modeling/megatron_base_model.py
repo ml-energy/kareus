@@ -148,7 +148,7 @@ except (ImportError, ModuleNotFoundError):
 
 # [Kareus] Kareus partition-based communication scheduler
 try:
-    from kareus.scheduler import PipelineCommScheduler
+    from kareus.scheduler import PipelineCommScheduler, parse_schedule_file
     HAVE_KAREUS_SCHEDULER = True
 except (ImportError, ModuleNotFoundError):
     HAVE_KAREUS_SCHEDULER = False
@@ -740,15 +740,28 @@ class MegatronBaseModel(NLPModel):
             if not HAVE_KAREUS_SCHEDULER:
                 raise ImportError("enable_kareus_scheduler is set but kareus.scheduler is not available")
             kareus_scheduler_cfg = dict(self.cfg.get('kareus_scheduler_kwargs', dict()))
-            if 'solution_path' not in kareus_scheduler_cfg:
-                raise ValueError("solution_path is not set")
-            solution_path = kareus_scheduler_cfg['solution_path']
-            self.kareus_scheduler = PipelineCommScheduler(
-                configs_pipeline=solution_path,
+            use_ac = self.cfg.get('activations_checkpoint_granularity', None) is not None
+            cp = self.cfg.get('context_parallel_size', 1) > 1
+
+            # Rank 0 reads the schedule file and broadcasts the parsed list to
+            # all other ranks, so non-rank-0 nodes don't need the file on disk.
+            if torch.distributed.get_rank() == 0:
+                solution_path = kareus_scheduler_cfg.get('solution_path')
+                if not solution_path:
+                    raise ValueError("kareus_scheduler_kwargs.solution_path must be set on rank 0")
+                parsed = parse_schedule_file(Path(solution_path), use_ac, cp)
+                payload = [parsed]
+            else:
+                payload = [None]
+            torch.distributed.broadcast_object_list(payload, src=0)
+            parsed = payload[0]
+
+            self.kareus_scheduler = PipelineCommScheduler.from_parsed(
+                parsed=parsed,
                 pp_rank=parallel_state.get_pipeline_model_parallel_rank(),
                 num_microbatches=get_num_microbatches(),
-                use_activation_checkpointing=self.cfg.get('activations_checkpoint_granularity', None) is not None,
-                context_parallel=self.cfg.get('context_parallel_size', 1) > 1,
+                use_activation_checkpointing=use_ac,
+                context_parallel=cp,
             )
             # print(self.model)
             if isinstance(self.model, list):

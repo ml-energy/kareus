@@ -203,6 +203,13 @@ for i in "${!CONFIGS[@]}"; do
     TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_kareus.log"
     echo "    Running Kareus training (node_rank=${NODE_RANK})..."
 
+    # Only rank 0 reads the schedule file; other ranks receive it via
+    # torch.distributed broadcast during scheduler init.
+    KAREUS_OVERRIDES=()
+    if [[ "${NODE_RANK}" == "0" ]]; then
+        KAREUS_OVERRIDES+=("model.kareus_scheduler_kwargs.solution_path=${scheds_path}")
+    fi
+
     torchrun \
         --nproc_per_node=8 \
         --nnodes=2 \
@@ -221,7 +228,7 @@ for i in "${!CONFIGS[@]}"; do
         model.enable_power_monitor=False \
         model.enable_perseus_optimizer=True \
         model.enable_kareus_scheduler=True \
-        "model.kareus_scheduler_kwargs.solution_path=${scheds_path}" \
+        "${KAREUS_OVERRIDES[@]}" \
         2>&1 | tee "${TRAIN_LOG}"
 
     echo "    Resetting GPU clocks"
