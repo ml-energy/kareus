@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Toy Kareus test: CSV gen → optimization → PFO + Kareus training
+# Toy Kareus test: BO profiling → CSV gen → optimization → PFO + Kareus training
 # for 4 GPUs (1 node), PP=2, TP=2.
-#
-# Prerequisites (run separately):
-#   1. BO partition profiling + nonpartition prepost:
-#        bash tests/toy/kareus_run_bayesian.sh
 #
 # Usage:
 #   bash run_kareus.sh [config_name]
@@ -16,11 +12,12 @@
 #   PFO_PORT      (default 7787)
 #
 # Per-config flow:
-#   1. CSV gen     – generate_profile_csv.py  (from BO logs + prepost)
-#   2. Optimise    – run_optimization.py      (Phillips-Dessouky)
-#   3. PFO server  – uvicorn with largest freqs_pipeline_*.py
-#   4. Training    – torchrun with Kareus model + enable_kareus_scheduler=True
-#   5. Cleanup     – collect outputs, stop PFO server
+#   1. BO profiling – kareus_run_bayesian.sh (skip if results ready)
+#   2. CSV gen      – generate_profile_csv.py  (from BO logs + prepost)
+#   3. Optimise     – run_optimization.py      (Phillips-Dessouky)
+#   4. Find largest solution + start PFO server (uvicorn)
+#   5. Training     – torchrun with Kareus model + enable_kareus_scheduler=True
+#   6. Cleanup      – collect outputs, stop PFO server
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,8 +50,8 @@ PREPOST_DIR="${SCRIPT_DIR}/../bayesian"
 
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
 config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
-RESULTS_DIR="${NEMO_DIR}/${config_tag}/lowtime"
 OUTPUT_DIR="${NEMO_DIR}/${config_tag}/kareus"
+RESULTS_DIR="${OUTPUT_DIR}/lowtime"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
 mkdir -p "${RESULTS_DIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
@@ -64,7 +61,64 @@ echo "Config: ${CFG}  Model: ${MODEL_NAME}"
 echo ""
 
 ########################################
-# Phase 1: CSV generation              #
+# Phase 1: Bayesian profiling          #
+########################################
+#
+# Skip if every expected BO artefact is already on disk:
+#   - eval_results.jsonl for each of the 4 partitions (cp=1 toy)
+#   - the nonpartition prepost CSVs (preprocess/postprocess/loss + backwards)
+#     for at least one frequency.
+
+BO_LOGS_DIR="${BAYESIAN_DIR}/logs/${MODEL_NAME}/cp${CP}-tp${TP}-bs${MBS}-seq${SEQ}"
+BO_PARTITIONS=(fwd_attn fwd_mlp bwd_attn bwd_mlp)
+BO_PREPOST_FILES=(
+    preprocess_energy.csv
+    postprocess_energy.csv
+    loss_energy.csv
+    preprocess_backward_energy.csv
+    postprocess_backward_energy.csv
+)
+
+bo_ready=1
+for part in "${BO_PARTITIONS[@]}"; do
+    if [[ ! -f "${BO_LOGS_DIR}/${part}/eval_results.jsonl" ]]; then
+        echo "BO missing: ${BO_LOGS_DIR}/${part}/eval_results.jsonl"
+        bo_ready=0
+        break
+    fi
+done
+
+if (( bo_ready )); then
+    np_dir="${BO_LOGS_DIR}/nonpartition"
+    if [[ ! -d "${np_dir}" ]]; then
+        echo "BO missing: ${np_dir}"
+        bo_ready=0
+    else
+        np_freq_dir="$(ls -d "${np_dir}"/*/ 2>/dev/null | head -n 1 || true)"
+        if [[ -z "${np_freq_dir}" ]]; then
+            echo "BO missing: no frequency subdirs under ${np_dir}"
+            bo_ready=0
+        else
+            for f in "${BO_PREPOST_FILES[@]}"; do
+                if [[ ! -f "${np_freq_dir%/}/${f}" ]]; then
+                    echo "BO missing: ${np_freq_dir%/}/${f}"
+                    bo_ready=0
+                    break
+                fi
+            done
+        fi
+    fi
+fi
+
+if (( bo_ready )); then
+    echo "BO results already exist under ${BO_LOGS_DIR} — skipping Phase 1"
+else
+    echo "Running Bayesian profiling (kareus_run_bayesian.sh)..."
+    bash "${SCRIPT_DIR}/kareus_run_bayesian.sh"
+fi
+
+########################################
+# Phase 2: CSV generation              #
 ########################################
 
 PROFILE_CSV="${OUTPUT_DIR}/profile.csv"
@@ -86,7 +140,7 @@ else
 fi
 
 ########################################
-# Phase 2: Optimization                #
+# Phase 3: Optimization                #
 ########################################
 
 if ! compgen -G "${RESULTS_DIR}/freqs_pipeline_*.py" > /dev/null 2>&1; then
@@ -101,8 +155,8 @@ else
 fi
 
 ########################################
-# Phase 3: Find largest solution       #
-# Phase 4: Start PFO server            #
+# Phase 4: Find largest solution       #
+#          Start PFO server            #
 ########################################
 
 freqs_path="$(ls "${RESULTS_DIR}"/freqs_pipeline_*.py 2>/dev/null | sort -V | tail -n 1 || true)"

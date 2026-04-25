@@ -1,85 +1,60 @@
 #!/usr/bin/env bash
-# Automated Perseus test: profiling → CSV → optimization → PFO + training
-# for 10 configs on 16 GPUs (2 nodes × 8 GPUs), PP=2, microbatches=8.
+# Artifact Perseus on 16 GPUs (2 nodes x 8 GPUs A100), PP=2, microbatches=8.
+# Per-config flow: profiling -> CSV -> optimization -> PFO server + training.
 #
 # Usage:
-#   MASTER_ADDR=<node0_ip> bash run_all_configs.sh <node_rank>
+#   MASTER_ADDR=<node0_ip> bash run_perseus.sh <node_rank>
 #
-#   node_rank   0 or 1
-#   MASTER_ADDR (required) IP/hostname of node 0
-#   MASTER_PORT (optional, default 6000)
-#   REMOTE_USER (optional, default ubuntu) – used by node 1 for scp
-#   REMOTE_BASE_DIR (optional) – target dir on node 0 for synced results
-#   SSH_KEY_PATH (optional, default ~/.ssh/ruofanw.pem) – key for scp
-#
-# Per-config flow:
-#   1. Profiling   – frequency sweep (skip if .profiling_complete exists)
-#   2. CSV gen     – generate_profile_csv.py  (node 0 only)
-#   3. Optimise    – run_optimization.py      (node 0 only)
-#   4. PFO server  – uvicorn on node 0 with largest freqs_pipeline_*.py
-#   5. Training    – torchrun with enable_perseus_optimizer=True
-#   6. Collection  – move outputs, node 1 SCPs to node 0
-#
-# Configurations:
-#
-#   Model           Parallelism  MBS  Seq   GBS
-#   ─────────────── ─────────── ──── ───── ────
-#   Llama 3.2 3B    TP8          8   4096   64
-#   Llama 3.2 3B    CP2+TP4      8   4096   64
-#   Llama 3.2 3B    CP2+TP4      8   8192   64
-#   Llama 3.2 3B    CP2+TP4     16   4096  128
-#   Qwen 3 1.7B     TP8          8   4096   64
-#   Qwen 3 1.7B     TP8          8   8192   64
-#   Qwen 3 1.7B     TP8         16   4096  128
-#   Qwen 3 1.7B     CP2+TP4      8   4096   64
-#   Qwen 3 1.7B     CP2+TP4      8   8192   64
-#   Qwen 3 1.7B     CP2+TP4     16   4096  128
+# Env vars:
+#   MASTER_ADDR     (required) IP/hostname of node 0
+#   MASTER_PORT     (default 6000)
+#   PFO_PORT        (default 7787)
+#   CONFIG_MODE     full | single   (default full)
+#   SKIP_PROFILING  true | false    (default false)
+#                   When true, skip profiling/CSV/optimization and load
+#                   precomputed solutions from
+#                   ../perseus/schedules/<model_name>/<config_tag>/freqs_pipeline_*.py
+#   REMOTE_USER, REMOTE_BASE_DIR, SSH_KEY_PATH (multi-node scp)
 set -euo pipefail
-
-########################################
-# Argument: node_rank (0 or 1)         #
-########################################
 
 NODE_RANK="${1:-}"
 if [[ -z "${NODE_RANK}" ]]; then
   echo "Usage: $0 <node_rank(0|1)>" >&2
   exit 1
 fi
-
 if [[ "${NODE_RANK}" != "0" && "${NODE_RANK}" != "1" ]]; then
   echo "ERROR: node_rank must be 0 or 1, got '${NODE_RANK}'" >&2
   exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./env.sh
+[[ -f "${SCRIPT_DIR}/env.sh" ]] && source "${SCRIPT_DIR}/env.sh"
 cd "$SCRIPT_DIR"
 
-########################################
-# Configuration                        #
-########################################
-
 if [[ -z "${MASTER_ADDR:-}" ]]; then
-  echo "ERROR: MASTER_ADDR must be set (IP or hostname of node 0)" >&2
+  echo "ERROR: MASTER_ADDR must be set (in env.sh or via env var)" >&2
   exit 1
 fi
 MASTER_PORT="${MASTER_PORT:-6000}"
+PFO_PORT="${PFO_PORT:-7787}"
+CONFIG_MODE="${CONFIG_MODE:-full}"
+SKIP_PROFILING="${SKIP_PROFILING:-false}"
 
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/perseus}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}"
 
-export MASTER_ADDR
-export MASTER_PORT
-export REMOTE_USER
-export REMOTE_BASE_DIR
-export SSH_KEY_PATH
+export MASTER_ADDR MASTER_PORT REMOTE_USER REMOTE_BASE_DIR SSH_KEY_PATH
+
+PERSEUS_DIR="${SCRIPT_DIR}/../perseus"
+SCHEDULES_DIR="${PERSEUS_DIR}/schedules"
 
 PP=2
 NUM_MICROBATCHES=8
-PFO_PORT=7787
 
 # config_name  CP  TP  MBS  SEQ
-CONFIGS=(
+CONFIGS_FULL=(
     "megatron_llama3.2_3b_config  1  8  8   4096"
     "megatron_llama3.2_3b_config  2  4  8   4096"
     "megatron_llama3.2_3b_config  2  4  8   8192"
@@ -92,10 +67,27 @@ CONFIGS=(
     "megatron_qwen3_1.7b_config   2  4  16  4096"
 )
 
+case "${CONFIG_MODE}" in
+    full)   CONFIGS=("${CONFIGS_FULL[@]}") ;;
+    single) CONFIGS=("${CONFIGS_FULL[0]}") ;;
+    *) echo "ERROR: CONFIG_MODE must be 'full' or 'single'" >&2; exit 1 ;;
+esac
+
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "$LOG_DIR"
 
-echo "===== Perseus 16-GPU Automated Tests (PP=${PP}, #microbatches=${NUM_MICROBATCHES}) ====="
+PFO_PID=""
+cleanup() {
+    if [[ -n "${PFO_PID:-}" ]] && ps -p "${PFO_PID}" > /dev/null 2>&1; then
+        echo "Stopping PFO server PID ${PFO_PID}"
+        kill "${PFO_PID}" || true
+        wait "${PFO_PID}" 2>/dev/null || true
+    fi
+    nvidia-smi -i 0,1,2,3,4,5,6,7 --reset-gpu-clocks || true
+}
+trap cleanup EXIT
+
+echo "===== Artifact Perseus 16-GPU Tests (CONFIG_MODE=${CONFIG_MODE} SKIP_PROFILING=${SKIP_PROFILING}) ====="
 echo "Total configurations: ${#CONFIGS[@]}"
 echo ""
 
@@ -108,8 +100,8 @@ for i in "${!CONFIGS[@]}"; do
     config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
 
     NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
-    PROFILE_DIR="${NEMO_DIR}/${config_tag}/profiling"
-    RESULTS_DIR="${NEMO_DIR}/${config_tag}/lowtime"
+    PROFILE_DIR="${NEMO_DIR}/${config_tag}/perseus/profiling"
+    RESULTS_DIR="${NEMO_DIR}/${config_tag}/perseus/lowtime"
     OUTPUT_DIR="${NEMO_DIR}/${config_tag}/perseus"
 
     mkdir -p "${PROFILE_DIR}" "${RESULTS_DIR}" "${OUTPUT_DIR}"
@@ -117,67 +109,77 @@ for i in "${!CONFIGS[@]}"; do
     echo ">>> Config $((i+1))/${#CONFIGS[@]}: ${CFG} cp${CP}_tp${TP} MBS=${MBS} SEQ=${SEQ} GBS=${GBS}"
 
     ########################################
-    # Phase 1: Profiling (skip if done)    #
+    # Locate freqs_pipeline_*.py           #
     ########################################
 
-    PROFILING_MARKER="${PROFILE_DIR}/.profiling_complete"
-
-    if [[ -f "${PROFILING_MARKER}" ]]; then
-        echo "    Profiling already done (${PROFILING_MARKER} exists) — skipping"
+    if [[ "${SKIP_PROFILING}" == "true" ]]; then
+        SCHED_DIR="${SCHEDULES_DIR}/${nemo_model_name}/${config_tag}"
+        freqs_path="$(ls "${SCHED_DIR}"/freqs_pipeline_*.py 2>/dev/null | sort -V | tail -n 1 || true)"
+        if [[ -z "${freqs_path}" ]]; then
+            echo "    ERROR: SKIP_PROFILING=true but no freqs_pipeline_*.py found in ${SCHED_DIR}" >&2
+            exit 1
+        fi
+        echo "    Using precomputed solution: ${freqs_path}"
     else
-        echo "    Starting frequency profiling..."
-        bash "${SCRIPT_DIR}/run_profiling.sh" "${NODE_RANK}" "${CFG}" "${CP}" "${TP}" "${MBS}" "${SEQ}"
+        ########################################
+        # Phase 1: Profiling                   #
+        ########################################
+        PROFILING_MARKER="${PROFILE_DIR}/.profiling_complete"
+        if [[ -f "${PROFILING_MARKER}" ]]; then
+            echo "    Profiling already done (${PROFILING_MARKER} exists) — skipping"
+        else
+            echo "    Starting frequency profiling..."
+            bash "${SCRIPT_DIR}/megatron_perseus_run_profiling.sh" "${NODE_RANK}" "${CFG}" "${CP}" "${TP}" "${MBS}" "${SEQ}"
+        fi
+
+        ########################################
+        # Phase 2+3: CSV gen + Optimise        #
+        # (node 0 only)                        #
+        ########################################
+        PROFILE_CSV="${PROFILE_DIR}/profile.csv"
+        if [[ "${NODE_RANK}" == "0" ]]; then
+            if [[ ! -f "${PROFILE_CSV}" ]]; then
+                echo "    Generating profile CSV..."
+                NUM_RANKS_PER_STAGE=$(( CP * TP ))
+                python "${PERSEUS_DIR}/generate_profile_csv.py" \
+                    --profile_dir="${PROFILE_DIR}" \
+                    --num_ranks_per_stage="${NUM_RANKS_PER_STAGE}" \
+                    --num_microbatches="${NUM_MICROBATCHES}"
+            else
+                echo "    Profile CSV exists: ${PROFILE_CSV}"
+            fi
+
+            if ! compgen -G "${RESULTS_DIR}/freqs_pipeline_*.py" > /dev/null 2>&1; then
+                echo "    Running optimisation..."
+                python "${PERSEUS_DIR}/run_optimization.py" \
+                    --inst_profile="${PROFILE_CSV}" \
+                    --output_dir="${RESULTS_DIR}" \
+                    --num_mbs="${NUM_MICROBATCHES}" \
+                    --num_stages="${PP}" \
+                    --p2p_power=85.0
+            else
+                echo "    Optimisation results exist in: ${RESULTS_DIR}"
+            fi
+        fi
+
+        freqs_path=""
+        if [[ "${NODE_RANK}" == "0" ]]; then
+            freqs_path="$(ls "${RESULTS_DIR}"/freqs_pipeline_*.py 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [[ -z "${freqs_path}" ]]; then
+                echo "    ERROR: No freqs_pipeline_*.py found in ${RESULTS_DIR}" >&2
+                echo "    Skipping Perseus training for this config." >&2
+                continue
+            fi
+            echo "    Using solution: ${freqs_path}"
+        fi
     fi
 
     ########################################
-    # Phase 2+3: CSV gen + Optimise        #
-    # (node 0 only, skip if already done)  #
-    ########################################
-
-    PROFILE_CSV="${PROFILE_DIR}/profile.csv"
-
-    if [[ "${NODE_RANK}" == "0" ]]; then
-        if [[ ! -f "${PROFILE_CSV}" ]]; then
-            echo "    Generating profile CSV..."
-            NUM_RANKS_PER_STAGE=$(( CP * TP ))
-            python "${SCRIPT_DIR}/generate_profile_csv.py" \
-                --profile_dir="${PROFILE_DIR}" \
-                --num_ranks_per_stage="${NUM_RANKS_PER_STAGE}" \
-                --num_microbatches="${NUM_MICROBATCHES}"
-        else
-            echo "    Profile CSV exists: ${PROFILE_CSV}"
-        fi
-
-        if ! compgen -G "${RESULTS_DIR}/freqs_pipeline_*.py" > /dev/null 2>&1; then
-            echo "    Running optimisation..."
-            python "${SCRIPT_DIR}/run_optimization.py" \
-                --inst_profile="${PROFILE_CSV}" \
-                --output_dir="${RESULTS_DIR}" \
-                --num_mbs="${NUM_MICROBATCHES}" \
-                --num_stages="${PP}"
-        else
-            echo "    Optimisation results exist in: ${RESULTS_DIR}"
-        fi
-    fi
-
-    ########################################
-    # Phase 4: Find largest solution       #
-    # Phase 5: Start PFO server (node 0)   #
+    # PFO server (node 0)                  #
     ########################################
 
     PFO_PID=""
-
     if [[ "${NODE_RANK}" == "0" ]]; then
-        freqs_path="$(ls "${RESULTS_DIR}"/freqs_pipeline_*.py 2>/dev/null | sort -V | tail -n 1 || true)"
-
-        if [[ -z "${freqs_path}" ]]; then
-            echo "    ERROR: No freqs_pipeline_*.py found in ${RESULTS_DIR}" >&2
-            echo "    Skipping Perseus training for this config." >&2
-            continue
-        fi
-
-        echo "    Using solution: ${freqs_path}"
-
         server_log="${OUTPUT_DIR}/pfo_server.log"
         echo "    Starting PFO server on ${MASTER_ADDR}:${PFO_PORT}"
         ZEUS_PFO_SCHEDULER=PointSolution3D \
@@ -188,14 +190,14 @@ for i in "${!CONFIGS[@]}"; do
             > "${server_log}" 2>&1 &
         PFO_PID=$!
         echo "    PFO server PID: ${PFO_PID}"
+        sleep 5
     fi
 
     ########################################
-    # Phase 6: Perseus training            #
+    # Training                             #
     ########################################
 
     TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_perseus.log"
-
     echo "    Running Perseus training (node_rank=${NODE_RANK})..."
 
     torchrun \
@@ -222,11 +224,10 @@ for i in "${!CONFIGS[@]}"; do
     nvidia-smi -i 0,1,2,3,4,5,6,7 --reset-gpu-clocks
 
     ########################################
-    # Phase 7: Collect outputs + cleanup   #
+    # Collection + cleanup                 #
     ########################################
 
     if [[ "${NODE_RANK}" == "0" ]]; then
-        echo "    Moving NeMo experiment outputs into ${OUTPUT_DIR}"
         chmod a+w "${OUTPUT_DIR}"
 
         if compgen -G "${NEMO_DIR}/20*" > /dev/null; then
@@ -247,7 +248,6 @@ for i in "${!CONFIGS[@]}"; do
             mv "${NEMO_DIR}"/*.txt "${OUTPUT_DIR}/"
         fi
 
-        # Stop PFO server
         if [[ -n "${PFO_PID}" ]] && ps -p "${PFO_PID}" > /dev/null 2>&1; then
             echo "    Stopping PFO server PID ${PFO_PID}"
             kill "${PFO_PID}" || true
@@ -255,21 +255,15 @@ for i in "${!CONFIGS[@]}"; do
         fi
 
         echo "    Node 0 done – outputs: ${OUTPUT_DIR}"
-
     else
-        echo "    Moving NeMo experiment text logs into ${OUTPUT_DIR}"
-
         if compgen -G "${NEMO_DIR}/*.txt" > /dev/null; then
             mv "${NEMO_DIR}"/*.txt "${OUTPUT_DIR}/"
         fi
 
         remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config_tag}/perseus"
-        echo "    Syncing results from node 1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
-
         sleep 5
         scp -i "${SSH_KEY_PATH}" -r "${OUTPUT_DIR}/"* \
             "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
-
         echo "    Node 1 done – synced to: ${remote_dir}"
     fi
 

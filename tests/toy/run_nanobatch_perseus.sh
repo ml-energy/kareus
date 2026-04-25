@@ -38,16 +38,21 @@ PFO_PORT="${PFO_PORT:-7787}"
 
 PP=2
 TP=2
+CP=1
 NUM_MICROBATCHES=4
 MBS=4
+SEQ=2048
 GBS=$(( MBS * NUM_MICROBATCHES ))
 
 nemo_model_name="${CFG%_config}"
 
+NANOBATCH_PERSEUS_DIR="${SCRIPT_DIR}/../nanobatching_perseus"
+
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
-PROFILE_DIR="${NEMO_DIR}/tp${TP}_mbs${MBS}/profiling"
-RESULTS_DIR="${NEMO_DIR}/tp${TP}_mbs${MBS}/lowtime"
-OUTPUT_DIR="${NEMO_DIR}/tp${TP}_mbs${MBS}/nanobatch_perseus"
+config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
+PROFILE_DIR="${NEMO_DIR}/${config_tag}/nanobatch_perseus/profiling"
+RESULTS_DIR="${NEMO_DIR}/${config_tag}/nanobatch_perseus/lowtime"
+OUTPUT_DIR="${NEMO_DIR}/${config_tag}/nanobatch_perseus"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
 mkdir -p "${PROFILE_DIR}" "${RESULTS_DIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
@@ -66,7 +71,7 @@ if [[ -f "${PROFILING_MARKER}" ]]; then
     echo "Profiling already done (${PROFILING_MARKER} exists) — skipping"
 else
     echo "Starting frequency profiling..."
-    bash "${SCRIPT_DIR}/nanobatch_perseus_run_profiling.sh" "${CFG}" "${TP}" "${MBS}"
+    bash "${SCRIPT_DIR}/nanobatch_perseus_run_profiling.sh" "${CFG}" "${CP}" "${TP}" "${MBS}" "${SEQ}"
 fi
 
 ########################################
@@ -77,21 +82,24 @@ PROFILE_CSV="${PROFILE_DIR}/profile.csv"
 
 if [[ ! -f "${PROFILE_CSV}" ]]; then
     echo "Generating profile CSV..."
-    python "${SCRIPT_DIR}/perseus_generate_profile_csv.py" \
+    python "${NANOBATCH_PERSEUS_DIR}/generate_profile_csv.py" \
         --profile_dir="${PROFILE_DIR}" \
         --num_ranks_per_stage="${TP}" \
-        --num_microbatches="${NUM_MICROBATCHES}"
+        --num_microbatches="${NUM_MICROBATCHES}" \
+        --num_prof_iters=10 \
+        --warmup_iters=5
 else
     echo "Profile CSV exists: ${PROFILE_CSV}"
 fi
 
 if ! compgen -G "${RESULTS_DIR}/freqs_pipeline_*.py" > /dev/null 2>&1; then
     echo "Running optimisation..."
-    python "${SCRIPT_DIR}/perseus_run_optimization.py" \
+    python "${NANOBATCH_PERSEUS_DIR}/run_optimization.py" \
         --inst_profile="${PROFILE_CSV}" \
         --output_dir="${RESULTS_DIR}" \
         --num_mbs="${NUM_MICROBATCHES}" \
-        --num_stages="${PP}"
+        --num_stages="${PP}" \
+        --p2p_power=70.0
 else
     echo "Optimisation results exist in: ${RESULTS_DIR}"
 fi
@@ -125,7 +133,7 @@ echo "PFO server PID: ${PFO_PID}"
 # Phase 6: Nanobatch+Perseus training #
 ########################################
 
-TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_tp${TP}_mbs${MBS}_nanobatch_perseus.log"
+TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_nanobatch_perseus.log"
 
 echo "Running Nanobatch+Perseus training..."
 

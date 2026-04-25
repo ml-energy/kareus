@@ -19,7 +19,7 @@ class CommConfig:
     resource_shape: ResourceShape
 
 
-_TRAIL_CONFIG = CommConfig(overlap_window=("norm", "none"), resource_shape=(20, 1024))
+_TRAIL_CONFIG = CommConfig(overlap_window=("norm_0", "none"), resource_shape=(20, 1024))
 
 @dataclass(frozen=True)
 class ScheduleItem:

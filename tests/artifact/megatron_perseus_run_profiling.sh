@@ -3,22 +3,20 @@ set -euo pipefail
 
 ########################################
 # Frequency-sweep profiling for one    #
-# config on 2 nodes × 8 GPUs.         #
+# config on 2 nodes x 8 GPUs A100.     #
 ########################################
 #
-# Usage (called by run_all_configs.sh):
-#   bash run_profiling.sh <node_rank> <config_name> <CP> <TP> <MBS> <SEQ>
+# Usage (called by run_perseus.sh):
+#   bash megatron_perseus_run_profiling.sh <node_rank> <config_name> <CP> <TP> <MBS> <SEQ>
 #
 # Required env vars: MASTER_ADDR, MASTER_PORT
 # Optional env vars: REMOTE_USER, REMOTE_BASE_DIR, SSH_KEY_PATH
+#                    FREQ_START (default 1410), FREQ_END (default 900), FREQ_STEP (default 30)
 #
-# This script:
-#   - Sweeps GPU frequency from 1410 down to 900 MHz (step -30)
-#   - Runs torchrun at each frequency with enable_megatron_timers=True
-#   - Organises timer/energy outputs into profiling/{freq}/timers/
-#   - Groups everything under node0/ or node1/
-#   - Node 1 SCPs its results back to node 0
-#   - Touches .profiling_complete marker when done
+# Sweeps GPU frequency from FREQ_START down to FREQ_END (step -FREQ_STEP).
+# Runs torchrun at each frequency with enable_megatron_timers=True.
+# Organises timer/energy outputs into profiling/node{0,1}/{freq}/timers/.
+# Node 1 SCPs its results back to node 0.  Touches .profiling_complete when done.
 
 NODE_RANK="${1:?Usage: $0 <node_rank> <config_name> <CP> <TP> <MBS> <SEQ>}"
 CFG="${2:?}"
@@ -33,11 +31,13 @@ if [[ "${NODE_RANK}" != "0" && "${NODE_RANK}" != "1" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./env.sh
+[[ -f "${SCRIPT_DIR}/env.sh" ]] && source "${SCRIPT_DIR}/env.sh"
 
-: "${MASTER_ADDR:?MASTER_ADDR must be set}"
+: "${MASTER_ADDR:?MASTER_ADDR must be set (in env.sh or via env var)}"
 : "${MASTER_PORT:?MASTER_PORT must be set}"
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-~/workspace/Kareus/tests/perseus}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}"
 
 NUM_MICROBATCHES=8
@@ -46,26 +46,23 @@ GBS=$(( MBS * NUM_MICROBATCHES ))
 nemo_model_name="${CFG%_config}"
 config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
-PROFILE_DIR="${NEMO_DIR}/${config_tag}/profiling"
+PROFILE_DIR="${NEMO_DIR}/${config_tag}/perseus/profiling"
 
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}" "${PROFILE_DIR}"
 
-FREQ_START=1410
-FREQ_END=900
-FREQ_STEP=30
+FREQ_START="${FREQ_START:-1410}"
+FREQ_END="${FREQ_END:-900}"
+FREQ_STEP="${FREQ_STEP:-30}"
 
 echo "===== Profiling: ${CFG} ${config_tag} node_rank=${NODE_RANK} ====="
-
-########################################
-# Frequency sweep                      #
-########################################
+echo "Frequency range: ${FREQ_START} -> ${FREQ_END} MHz (step ${FREQ_STEP})"
 
 for frequency in $(seq ${FREQ_START} -${FREQ_STEP} ${FREQ_END}); do
     echo "  Setting GPU frequency to ${frequency} MHz"
     nvidia-smi -i 0,1,2,3,4,5,6,7 --lock-gpu-clocks="${frequency},${frequency}"
 
-    PROF_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_prof_${frequency}.log"
+    PROF_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_perseus_prof_${frequency}.log"
 
     torchrun \
         --nproc_per_node=8 \
@@ -83,10 +80,6 @@ for frequency in $(seq ${FREQ_START} -${FREQ_STEP} ${FREQ_END}); do
         model.enable_megatron_timers=True \
         model.enable_zeus_monitor=False \
         2>&1 | tee "${PROF_LOG}"
-
-    ########################################
-    # Collect outputs per frequency        #
-    ########################################
 
     if [[ "${NODE_RANK}" == "0" ]]; then
         freq_dir="${PROFILE_DIR}/node0/${frequency}"
@@ -115,10 +108,6 @@ for frequency in $(seq ${FREQ_START} -${FREQ_STEP} ${FREQ_END}); do
     sleep 5
 done
 
-########################################
-# Reset clocks                         #
-########################################
-
 echo "Resetting GPU clocks"
 nvidia-smi -i 0,1,2,3,4,5,6,7 --reset-gpu-clocks
 
@@ -132,20 +121,12 @@ fi
 
 echo "Profiling complete for node${NODE_RANK}. Results under ${target_dir}"
 
-########################################
-# Node 1: sync to node 0              #
-########################################
-
 if [[ "${NODE_RANK}" == "1" ]]; then
-    remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config_tag}/profiling/"
+    remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config_tag}/perseus/profiling/"
     echo "Syncing profiling results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
     scp -i "${SSH_KEY_PATH}" -r "${target_dir}/." \
         "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir%/}/node1/"
 fi
-
-########################################
-# Mark profiling done                  #
-########################################
 
 sleep 5
 touch "${PROFILE_DIR}/.profiling_complete"

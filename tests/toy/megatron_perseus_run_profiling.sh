@@ -7,7 +7,7 @@ set -euo pipefail
 ########################################
 #
 # Usage (called by run_perseus.sh):
-#   bash run_profiling.sh <config_name> <TP> <MBS>
+#   bash megatron_perseus_run_profiling.sh <config_name> <CP> <TP> <MBS> <SEQ>
 #
 # Environment variables (optional):
 #   MASTER_PORT   (default 6000)
@@ -21,10 +21,11 @@ set -euo pipefail
 #   - Organises timer/energy outputs into profiling/node0/{freq}/timers/
 #   - Touches .profiling_complete marker when done
 
-CFG="${1:?Usage: $0 <config_name> <TP> <MBS> <SEQ>}"
-TP="${2:?}"
-MBS="${3:?}"
-SEQ="${4:?}"
+CFG="${1:?Usage: $0 <config_name> <CP> <TP> <MBS> <SEQ>}"
+CP="${2:?}"
+TP="${3:?}"
+MBS="${4:?}"
+SEQ="${5:?}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -35,7 +36,8 @@ GBS=$(( MBS * NUM_MICROBATCHES ))
 
 nemo_model_name="${CFG%_config}"
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
-PROFILE_DIR="${NEMO_DIR}/tp${TP}_mbs${MBS}_seq${SEQ}/profiling"
+config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
+PROFILE_DIR="${NEMO_DIR}/${config_tag}/perseus/profiling"
 
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}" "${PROFILE_DIR}"
@@ -44,7 +46,7 @@ FREQ_START="${FREQ_START:-1740}"
 FREQ_END="${FREQ_END:-900}"
 FREQ_STEP="${FREQ_STEP:-60}"
 
-echo "===== Profiling: ${CFG} tp${TP}_mbs${MBS}_seq${SEQ} (4 GPUs, 1 node) ====="
+echo "===== Profiling: ${CFG} ${config_tag} (4 GPUs, 1 node) ====="
 echo "Frequency range: ${FREQ_START} → ${FREQ_END} MHz (step ${FREQ_STEP})"
 
 ########################################
@@ -55,7 +57,7 @@ for frequency in $(seq ${FREQ_START} -${FREQ_STEP} ${FREQ_END}); do
     echo "  Setting GPU frequency to ${frequency} MHz"
     nvidia-smi -i 0,1,2,3 --lock-gpu-clocks="${frequency},${frequency}"
 
-    PROF_LOG="${LOG_DIR}/${nemo_model_name}_tp${TP}_mbs${MBS}_seq${SEQ}_prof_${frequency}.log"
+    PROF_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_perseus_prof_${frequency}.log"
 
     torchrun \
         --nproc_per_node=4 \
