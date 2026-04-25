@@ -13,19 +13,48 @@ Reads nonpartition prepost results from:
 
 from __future__ import annotations
 
-import argparse
 import json
 import warnings
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 import os
 
 import sys
 
 import numpy as np
 import pandas as pd
+import tyro
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bayesian'))
 from common.model_config import get_model_config, GPU_CONFIGS, get_p2p_power
+
+
+@dataclass
+class Args:
+    # Name of the model (must exist in model_config.MODEL_REGISTRY)
+    model_name: str
+    # Tensor-parallel size
+    tensor_parallel_size: int
+    # Context-parallel size. 1 = non-CP mode, >1 = CP mode
+    context_parallel_size: int
+    # Number of pipeline-parallel stages
+    pipeline_parallel_size: int
+    # Micro batch size
+    batch_size: int
+    # Sequence length
+    seq_len: int
+    # Directory containing BO results
+    bayesian_profile_dir: str = "../bayesian"
+    # Directory containing nonpartition prepost profiling results
+    prepost_profile_dir: str = "../bayesian"
+    # Directory to write the output profile CSV into
+    output_dir: str = "."
+    # GPU type for p2p_power lookup
+    gpu_type: Literal["A40", "A100"] = "A100"
+    # Generate backward candidates with recompute-forward configs
+    use_activation_checkpointing: bool = True
+    # Scale sum_time and sum_energy by 1.15
+    scale_time_energy: bool = True
 
 
 def _read_time_energy_csv(path: str) -> tuple[float, float]:
@@ -681,23 +710,7 @@ def _main_cp(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Generate profile CSV from BO JSONL logs and nonpartition prepost profiling."
-    )
-    parser.add_argument("--model_name", required=True, help="Name of the model (must exist in model_config.MODEL_REGISTRY).")
-    parser.add_argument("--bayesian_profile_dir", default="../bayesian", help="Directory containing BO results.")
-    parser.add_argument("--prepost_profile_dir", default="../bayesian", help="Directory containing nonpartition prepost profiling results.")
-    parser.add_argument("--tensor_parallel_size", required=True, type=int, help="Tensor-parallel size.")
-    parser.add_argument("--context_parallel_size", required=True, type=int, help="Context-parallel size. 1 = non-CP mode, >1 = CP mode.")
-    parser.add_argument("--pipeline_parallel_size", required=True, type=int, help="Number of pipeline-parallel stages.")
-    parser.add_argument("--batch_size", required=True, type=int, help="Micro batch size.")
-    parser.add_argument("--seq_len", required=True, type=int, help="Sequence length.")
-
-    parser.add_argument("--output_dir", default=".", help="Directory to write the output profile CSV into.")
-    parser.add_argument("--gpu_type", default="A100", choices=list(GPU_CONFIGS), help="GPU type for p2p_power lookup.")
-    parser.add_argument("--use_activation_checkpointing", default=True, type=bool, help="Generate backward candidates with recompute-forward configs.")
-    parser.add_argument("--scale_time_energy", default=True, type=bool, help="Scale sum_time and sum_energy by 1.15.")
-    args = parser.parse_args()
+    args = tyro.cli(Args)
 
     model_cfg = get_model_config(args.model_name)
     num_layers = model_cfg.num_layers

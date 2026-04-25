@@ -1,13 +1,12 @@
 # Artifact 16-GPU (2x8 A100) Tests
 
-A self-contained set of scripts for evaluating the
+A set of scripts for evaluating the
 **Megatron / Nanobatch / Perseus / Nanobatch+Perseus / Kareus** stack on
 **2 nodes x 8 NVIDIA A100 GPUs** (16 GPUs total).
 
-This is the multi-config, multi-node counterpart to `tests/toy/` (which is
-the 4-GPU single-node smoke test).  All run scripts and entry-point training
+All run scripts and entry-point training
 files live in this directory; they reference the per-method python tools in
-sibling directories (`../kareus`, `../perseus`, `../nanobatching_perseus`,
+sibling directories (`../kareus`, `../perseus`, `../nanobatch_perseus`,
 `../bayesian`) as needed.
 
 ## Configurations
@@ -118,16 +117,13 @@ results to already exist under `tests/bayesian/logs/` (run
 
 ### Bayesian profiling (prerequisite for `run_kareus.sh`)
 
-`kareus_run_bayesian.sh` mirrors `tests/bayesian/test_all_configs.sh`: a
-3-phase orchestration that runs all BO partition + nonpartition profilers
+`kareus_run_bayesian.sh`: a 3-phase orchestration that runs all BO partition + nonpartition profilers
 on a single 8-GPU node (no multi-node, no `MASTER_ADDR`).  Outputs land
 under `tests/bayesian/logs/<model>/cp${CP}-tp${TP}-bs${BS}-seq${SEQ}/`,
 which `run_kareus.sh` then reads via `../kareus/generate_profile_csv.py`.
 
 ```bash
-# Full sweep (all configs except excluded Llama 3.2 3B TP8 mbs=8/seq=8192,
-# mbs=16/seq=4096 — those parallelism/MBS/SEQ combinations are not in the
-# 10-config matrix anyway):
+# Full sweep:
 bash tests/artifact/kareus_run_bayesian.sh
 
 # Single config (matches CONFIG_MODE=single in run_kareus.sh):
@@ -135,7 +131,7 @@ CONFIG_MODE=single bash tests/artifact/kareus_run_bayesian.sh
 ```
 
 Skip this step entirely when running `run_kareus.sh SKIP_PROFILING=true`
-with precomputed solutions under `tests/perseus/schedules/`.
+with precomputed solutions under `tests/kareus/schedules/`.
 
 ### Common environment variables
 
@@ -155,20 +151,21 @@ with precomputed solutions under `tests/perseus/schedules/`.
 | `SSH_KEY_PATH`    | from `env.sh` (default `$HOME/.ssh/ruofanw.pem`) | node-1 → node-0 scp |
 
 The frequency-sweep defaults (1410 → 900 MHz, step 30) and the optimizer's
-`--p2p_power=85.0` correspond to the **NVIDIA A100**.  On other GPUs these
+`--p2p_power=85.0` correspond to the **NVIDIA A100 SXM4 40GB GPU**.  On other GPUs these
 need to be adjusted before running the profiling/optimization scripts.
 
 ### `SKIP_PROFILING` mode
 
 When `SKIP_PROFILING=true`, `run_perseus.sh`, `run_nanobatch_perseus.sh`,
 and `run_kareus.sh` skip the profiling and optimization phases entirely
-and instead read precomputed solutions from:
+and instead read precomputed solutions from per-method schedule
+directories:
 
-```
-tests/perseus/schedules/<model_name>/<config_tag>/
-    freqs_pipeline_*.py    # used by Perseus, Nanobatch+Perseus, and Kareus
-    scheds_pipeline_*.py   # used only by Kareus
-```
+| Script | Schedule directory | Files used |
+|---|---|---|
+| `run_perseus.sh`           | `tests/perseus/schedules/<model_name>/<config_tag>/`           | `freqs_pipeline_*.py` |
+| `run_nanobatch_perseus.sh` | `tests/nanobatch_perseus/schedules/<model_name>/<config_tag>/` | `freqs_pipeline_*.py` |
+| `run_kareus.sh`            | `tests/kareus/schedules/<model_name>/<config_tag>/`            | `freqs_pipeline_*.py`, `scheds_pipeline_*.py` |
 
 Where `<model_name>` ∈ {`megatron_llama3.2_3b`, `megatron_qwen3_1.7b`} and
 `<config_tag>` = `cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}` (e.g.

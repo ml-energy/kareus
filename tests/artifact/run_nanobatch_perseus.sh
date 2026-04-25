@@ -13,7 +13,7 @@
 #   SKIP_PROFILING  true | false    (default false)
 #                   When true, skip profiling/CSV/optimization and load
 #                   precomputed solutions from
-#                   ../perseus/schedules/<model_name>/<config_tag>/freqs_pipeline_*.py
+#                   ../nanobatch_perseus/schedules/<model_name>/<config_tag>/freqs_pipeline_*.py
 #   REMOTE_USER, REMOTE_BASE_DIR, SSH_KEY_PATH (multi-node scp)
 set -euo pipefail
 
@@ -47,8 +47,8 @@ SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}"
 
 export MASTER_ADDR MASTER_PORT REMOTE_USER REMOTE_BASE_DIR SSH_KEY_PATH
 
-NANOBATCH_PERSEUS_DIR="${SCRIPT_DIR}/../nanobatching_perseus"
-SCHEDULES_DIR="${SCRIPT_DIR}/../perseus/schedules"
+NANOBATCH_PERSEUS_DIR="${SCRIPT_DIR}/../nanobatch_perseus"
+SCHEDULES_DIR="${NANOBATCH_PERSEUS_DIR}/schedules"
 
 PP=2
 NUM_MICROBATCHES=8

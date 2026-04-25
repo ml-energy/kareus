@@ -136,7 +136,6 @@ import transformer_engine
 from transformer_engine.pytorch import module as te_module
 
 from kareus.megatron.core.models.gpt import GPTModel as KCoreGPTModel
-from kareus.utils.debug import save_tensors
 from kareus.megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_spec,
 )

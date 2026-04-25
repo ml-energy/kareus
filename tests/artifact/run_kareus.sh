@@ -17,7 +17,7 @@
 #   SKIP_PROFILING  true | false    (default false)
 #                   When true, skip CSV/optimization phases and load
 #                   precomputed solutions from
-#                   ../perseus/schedules/<model_name>/<config_tag>/{freqs,scheds}_pipeline_*.py
+#                   ../kareus/schedules/<model_name>/<config_tag>/{freqs,scheds}_pipeline_*.py
 #   GPU_TYPE        (default A100, used for p2p_power lookup in generate_profile_csv.py)
 #   REMOTE_USER, REMOTE_BASE_DIR, SSH_KEY_PATH (multi-node scp)
 set -euo pipefail
@@ -56,7 +56,7 @@ export MASTER_ADDR MASTER_PORT REMOTE_USER REMOTE_BASE_DIR SSH_KEY_PATH
 KAREUS_DIR="${SCRIPT_DIR}/../kareus"
 BAYESIAN_DIR="${SCRIPT_DIR}/../bayesian"
 PREPOST_DIR="${SCRIPT_DIR}/../bayesian"
-SCHEDULES_DIR="${SCRIPT_DIR}/../perseus/schedules"
+SCHEDULES_DIR="${KAREUS_DIR}/schedules"
 
 PP=2
 NUM_MICROBATCHES=8

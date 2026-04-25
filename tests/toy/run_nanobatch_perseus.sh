@@ -46,7 +46,7 @@ GBS=$(( MBS * NUM_MICROBATCHES ))
 
 nemo_model_name="${CFG%_config}"
 
-NANOBATCH_PERSEUS_DIR="${SCRIPT_DIR}/../nanobatching_perseus"
+NANOBATCH_PERSEUS_DIR="${SCRIPT_DIR}/../nanobatch_perseus"
 
 NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
 config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"

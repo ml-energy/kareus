@@ -34,7 +34,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
 
 from kareus.megatron.core.transformer.transformer_block import TransformerBlock
-from kareus.utils.debug import save_tensors
+
 
 class GPTModel(LanguageModule):
     """GPT Transformer language model.

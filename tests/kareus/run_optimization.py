@@ -43,9 +43,9 @@ logger = logging.getLogger()
 @dataclass
 class Args:
     # Path to instruction profile results
-    inst_profile: str = "profile_llama3.2_3b_cp1_tp8_bs8_seq4096.csv"
+    inst_profile: str
     # Directory to output results
-    output_dir: str = "llama3.2_3b/cp1_tp8_bs8_seq4096/kareus_results"
+    output_dir: str
     # Number of microbatches
     num_mbs: int = 8
     # Number of stages

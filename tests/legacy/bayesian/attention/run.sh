@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICES=4,5,6,7 python bo_search_attn.py --use_effective_energy --normalize_objectives > bo_search_attn.log 2>&1
