@@ -4,23 +4,23 @@
 # This file is modified from the original Megatron-LM pipeline parallel schedules.
 #
 # forward_step() changes:
-#   - Added forward_only parameter (from fork commit 803aa36)
-#   - Perseus on_instruction_begin/end("forward") hooks (from fork)
-#   - Kareus on_instruction_begin/end("forward") hooks (post-conversion)
+#   - Added forward_only parameter
+#   - Perseus on_instruction_begin/end("forward") hooks
+#   - Kareus on_instruction_begin/end("forward") hooks
 #
 # backward_step() changes:
-#   - Perseus on_instruction_begin/end("backward") hooks (from fork)
-#   - Kareus on_instruction_begin/end("backward") hooks (post-conversion)
+#   - Perseus on_instruction_begin/end("backward") hooks
+#   - Kareus on_instruction_begin/end("backward") hooks
 #
 # forward_backward_no_pipelining() changes:
-#   - Passes forward_only to forward_step calls (from fork)
+#   - Passes forward_only to forward_step calls
 #
 # forward_backward_pipelining_without_interleaving() changes:
-#   - Passes forward_only to forward_step calls (from fork)
-#   - Zeus monitor per-microbatch begin/end_window calls (from fork, now commented out)
+#   - Passes forward_only to forward_step calls
+#   - Zeus monitor per-microbatch begin/end_window calls
 #
 # forward_step_helper() (interleaved schedule):
-#   - Passes forward_only to forward_step calls (from fork)
+#   - Passes forward_only to forward_step calls
 # ---------------------------------------------------------------
 
 import contextlib

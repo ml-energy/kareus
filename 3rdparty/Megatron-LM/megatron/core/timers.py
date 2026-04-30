@@ -1,22 +1,20 @@
 # Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
 
 # ----- Kareus Modifications (relative to upstream Megatron-LM v0.12.1) -----
-# This file is modified from the original Megatron-LM timers.
+# This file is modified from the original Megatron-LM timers to add
+# energy-related features on top of the existing timing functionality.
 #
-# energy_polling_process() changes:
-#   - Takes global_rank and local_rank instead of just rank for disambiguated
-#     output filenames (time-energy-{global_rank}-{local_rank}.csv)
+# energy_polling_process():
+#   - Background process that polls per-GPU energy consumption via NVML.
 #
-# Timers.__init__() changes:
-#   - Added global_rank, local_rank parameters for per-rank output filenames
-#   - Replaced duplicate device_idx assertion with global_rank/local_rank assertion
+# Timers.__init__():
+#   - Configures energy monitoring and starts the polling process.
 #
-# Timers._start_energy_polling() / _stop_energy_polling() changes:
-#   - Updated log messages and args to use global_rank/local_rank
+# Timers._start_energy_polling() / Timers._stop_energy_polling():
+#   - Spawn and cleanly stop the background energy polling process.
 #
-# Timers.shutdown() changes:
-#   - Output filename uses global_rank-local_rank suffix
-#     (instructions-{global_rank}-{local_rank}.csv)
+# Timers.shutdown():
+#   - Stops energy polling and exports per-rank timing data to CSV.
 # ---------------------------------------------------------------
 
 """Megatron timers with energy monitoring capabilities.
@@ -309,7 +307,7 @@ class Timer(TimerBase):
         return self._energy_consumed.copy()
 
 
-# [Kareus] Changed signature: rank -> global_rank, local_rank for disambiguated filenames
+# [Kareus] Background process that polls per-GPU energy consumption via NVML.
 def energy_polling_process(device_idx: int, channel: mp.SimpleQueue, output_dir: str, global_rank: int, local_rank: int) -> None:
     pynvml.nvmlInit()
     gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)

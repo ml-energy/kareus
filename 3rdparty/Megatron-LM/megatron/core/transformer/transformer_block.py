@@ -1,13 +1,5 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-# ----- Kareus Modifications (relative to upstream Megatron-LM v0.12.1) -----
-# This file is modified from the original Megatron-LM TransformerBlock.
-#
-# TransformerBlock.__init__() changes:
-#   - Sets config.recompute_num_layers = num_layers_per_pipeline_rank so that
-#     all layers in the pipeline stage are recomputed (full activation checkpointing)
-# ---------------------------------------------------------------
-
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Union
@@ -274,7 +266,6 @@ class TransformerBlock(MegatronModule):
 
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
-        self.config.recompute_num_layers = self.num_layers_per_pipeline_rank  # [Kareus] force recompute all layers
 
     def _build_layers(self):
         # Transformer layers.

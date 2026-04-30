@@ -4,9 +4,9 @@
 # This file is modified from the original Megatron-LM ModelParallelConfig.
 #
 # ModelParallelConfig dataclass fields added:
-#   - zeus_monitor: ZeusMonitor instance for energy monitoring (from fork commit 803aa36)
-#   - perseus_optimizer: PipelineFrequencyOptimizer instance for GPU freq opt (from fork)
-#   - kareus_scheduler: PipelineCommScheduler instance for comm scheduling (post-conversion)
+#   - zeus_monitor: ZeusMonitor instance for energy monitoring
+#   - perseus_optimizer: PipelineFrequencyOptimizer instance for GPU freq opt
+#   - kareus_scheduler: PipelineCommScheduler instance for comm scheduling
 # ---------------------------------------------------------------
 
 from dataclasses import dataclass

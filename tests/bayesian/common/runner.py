@@ -25,8 +25,8 @@ from .encoding import (
 )
 from .surrogates import (
     train_xgb_models,
-    train_xgb_energy_only,
     train_xgb_ensemble,
+    DerivedRealEnergyModel,
     HVContext,
 )
 from .orchestration import (
@@ -147,8 +147,10 @@ def _build_argparser(search_space: SearchSpace, bo_config: BOSearchConfig) -> ar
     parser.add_argument("--bootstrap_frac", type=float, default=0.8,
                         help="Bootstrap fraction for training each ensemble member")
     parser.add_argument("--uncertainty_metric", type=str,
-                        choices=["sum", "max", "energy_std", "time_std"], default="sum",
-                        help="How to combine energy/time std into uncertainty score")
+                        choices=["sum_std", "sum_var"], default="sum_std",
+                        help="How to combine energy/time uncertainty into a score: "
+                             "'sum_std' = sum of standard deviations, "
+                             "'sum_var' = sum of variances")
 
     return parser
 
@@ -233,7 +235,7 @@ def run_bo_search(
     for ib in range(int(start_batch_idx), int(args.batches)):
         print(f"\n[Batch {ib+1}/{args.batches}] Training surrogate models on {len(X_train)} points...")
         energy_model_eff, time_model = train_xgb_models(X_train_encoded, y_energy_eff, y_time)
-        energy_model_real = train_xgb_energy_only(X_train_encoded, y_energy_real)
+        energy_model_real = DerivedRealEnergyModel(energy_model_eff, time_model, p2p_power_w)
         models_eff = (energy_model_eff, time_model)
         models_real = (energy_model_real, time_model)
 

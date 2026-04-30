@@ -33,6 +33,7 @@ from .surrogates import (
     train_xgb_models,
     train_xgb_energy_only,
     train_xgb_ensemble,
+    DerivedRealEnergyModel,
     predict_ensemble_stats,
     predict_performance,
     calculate_dominated_hypervolume,

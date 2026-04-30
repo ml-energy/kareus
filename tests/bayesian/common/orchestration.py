@@ -405,15 +405,13 @@ def _pick_top_k(scores: np.ndarray, k: int, exclude: set,
 
 def _compute_uncertainty(args: argparse.Namespace,
                          e_std: np.ndarray, t_std: np.ndarray) -> np.ndarray:
-    """Combine ensemble energy/time stds into a single uncertainty score."""
+    """Combine ensemble energy/time uncertainty into a single score."""
     metric = args.uncertainty_metric
-    if metric == "sum":
+    if metric == "sum_std":
         return e_std + t_std
-    if metric == "max":
-        return np.maximum(e_std, t_std)
-    if metric == "energy_std":
-        return e_std
-    return t_std
+    if metric == "sum_var":
+        return np.square(e_std) + np.square(t_std)
+    raise ValueError(f"Unknown uncertainty_metric: {metric!r}")
 
 
 def select_acquisition_batch(

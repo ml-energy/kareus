@@ -154,6 +154,7 @@ class ReduceScatterKV():
             k_out, v_out = self._nccl_reduce_scatter_kv(k, v)
             return k_out, v_out
     
+    # TODO: the copy_ overhead can be avoided by memory management
     def _msccl_reduce_scatter_kv(self, k, v, sm_num, block_size):
         chunk_len = k.size(0) // self.world_size
         start = int(self.rank) * chunk_len

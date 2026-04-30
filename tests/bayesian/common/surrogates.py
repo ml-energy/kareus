@@ -40,6 +40,24 @@ def train_xgb_energy_only(X_encoded: np.ndarray, y_energy: np.ndarray):
     return energy_model
 
 
+class DerivedRealEnergyModel:
+    """Predict real energy as ``effective_energy + p2p_power_w * time``.
+
+    Mimics the ``xgb.Booster.predict(DMatrix)`` interface so it can be dropped
+    into any tuple position expecting an XGBoost energy booster.
+    """
+
+    def __init__(self, energy_model_eff, time_model, p2p_power_w: float):
+        self._energy_model_eff = energy_model_eff
+        self._time_model = time_model
+        self._p2p_power_w = float(p2p_power_w)
+
+    def predict(self, dtest):
+        eff_pred = self._energy_model_eff.predict(dtest)
+        time_pred = self._time_model.predict(dtest)
+        return eff_pred + self._p2p_power_w * time_pred
+
+
 def train_xgb_ensemble(
     X_encoded: np.ndarray,
     y_energy: np.ndarray,
