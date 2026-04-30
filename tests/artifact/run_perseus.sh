@@ -10,6 +10,12 @@
 #   MASTER_PORT     (default 6000)
 #   PFO_PORT        (default 7787)
 #   CONFIG_MODE     full | single   (default full)
+#   FRONTIER        true | false    (default false)
+#                   When true, run all 10 precomputed frontier schedules for
+#                   each selected CONFIG_MODE config and write outputs under
+#                   nemo_experiments/<model>/<config_tag>/perseus/frontier/.
+#   FRONTIER_SYNC_RETRIES, FRONTIER_SYNC_SLEEP
+#                   Node 1 retry settings when waiting for node 0 frontier files.
 #   SKIP_PROFILING  true | false    (default false)
 #                   When true, skip profiling/CSV/optimization and load
 #                   precomputed solutions from
@@ -39,6 +45,7 @@ fi
 MASTER_PORT="${MASTER_PORT:-6000}"
 PFO_PORT="${PFO_PORT:-7787}"
 CONFIG_MODE="${CONFIG_MODE:-full}"
+FRONTIER="${FRONTIER:-false}"
 SKIP_PROFILING="${SKIP_PROFILING:-false}"
 
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
@@ -73,6 +80,11 @@ case "${CONFIG_MODE}" in
     *) echo "ERROR: CONFIG_MODE must be 'full' or 'single'" >&2; exit 1 ;;
 esac
 
+case "${FRONTIER}" in
+    true|false) ;;
+    *) echo "ERROR: FRONTIER must be 'true' or 'false'" >&2; exit 1 ;;
+esac
+
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "$LOG_DIR"
 
@@ -87,7 +99,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "===== Artifact Perseus 16-GPU Tests (CONFIG_MODE=${CONFIG_MODE} SKIP_PROFILING=${SKIP_PROFILING}) ====="
+sync_frontier_schedules_from_node0() {
+    local remote_frontier_dir="$1"
+    local local_frontier_dir="$2"
+    local expected_freqs="$3"
+    local attempts="${FRONTIER_SYNC_RETRIES:-120}"
+    local sleep_secs="${FRONTIER_SYNC_SLEEP:-10}"
+    local attempt
+    local synced_freqs=()
+
+    mkdir -p "${local_frontier_dir}"
+    rm -f "${local_frontier_dir}"/*.py
+
+    for ((attempt=1; attempt<=attempts; attempt++)); do
+        if scp -i "${SSH_KEY_PATH}" "${REMOTE_USER}@${MASTER_ADDR}:${remote_frontier_dir}"/*.py "${local_frontier_dir}/"; then
+            mapfile -t synced_freqs < <(ls "${local_frontier_dir}"/freqs_pipeline_*.py 2>/dev/null | sort -V || true)
+            if (( ${#synced_freqs[@]} == expected_freqs )); then
+                return 0
+            fi
+            echo "    Synced ${#synced_freqs[@]} frontier freqs; expected ${expected_freqs}. Retrying..."
+            rm -f "${local_frontier_dir}"/*.py
+        fi
+
+        if (( attempt < attempts )); then
+            echo "    Waiting for node 0 frontier schedules (${attempt}/${attempts})..."
+            sleep "${sleep_secs}"
+        fi
+    done
+
+    echo "    ERROR: Failed to sync ${expected_freqs} frontier schedules from ${REMOTE_USER}@${MASTER_ADDR}:${remote_frontier_dir}" >&2
+    exit 1
+}
+
+echo "===== Artifact Perseus 16-GPU Tests (CONFIG_MODE=${CONFIG_MODE} FRONTIER=${FRONTIER} SKIP_PROFILING=${SKIP_PROFILING}) ====="
 echo "Total configurations: ${#CONFIGS[@]}"
 echo ""
 
@@ -100,11 +144,11 @@ for i in "${!CONFIGS[@]}"; do
     config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
 
     NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
-    PROFILE_DIR="${NEMO_DIR}/${config_tag}/perseus/profiling"
-    RESULTS_DIR="${NEMO_DIR}/${config_tag}/perseus/lowtime"
-    OUTPUT_DIR="${NEMO_DIR}/${config_tag}/perseus"
+    METHOD_DIR="${NEMO_DIR}/${config_tag}/perseus"
+    PROFILE_DIR="${METHOD_DIR}/profiling"
+    RESULTS_DIR="${METHOD_DIR}/lowtime"
 
-    mkdir -p "${PROFILE_DIR}" "${RESULTS_DIR}" "${OUTPUT_DIR}"
+    mkdir -p "${PROFILE_DIR}" "${RESULTS_DIR}" "${METHOD_DIR}"
 
     echo ">>> Config $((i+1))/${#CONFIGS[@]}: ${CFG} cp${CP}_tp${TP} MBS=${MBS} SEQ=${SEQ} GBS=${GBS}"
 
@@ -112,7 +156,82 @@ for i in "${!CONFIGS[@]}"; do
     # Locate freqs_pipeline_*.py           #
     ########################################
 
-    if [[ "${SKIP_PROFILING}" == "true" ]]; then
+    RUN_FREQS_PATHS=()
+    RUN_PLAN_TAGS=()
+
+    if [[ "${FRONTIER}" == "true" ]]; then
+        SCHED_DIR="${SCHEDULES_DIR}/${nemo_model_name}/${config_tag}/frontier"
+        if [[ "${SKIP_PROFILING}" == "false" ]]; then
+            ########################################
+            # Phase 1: Profiling                   #
+            ########################################
+            PROFILING_MARKER="${PROFILE_DIR}/.profiling_complete"
+            if [[ -f "${PROFILING_MARKER}" ]]; then
+                echo "    Profiling already done (${PROFILING_MARKER} exists) — skipping"
+            else
+                echo "    Starting frequency profiling..."
+                bash "${SCRIPT_DIR}/megatron_perseus_run_profiling.sh" "${NODE_RANK}" "${CFG}" "${CP}" "${TP}" "${MBS}" "${SEQ}"
+            fi
+
+            ########################################
+            # Phase 2+3: CSV gen + Optimise        #
+            # (node 0 only)                        #
+            ########################################
+            PROFILE_CSV="${PROFILE_DIR}/profile.csv"
+            if [[ "${NODE_RANK}" == "0" ]]; then
+                if [[ ! -f "${PROFILE_CSV}" ]]; then
+                    echo "    Generating profile CSV..."
+                    NUM_RANKS_PER_STAGE=$(( CP * TP ))
+                    python "${PERSEUS_DIR}/generate_profile_csv.py" \
+                        --profile_dir="${PROFILE_DIR}" \
+                        --num_ranks_per_stage="${NUM_RANKS_PER_STAGE}" \
+                        --num_microbatches="${NUM_MICROBATCHES}"
+                else
+                    echo "    Profile CSV exists: ${PROFILE_CSV}"
+                fi
+
+                if ! compgen -G "${RESULTS_DIR}/freqs_pipeline_*.py" > /dev/null 2>&1; then
+                    echo "    Running optimisation..."
+                    python "${PERSEUS_DIR}/run_optimization.py" \
+                        --inst_profile="${PROFILE_CSV}" \
+                        --output_dir="${RESULTS_DIR}" \
+                        --num_mbs="${NUM_MICROBATCHES}" \
+                        --num_stages="${PP}" \
+                        --p2p_power=85.0
+                else
+                    echo "    Optimisation results exist in: ${RESULTS_DIR}"
+                fi
+
+                echo "    Creating frontier schedules from optimisation results..."
+                rm -f "${SCHED_DIR}"/*.py
+                MODEL_NAME="${nemo_model_name}" CONFIG_TAG="${config_tag}" \
+                    bash "${SCRIPT_DIR}/create_frontier.sh" perseus
+            fi
+        elif [[ "${SKIP_PROFILING}" != "true" ]]; then
+            echo "    ERROR: SKIP_PROFILING must be 'true' or 'false'" >&2
+            exit 1
+        fi
+
+        if [[ "${NODE_RANK}" == "1" ]]; then
+            remote_frontier_dir="${REMOTE_BASE_DIR}/../perseus/schedules/${nemo_model_name}/${config_tag}/frontier"
+            echo "    Syncing frontier schedules from ${REMOTE_USER}@${MASTER_ADDR}:${remote_frontier_dir}"
+            sync_frontier_schedules_from_node0 "${remote_frontier_dir}" "${SCHED_DIR}" 10
+        fi
+
+        mapfile -t RUN_FREQS_PATHS < <(ls "${SCHED_DIR}"/freqs_pipeline_*.py 2>/dev/null | sort -V)
+        if (( ${#RUN_FREQS_PATHS[@]} != 10 )); then
+            echo "    ERROR: FRONTIER=true expected 10 freqs_pipeline_*.py files in ${SCHED_DIR}, found ${#RUN_FREQS_PATHS[@]}" >&2
+            exit 1
+        fi
+
+        for freqs_path in "${RUN_FREQS_PATHS[@]}"; do
+            freqs_file="$(basename "${freqs_path}")"
+            suffix="${freqs_file#freqs_pipeline_}"
+            suffix="${suffix%.py}"
+            RUN_PLAN_TAGS+=("pipeline_${suffix}")
+        done
+        echo "    Frontier schedules: ${#RUN_FREQS_PATHS[@]} plans from ${SCHED_DIR}"
+    elif [[ "${SKIP_PROFILING}" == "true" ]]; then
         SCHED_DIR="${SCHEDULES_DIR}/${nemo_model_name}/${config_tag}"
         freqs_path="$(ls "${SCHED_DIR}"/freqs_pipeline_*.py 2>/dev/null | sort -V | tail -n 1 || true)"
         if [[ -z "${freqs_path}" ]]; then
@@ -120,6 +239,8 @@ for i in "${!CONFIGS[@]}"; do
             exit 1
         fi
         echo "    Using precomputed solution: ${freqs_path}"
+        RUN_FREQS_PATHS=("${freqs_path}")
+        RUN_PLAN_TAGS=("default")
     else
         ########################################
         # Phase 1: Profiling                   #
@@ -172,104 +293,126 @@ for i in "${!CONFIGS[@]}"; do
             fi
             echo "    Using solution: ${freqs_path}"
         fi
+        RUN_FREQS_PATHS=("${freqs_path}")
+        RUN_PLAN_TAGS=("default")
     fi
 
-    ########################################
-    # PFO server (node 0)                  #
-    ########################################
+    for run_idx in "${!RUN_FREQS_PATHS[@]}"; do
+        freqs_path="${RUN_FREQS_PATHS[$run_idx]}"
+        plan_tag="${RUN_PLAN_TAGS[$run_idx]}"
 
-    PFO_PID=""
-    if [[ "${NODE_RANK}" == "0" ]]; then
-        server_log="${OUTPUT_DIR}/pfo_server.log"
-        echo "    Starting PFO server on ${MASTER_ADDR}:${PFO_PORT}"
-        ZEUS_PFO_SCHEDULER=PointSolution3D \
-        ZEUS_PFO_SCHEDULER_ARGS="{\"solution_path\": \"${freqs_path}\"}" \
-        uvicorn zeus.optimizer.pipeline_frequency.server.router:app \
-            --host "${MASTER_ADDR}" \
-            --port "${PFO_PORT}" \
-            > "${server_log}" 2>&1 &
-        PFO_PID=$!
-        echo "    PFO server PID: ${PFO_PID}"
-        sleep 5
-    fi
+        if [[ "${FRONTIER}" == "true" ]]; then
+            OUTPUT_DIR="${METHOD_DIR}/frontier/${plan_tag}"
+            TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_perseus_${plan_tag}.log"
+            echo "    >>> Frontier plan $((run_idx+1))/${#RUN_FREQS_PATHS[@]}: ${plan_tag}"
+        else
+            OUTPUT_DIR="${METHOD_DIR}"
+            TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_perseus.log"
+        fi
 
-    ########################################
-    # Training                             #
-    ########################################
+        mkdir -p "${OUTPUT_DIR}"
 
-    TRAIN_LOG="${LOG_DIR}/${nemo_model_name}_${config_tag}_perseus.log"
-    echo "    Running Perseus training (node_rank=${NODE_RANK})..."
+        ########################################
+        # PFO server (node 0)                  #
+        ########################################
 
-    torchrun \
-        --nproc_per_node=8 \
-        --nnodes=2 \
-        --node_rank="${NODE_RANK}" \
-        --master_addr="${MASTER_ADDR}" \
-        --master_port="${MASTER_PORT}" \
-        "$SCRIPT_DIR/megatron_gpt_pretraining.py" \
-        --config-name="${CFG}" \
-        model.tensor_model_parallel_size="${TP}" \
-        model.context_parallel_size="${CP}" \
-        model.micro_batch_size="${MBS}" \
-        model.global_batch_size="${GBS}" \
-        model.encoder_seq_length="${SEQ}" \
-        model.enable_megatron_timers=False \
-        model.enable_zeus_monitor=True \
-        model.enable_power_monitor=False \
-        model.enable_perseus_optimizer=True \
-        model.enable_kareus_scheduler=False \
-        2>&1 | tee "${TRAIN_LOG}"
+        PFO_PID=""
+        if [[ "${NODE_RANK}" == "0" ]]; then
+            server_log="${OUTPUT_DIR}/pfo_server.log"
+            echo "    Starting PFO server on ${MASTER_ADDR}:${PFO_PORT}"
+            ZEUS_PFO_SCHEDULER=PointSolution3D \
+            ZEUS_PFO_SCHEDULER_ARGS="{\"solution_path\": \"${freqs_path}\"}" \
+            uvicorn zeus.optimizer.pipeline_frequency.server.router:app \
+                --host "${MASTER_ADDR}" \
+                --port "${PFO_PORT}" \
+                > "${server_log}" 2>&1 &
+            PFO_PID=$!
+            echo "    PFO server PID: ${PFO_PID}"
+            sleep 5
+        fi
 
-    echo "    Resetting GPU clocks"
-    nvidia-smi -i 0,1,2,3,4,5,6,7 --reset-gpu-clocks
+        ########################################
+        # Training                             #
+        ########################################
 
-    ########################################
-    # Collection + cleanup                 #
-    ########################################
+        echo "    Running Perseus training (node_rank=${NODE_RANK})..."
 
-    if [[ "${NODE_RANK}" == "0" ]]; then
-        chmod a+w "${OUTPUT_DIR}"
+        torchrun \
+            --nproc_per_node=8 \
+            --nnodes=2 \
+            --node_rank="${NODE_RANK}" \
+            --master_addr="${MASTER_ADDR}" \
+            --master_port="${MASTER_PORT}" \
+            "$SCRIPT_DIR/megatron_gpt_pretraining.py" \
+            --config-name="${CFG}" \
+            model.tensor_model_parallel_size="${TP}" \
+            model.context_parallel_size="${CP}" \
+            model.micro_batch_size="${MBS}" \
+            model.global_batch_size="${GBS}" \
+            model.encoder_seq_length="${SEQ}" \
+            model.enable_megatron_timers=False \
+            model.enable_zeus_monitor=True \
+            model.enable_power_monitor=False \
+            model.enable_perseus_optimizer=True \
+            model.enable_kareus_scheduler=False \
+            2>&1 | tee "${TRAIN_LOG}"
 
-        if compgen -G "${NEMO_DIR}/20*" > /dev/null; then
-            shopt -s nullglob dotglob
-            for d in "${NEMO_DIR}"/20*; do
-                if [[ -d "$d" ]]; then
-                    contents=("$d"/*)
-                    if (( ${#contents[@]} )); then
-                        mv "${contents[@]}" "${OUTPUT_DIR}/"
+        echo "    Resetting GPU clocks"
+        nvidia-smi -i 0,1,2,3,4,5,6,7 --reset-gpu-clocks
+
+        ########################################
+        # Collection + cleanup                 #
+        ########################################
+
+        if [[ "${NODE_RANK}" == "0" ]]; then
+            chmod a+w "${OUTPUT_DIR}"
+
+            if compgen -G "${NEMO_DIR}/20*" > /dev/null; then
+                shopt -s nullglob dotglob
+                for d in "${NEMO_DIR}"/20*; do
+                    if [[ -d "$d" ]]; then
+                        contents=("$d"/*)
+                        if (( ${#contents[@]} )); then
+                            mv "${contents[@]}" "${OUTPUT_DIR}/"
+                        fi
+                        rm -rf "$d"
                     fi
-                    rm -rf "$d"
-                fi
-            done
-            shopt -u nullglob dotglob
+                done
+                shopt -u nullglob dotglob
+            fi
+
+            if compgen -G "${NEMO_DIR}/*.txt" > /dev/null; then
+                mv "${NEMO_DIR}"/*.txt "${OUTPUT_DIR}/"
+            fi
+
+            if [[ -n "${PFO_PID}" ]] && ps -p "${PFO_PID}" > /dev/null 2>&1; then
+                echo "    Stopping PFO server PID ${PFO_PID}"
+                kill "${PFO_PID}" || true
+                wait "${PFO_PID}" 2>/dev/null || true
+                PFO_PID=""
+            fi
+
+            echo "    Node 0 done – outputs: ${OUTPUT_DIR}"
+        else
+            if compgen -G "${NEMO_DIR}/*.txt" > /dev/null; then
+                mv "${NEMO_DIR}"/*.txt "${OUTPUT_DIR}/"
+            fi
+
+            remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config_tag}/perseus"
+            if [[ "${FRONTIER}" == "true" ]]; then
+                remote_dir="${remote_dir}/frontier/${plan_tag}"
+            fi
+            ssh -i "${SSH_KEY_PATH}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
+            sleep 5
+            scp -i "${SSH_KEY_PATH}" -r "${OUTPUT_DIR}/"* \
+                "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
+            echo "    Node 1 done – synced to: ${remote_dir}"
         fi
 
-        if compgen -G "${NEMO_DIR}/*.txt" > /dev/null; then
-            mv "${NEMO_DIR}"/*.txt "${OUTPUT_DIR}/"
-        fi
-
-        if [[ -n "${PFO_PID}" ]] && ps -p "${PFO_PID}" > /dev/null 2>&1; then
-            echo "    Stopping PFO server PID ${PFO_PID}"
-            kill "${PFO_PID}" || true
-            wait "${PFO_PID}" 2>/dev/null || true
-        fi
-
-        echo "    Node 0 done – outputs: ${OUTPUT_DIR}"
-    else
-        if compgen -G "${NEMO_DIR}/*.txt" > /dev/null; then
-            mv "${NEMO_DIR}"/*.txt "${OUTPUT_DIR}/"
-        fi
-
-        remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config_tag}/perseus"
+        echo "    log: ${TRAIN_LOG}"
+        echo ""
         sleep 5
-        scp -i "${SSH_KEY_PATH}" -r "${OUTPUT_DIR}/"* \
-            "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
-        echo "    Node 1 done – synced to: ${remote_dir}"
-    fi
-
-    echo "    log: ${TRAIN_LOG}"
-    echo ""
-    sleep 5
+    done
 done
 
 echo "All ${#CONFIGS[@]} Perseus configurations completed (node_rank=${NODE_RANK})."

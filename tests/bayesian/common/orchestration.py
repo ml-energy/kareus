@@ -137,7 +137,7 @@ def _load_eval_log(path: str) -> List[dict]:
         seen: set = set()
         unique: List[dict] = []
         for r in parsed:
-            key = (int(r["freq"]), int(r["overlap_start"]), int(r["overlap_end"]), int(r["sm"]))
+            key = (int(r["freq"]), r["overlap_start"], r["overlap_end"], int(r["sm"]))
             if key not in seen:
                 seen.add(key)
                 unique.append(r)
@@ -174,7 +174,7 @@ def _records_to_measurements(
             "freq": int(r["freq"]),
             "sm": int(r["sm"]),
             "block": int(r["block"]),
-            "overlap": (int(r["overlap_start"]), int(r["overlap_end"])),
+            "overlap": (r["overlap_start"], r["overlap_end"]),
         }
         X_list.append(encode_cfg(partition_test, cfg))
         t_s, eff_e, avg_e, rec = _process_measurement(

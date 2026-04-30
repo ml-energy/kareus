@@ -375,8 +375,8 @@ def _main_non_cp(
                                 bwd_time = sum_time * layers_per_stage[stage] * 2
                                 bwd_energy = sum_energy * layers_per_stage[stage] * 2
                                 if stage == 0:
-                                    bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0]
-                                    bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1]
+                                    bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0] * 2
+                                    bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1] * 2
                                 elif stage == pipeline_parallel_size - 1:
                                     bwd_time += prepost_profiling_results[frequency]["backward-output"][0]
                                     bwd_energy += prepost_profiling_results[frequency]["backward-output"][1]
@@ -401,8 +401,8 @@ def _main_non_cp(
                         bwd_time = sum_time * layers_per_stage[stage] * 2
                         bwd_energy = sum_energy * layers_per_stage[stage] * 2
                         if stage == 0:
-                            bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0]
-                            bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1]
+                            bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0] * 2
+                            bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1] * 2
                         elif stage == pipeline_parallel_size - 1:
                             bwd_time += prepost_profiling_results[frequency]["backward-output"][0]
                             bwd_energy += prepost_profiling_results[frequency]["backward-output"][1]
@@ -620,8 +620,8 @@ def _main_cp(
                                                                 bwd_time = sum_time * layers_per_stage[stage]
                                                                 bwd_energy = sum_energy * layers_per_stage[stage]
                                                                 if stage == 0:
-                                                                    bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0]
-                                                                    bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1]
+                                                                    bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0] * 2
+                                                                    bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1] * 2
                                                                 elif stage == pipeline_parallel_size - 1:
                                                                     bwd_time += prepost_profiling_results[frequency]["backward-output"][0]
                                                                     bwd_energy += prepost_profiling_results[frequency]["backward-output"][1]
@@ -658,8 +658,8 @@ def _main_cp(
                                             bwd_time = sum_time * layers_per_stage[stage]
                                             bwd_energy = sum_energy * layers_per_stage[stage]
                                             if stage == 0:
-                                                bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0]
-                                                bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1]
+                                                bwd_time += prepost_profiling_results[frequency]["backward-embedding"][0] * 2
+                                                bwd_energy += prepost_profiling_results[frequency]["backward-embedding"][1] * 2
                                             elif stage == pipeline_parallel_size - 1:
                                                 bwd_time += prepost_profiling_results[frequency]["backward-output"][0]
                                                 bwd_energy += prepost_profiling_results[frequency]["backward-output"][1]

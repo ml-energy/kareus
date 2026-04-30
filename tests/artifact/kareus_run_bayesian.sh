@@ -29,7 +29,7 @@ case "${CONFIG_MODE}" in
     *) echo "ERROR: CONFIG_MODE must be 'full' or 'single', got '${CONFIG_MODE}'" >&2; exit 1 ;;
 esac
 
-TP8_PARTS=(fwd_attn fwd_mlp bwd_attn bwd_mlp)
+TP8_PARTS=(fwd_attn fwd_mlp)
 CPTP_TP_PARTS=(fwd_qkv_ar fwd_ao_ar fwd_mlp bwd_qkv_ar bwd_o_ar bwd_mlp)
 CPTP_CP_PARTS=(fwd_qkv_ag fwd_ao_ag bwd_qkv_rs bwd_a_rs bwd_a_ag bwd_o_ag)
 
@@ -51,9 +51,9 @@ run_tp_only() {
     for part in "${TP8_PARTS[@]}"; do
         local log_dir="logs/${model}/cp1-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
-        CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
+        CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
             -m "$model" -w "$tp" -tp "$tp" -cp 1 -b "$bs" -s "$seq" \
-            > "${log_dir}/bo_${tag}.log" 2>&1
+            |& tee "${log_dir}/bo_${tag}.log"
     done
 }
 
@@ -63,9 +63,9 @@ run_cptp_tp() {
     for part in "${CPTP_TP_PARTS[@]}"; do
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
-        CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
+        CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
             -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "${log_dir}/bo_${tag}.log" 2>&1
+            |& tee "${log_dir}/bo_${tag}.log"
     done
 }
 
@@ -75,9 +75,9 @@ run_cptp_cp() {
     for part in "${CPTP_CP_PARTS[@]}"; do
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
-        CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
+        CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
             -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "${log_dir}/bo_${tag}.log" 2>&1
+            |& tee "${log_dir}/bo_${tag}.log"
     done
 }
 
@@ -90,9 +90,9 @@ run_cptp_cp_a() {
     for part in "${CPTP_CP_PARTS_A[@]}"; do
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
-        CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
+        CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
             -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "${log_dir}/bo_${tag}.log" 2>&1
+            |& tee "${log_dir}/bo_${tag}.log"
     done
 }
 
@@ -102,9 +102,9 @@ run_cptp_cp_b() {
     for part in "${CPTP_CP_PARTS_B[@]}"; do
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
-        CUDA_VISIBLE_DEVICES=$gpus python partitions/${part}/bo_search.py \
+        CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
             -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-            > "${log_dir}/bo_${tag}.log" 2>&1
+            |& tee "${log_dir}/bo_${tag}.log"
     done
 }
 
@@ -114,9 +114,9 @@ run_nonpartition() {
     local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/nonpartition"
     mkdir -p "$log_dir"
     echo ">>> nonpartition: ${tag}  GPUs=${gpus}"
-    CUDA_VISIBLE_DEVICES=$gpus python nonpartition/profile_nonpartition.py \
+    CUDA_VISIBLE_DEVICES=$gpus python -u nonpartition/profile_nonpartition.py \
         -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
-        > "${log_dir}/nonpartition_${tag}.log" 2>&1
+        |& tee "${log_dir}/nonpartition_${tag}.log"
 }
 
 ###############################################################################
@@ -124,7 +124,7 @@ run_nonpartition() {
 ###############################################################################
 if [[ "${CONFIG_MODE}" == "single" ]]; then
     echo "===== CONFIG_MODE=single: Llama 3.2 3B CP=1 TP=8 MBS=8 SEQ=4096 ====="
-    run_tp_only 0,1,2,3,4,5,6,7 llama3.2_3b 8 8 4096
+    # run_tp_only 0,1,2,3,4,5,6,7 llama3.2_3b 8 8 4096
     run_nonpartition 0,1,2,3,4,5,6,7 llama3.2_3b 8 1 8 4096
     echo ""
     echo "Single-config bayesian profiling done."

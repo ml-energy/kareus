@@ -95,6 +95,7 @@ def _log_path(args, freq, name):
         f"logs/{args.model_name}"
         f"/cp{args.context_parallel_size}-tp{args.tensor_parallel_size}"
         f"-bs{args.batch_size}-seq{args.seq_len}"
+        f"/nonpartition"
         f"/{freq}"
     )
     return d, os.path.join(d, f"{name}_energy.csv")
