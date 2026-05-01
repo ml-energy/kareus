@@ -38,7 +38,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MASTER_PORT:?MASTER_PORT must be set}"
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
-SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-}"
+SSH_KEY_OPTS=()
+if [[ -n "${SSH_KEY_PATH}" ]]; then
+    SSH_KEY_OPTS=(-i "${SSH_KEY_PATH}")
+fi
 
 NUM_MICROBATCHES=8
 GBS=$(( MBS * NUM_MICROBATCHES ))
@@ -124,7 +128,7 @@ echo "Profiling complete for node${NODE_RANK}. Results under ${target_dir}"
 if [[ "${NODE_RANK}" == "1" ]]; then
     remote_dir="${REMOTE_BASE_DIR}/nemo_experiments/${nemo_model_name}/${config_tag}/perseus/profiling/"
     echo "Syncing profiling results from node1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
-    scp -i "${SSH_KEY_PATH}" -r "${target_dir}/." \
+    scp "${SSH_KEY_OPTS[@]}" -r "${target_dir}/." \
         "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir%/}/node1/"
 fi
 

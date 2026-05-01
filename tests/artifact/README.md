@@ -66,7 +66,7 @@ on your hardware/setup:
 | `MASTER_ADDR`     | IP/hostname of node 0 (used by torchrun and as the scp target from node 1) |
 | `REMOTE_USER`     | SSH user on node 0 (used by node 1 for scp) |
 | `REMOTE_BASE_DIR` | Path to this checkout on node 0 (target of scp) |
-| `SSH_KEY_PATH`    | SSH key used by node 1 to scp results back to node 0 |
+| `SSH_KEY_PATH`    | (Optional) SSH key node 1 uses to scp results back to node 0. Leave unset to fall back on the default ssh agent / `~/.ssh/config`. |
 
 Every run script and profiling helper sources `env.sh` automatically;
 overriding any variable on the command line still wins.  If you delete
@@ -148,7 +148,7 @@ with precomputed solutions under `tests/kareus/schedules/`.
 | `FREQ_STEP`       | `30`   | profiling sweeps |
 | `REMOTE_USER`     | from `env.sh` (default `ubuntu`) | node-1 → node-0 scp |
 | `REMOTE_BASE_DIR` | from `env.sh` (default `$HOME/workspace/Kareus/tests/artifact`) | node-1 → node-0 scp |
-| `SSH_KEY_PATH`    | from `env.sh` (default `$HOME/.ssh/ruofanw.pem`) | node-1 → node-0 scp |
+| `SSH_KEY_PATH`    | from `env.sh` (optional; unset → default ssh agent / `~/.ssh/config`) | node-1 → node-0 scp |
 
 The frequency-sweep defaults (1410 → 900 MHz, step 30) and the optimizer's
 `--p2p_power=85.0` correspond to the **NVIDIA A100 SXM4 40GB GPU**.  On other GPUs these

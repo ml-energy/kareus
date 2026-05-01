@@ -12,7 +12,7 @@
 #                 single - run only the first row (Llama 3.2 3B TP=8 MBS=8 SEQ=4096)
 #   REMOTE_USER     (optional, default ubuntu)
 #   REMOTE_BASE_DIR (optional, default ~/workspace/Kareus/tests/artifact)
-#   SSH_KEY_PATH    (optional, default ~/.ssh/ruofanw.pem)
+#   SSH_KEY_PATH    (optional; default unset → use ssh agent / ~/.ssh/config)
 #
 # Configurations (CONFIG_MODE=full):
 #
@@ -54,7 +54,11 @@ CONFIG_MODE="${CONFIG_MODE:-full}"
 
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
-SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-}"
+SSH_KEY_OPTS=()
+if [[ -n "${SSH_KEY_PATH}" ]]; then
+    SSH_KEY_OPTS=(-i "${SSH_KEY_PATH}")
+fi
 
 export MASTER_ADDR MASTER_PORT REMOTE_USER REMOTE_BASE_DIR SSH_KEY_PATH
 
@@ -152,7 +156,7 @@ for i in "${!CONFIGS[@]}"; do
       echo "Syncing results from node 1 to ${REMOTE_USER}@${MASTER_ADDR}:${remote_dir}"
 
       sleep 5
-      scp -i "${SSH_KEY_PATH}" -r "${OUTPUT_DIR}/"* "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
+      scp "${SSH_KEY_OPTS[@]}" -r "${OUTPUT_DIR}/"* "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
 
       echo "    Node 1 done – synced to: ${remote_dir}"
     fi

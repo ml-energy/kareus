@@ -50,7 +50,11 @@ SKIP_PROFILING="${SKIP_PROFILING:-false}"
 
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
-SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-}"
+SSH_KEY_OPTS=()
+if [[ -n "${SSH_KEY_PATH}" ]]; then
+    SSH_KEY_OPTS=(-i "${SSH_KEY_PATH}")
+fi
 
 export MASTER_ADDR MASTER_PORT REMOTE_USER REMOTE_BASE_DIR SSH_KEY_PATH
 
@@ -111,7 +115,7 @@ sync_frontier_schedules_from_node0() {
     rm -f "${local_frontier_dir}"/*.py
 
     for ((attempt=1; attempt<=attempts; attempt++)); do
-        if scp -i "${SSH_KEY_PATH}" "${REMOTE_USER}@${MASTER_ADDR}:${remote_frontier_dir}"/*.py "${local_frontier_dir}/"; then
+        if scp "${SSH_KEY_OPTS[@]}" "${REMOTE_USER}@${MASTER_ADDR}:${remote_frontier_dir}"/*.py "${local_frontier_dir}/"; then
             mapfile -t synced_freqs < <(ls "${local_frontier_dir}"/freqs_pipeline_*.py 2>/dev/null | sort -V || true)
             if (( ${#synced_freqs[@]} == expected_freqs )); then
                 return 0
@@ -370,9 +374,9 @@ for i in "${!CONFIGS[@]}"; do
             if [[ "${FRONTIER}" == "true" ]]; then
                 remote_dir="${remote_dir}/frontier/${plan_tag}"
             fi
-            ssh -i "${SSH_KEY_PATH}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
+            ssh "${SSH_KEY_OPTS[@]}" "${REMOTE_USER}@${MASTER_ADDR}" "mkdir -p '${remote_dir}'"
             sleep 5
-            scp -i "${SSH_KEY_PATH}" -r "${OUTPUT_DIR}/"* \
+            scp "${SSH_KEY_OPTS[@]}" -r "${OUTPUT_DIR}/"* \
                 "${REMOTE_USER}@${MASTER_ADDR}":"${remote_dir}/"
             echo "    Node 1 done – synced to: ${remote_dir}"
         fi

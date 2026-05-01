@@ -854,8 +854,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         if self.kareus_scheduler is not None:
             self.kareus_scheduler.on_step_begin()
 
-        if self.zeus_monitor is not None:
-            self.zeus_monitor.begin_window("training_step")
+        # if self.zeus_monitor is not None:
+        #     self.zeus_monitor.begin_window("training_step")
             
         # Initialize userbuffer communicators.
         if self.initialize_ub:
@@ -1084,8 +1084,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         if self.kareus_scheduler is not None:
             self.kareus_scheduler.on_step_end()
         
-        if self.zeus_monitor is not None:
-            self.zeus_monitor.end_window("training_step")
+        # if self.zeus_monitor is not None:
+        #     self.zeus_monitor.end_window("training_step")
 
         return loss_mean
 

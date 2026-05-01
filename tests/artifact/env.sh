@@ -38,4 +38,5 @@ export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore:The pynvml package is deprecated
 # Node-1 -> node-0 result sync (scp/ssh from node 1).
 export REMOTE_USER="${REMOTE_USER:-ubuntu}"
 export REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/home/${REMOTE_USER:-ubuntu}/workspace/Kareus/tests/artifact}"
-export SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/ruofanw.pem}"
+# Optional: path to the SSH private key node 1 uses to scp results to node 0.
+export SSH_KEY_PATH="${SSH_KEY_PATH:-}"

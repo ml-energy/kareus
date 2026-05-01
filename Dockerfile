@@ -14,7 +14,7 @@
 # bind-mounted source is dropped at the end of the RUN.
 #
 # BUILD (from repo root):
-#   DOCKER_BUILDKIT=1 docker build -t kareus-artifact:25.06 .
+#   DOCKER_BUILDKIT=1 docker build -t kareus-artifact:latest .
 #
 # RUN (mount the repo at the same path the script uses):
 #   docker run -it \
@@ -23,7 +23,7 @@
 #     -v /dev/shm:/dev/shm \
 #     -v $HOME/.cache/huggingface:/root/.cache/huggingface \
 #     -v $(pwd):/workspaces/Kareus \
-#     kareus-artifact:25.06
+#     kareus-artifact:latest
 #
 # NOTE: Before building, ensure the four vendored 3rdparty trees are present:
 #   ls 3rdparty/   # must show Megatron-LM NeMo TransformerEngine mscclpp zeus
