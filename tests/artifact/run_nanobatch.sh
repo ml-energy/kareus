@@ -7,7 +7,7 @@
 # Usage:
 #   MASTER_ADDR=<node0_ip> bash run_nanobatch.sh <node_rank>
 #
-# Env vars: same as run_megatron.sh (CONFIG_MODE full|single).
+# Env vars: same as run_megatron.sh (CONFIG_MODE full|single, GPU_TYPE logged).
 set -euo pipefail
 
 NODE_RANK="${1:-}"
@@ -31,6 +31,7 @@ if [[ -z "${MASTER_ADDR:-}" ]]; then
 fi
 MASTER_PORT="${MASTER_PORT:-6000}"
 CONFIG_MODE="${CONFIG_MODE:-full}"
+GPU_TYPE="${GPU_TYPE:-A100}"
 
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
@@ -67,7 +68,7 @@ esac
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "$LOG_DIR"
 
-echo "===== Artifact Nanobatch 16-GPU Tests (CONFIG_MODE=${CONFIG_MODE}) ====="
+echo "===== Artifact Nanobatch 16-GPU Tests (GPU_TYPE=${GPU_TYPE} CONFIG_MODE=${CONFIG_MODE}) ====="
 echo "Total configurations: ${#CONFIGS[@]}"
 echo ""
 

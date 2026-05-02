@@ -20,6 +20,7 @@
 #                   When true, skip profiling/CSV/optimization and load
 #                   precomputed solutions from
 #                   ../nanobatch_perseus/schedules/<model_name>/<config_tag>/freqs_pipeline_*.py
+#   GPU_TYPE        (default A100, used for P2P/static power lookup)
 #   REMOTE_USER, REMOTE_BASE_DIR, SSH_KEY_PATH (multi-node scp)
 set -euo pipefail
 
@@ -47,6 +48,7 @@ PFO_PORT="${PFO_PORT:-7787}"
 CONFIG_MODE="${CONFIG_MODE:-full}"
 FRONTIER="${FRONTIER:-false}"
 SKIP_PROFILING="${SKIP_PROFILING:-false}"
+GPU_TYPE="${GPU_TYPE:-A100}"
 
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
@@ -134,7 +136,7 @@ sync_frontier_schedules_from_node0() {
     exit 1
 }
 
-echo "===== Artifact Nanobatch+Perseus 16-GPU Tests (CONFIG_MODE=${CONFIG_MODE} FRONTIER=${FRONTIER} SKIP_PROFILING=${SKIP_PROFILING}) ====="
+echo "===== Artifact Nanobatch+Perseus 16-GPU Tests (GPU_TYPE=${GPU_TYPE} CONFIG_MODE=${CONFIG_MODE} FRONTIER=${FRONTIER} SKIP_PROFILING=${SKIP_PROFILING}) ====="
 echo "Total configurations: ${#CONFIGS[@]}"
 echo ""
 
@@ -189,7 +191,7 @@ for i in "${!CONFIGS[@]}"; do
                         --output_dir="${RESULTS_DIR}" \
                         --num_mbs="${NUM_MICROBATCHES}" \
                         --num_stages="${PP}" \
-                        --p2p_power=85.0
+                        --gpu_type="${GPU_TYPE}"
                 else
                     echo "    Optimisation results exist in: ${RESULTS_DIR}"
                 fi
@@ -262,7 +264,7 @@ for i in "${!CONFIGS[@]}"; do
                     --output_dir="${RESULTS_DIR}" \
                     --num_mbs="${NUM_MICROBATCHES}" \
                     --num_stages="${PP}" \
-                    --p2p_power=85.0
+                    --gpu_type="${GPU_TYPE}"
             else
                 echo "    Optimisation results exist in: ${RESULTS_DIR}"
             fi

@@ -61,9 +61,7 @@ A Kareus end-to-end run is three phases:
 > [!NOTE]
 > Hardware: experiments in the paper were generated on **2× AWS p4d.24xlarge instances (2x8 NVIDIA A100 SXM4 40GB)**; all defaults below assume 2x8 A100 GPUs.
 >
-> For other GPU types, adjust `FREQ_START`, `FREQ_END`, `FREQ_STEP`, and the optimizer's `--p2p_power` (see "Common environment variables" in [tests/artifact/README.md](tests/artifact/README.md)).
->
-> To change the parallelism dimensions, edit the `PP=` and `NUM_MICROBATCHES=` constants and the `CP/TP/MBS/SEQ` columns of the `CONFIGS_FULL` array near the top of each `tests/artifact/run_*.sh` script (and the matching arrays in [tests/data/prepare_data.sh](tests/data/prepare_data.sh) and [tests/artifact/kareus_run_bayesian.sh](tests/artifact/kareus_run_bayesian.sh)).
+> For other GPU types or parallelism dimensions, see [common GPU and configuration variables](tests/artifact/README.md#common-gpu-and-configuration-variables).
 >
 > For example, [tests/toy/](tests/toy/) shows a small sanity check on 4× NVIDIA A40 GPUs with PP=2, TP=2 (see [tests/toy/README.md](tests/toy/README.md)).
 

@@ -68,14 +68,15 @@ artefacts under `tests/bayesian/logs/...` are in place.
 |---|---|---|
 | `MASTER_PORT` | `6000` | all |
 | `PFO_PORT` | `7787` | `run_perseus.sh`, `run_nanobatch_perseus.sh`, `run_kareus.sh` |
+| `GPU_TYPE` | `A40` | optimizer/Bayesian paths use it for GPU-specific power/frequency config |
 | `FREQ_START` | `1740` | profiling sweeps |
 | `FREQ_END` | `900` | profiling sweeps |
 | `FREQ_STEP` | `60` | profiling sweeps |
 
-The frequency-sweep defaults (1740 → 900 MHz, step 60) and the
-optimizer's `--p2p_power=70.0` correspond to the **NVIDIA A40**.
-On other GPUs these need to be adjusted before running the
-profiling/optimization scripts.
+The frequency-sweep defaults (1740 → 900 MHz, step 60) and `GPU_TYPE=A40`
+correspond to the **NVIDIA A40**. The optimizers derive P2P/static power from
+`tests/bayesian/common/model_config.py`; add new GPUs there before running on
+other hardware.
 
 ## Logs
 

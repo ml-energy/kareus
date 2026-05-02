@@ -10,6 +10,7 @@
 #   CONFIG_MODE (optional, default full):
 #                 full   - sweep all 10 configs
 #                 single - run only the first row (Llama 3.2 3B TP=8 MBS=8 SEQ=4096)
+#   GPU_TYPE    (optional, default A100; logged for artifact metadata)
 #   REMOTE_USER     (optional, default ubuntu)
 #   REMOTE_BASE_DIR (optional, default ~/workspace/Kareus/tests/artifact)
 #   SSH_KEY_PATH    (optional; default unset → use ssh agent / ~/.ssh/config)
@@ -51,6 +52,7 @@ if [[ -z "${MASTER_ADDR:-}" ]]; then
 fi
 MASTER_PORT="${MASTER_PORT:-6000}"
 CONFIG_MODE="${CONFIG_MODE:-full}"
+GPU_TYPE="${GPU_TYPE:-A100}"
 
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-$HOME/workspace/Kareus/tests/artifact}"
@@ -88,7 +90,7 @@ esac
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "$LOG_DIR"
 
-echo "===== Artifact Megatron 16-GPU Tests (PP=${PP}, #microbatches=${NUM_MICROBATCHES}, CONFIG_MODE=${CONFIG_MODE}) ====="
+echo "===== Artifact Megatron 16-GPU Tests (GPU_TYPE=${GPU_TYPE}, PP=${PP}, #microbatches=${NUM_MICROBATCHES}, CONFIG_MODE=${CONFIG_MODE}) ====="
 echo "Total configurations: ${#CONFIGS[@]}"
 echo ""
 

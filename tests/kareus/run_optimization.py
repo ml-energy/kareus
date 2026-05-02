@@ -6,9 +6,11 @@ Auto-detects CP mode from CSV header (presence of 'fwd_qkv_ar' column).
 
 from __future__ import annotations
 
+import logging
+import os
+import sys
 import time
 import itertools
-import logging
 from pathlib import Path
 from typing import Type
 from collections import defaultdict
@@ -37,6 +39,9 @@ from lowtime.graph_utils import add_source_node, add_sink_node, DependencyResolv
 from lowtime.perseus.schedule import Synchronous1F1B
 from lowtime.perseus.visualizer import PipelineVisualizer, ANNOTATE_ARGS, LINE_ARGS
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bayesian'))
+from common.model_config import DEFAULT_GPU, get_p2p_power
+
 logger = logging.getLogger()
 
 
@@ -50,8 +55,8 @@ class Args:
     num_mbs: int = 8
     # Number of stages
     num_stages: int = 2
-    # GPU power consumption while blocking on P2P communication, in Watts
-    p2p_power: float = 85.0
+    # GPU type for P2P-wait/static power lookup
+    gpu_type: str = DEFAULT_GPU
     # Interval to draw the state of the pipeline
     plot_interval: int = 100
     # The unit of reduction for each iteration, in seconds
@@ -344,6 +349,12 @@ def main(args: Args) -> None:
         handlers=[logging.FileHandler(log_path, mode="a"), logging.StreamHandler()],
     )
     logger.info("Arguments: %s", args)
+    p2p_power = get_p2p_power(args.gpu_type)
+    logger.info(
+        "Using P2P-wait/static power %.2f W for GPU type %s",
+        p2p_power,
+        args.gpu_type,
+    )
 
     # Read CSV and auto-detect CP mode
     inst_df = pd.read_csv(args.inst_profile)
@@ -363,7 +374,7 @@ def main(args: Args) -> None:
             options = build_options(inst_df, instruction, stage_id, args)
 
             for option in options:
-                option.cost -= args.p2p_power * option.quant_time * option.unit_time
+                option.cost -= p2p_power * option.quant_time * option.unit_time
 
             cand_options = CandidateExecutionOptions(options=options)
             if len(cand_options.options) <= 3:
@@ -438,7 +449,7 @@ def main(args: Args) -> None:
         vis.draw(
             ax,
             draw_time_axis=True,
-            p2p_power=args.p2p_power,
+            p2p_power=p2p_power,
             annotation_hook=annotation_hook,
             power_color="RdBu_r",
             normalizer_range=(-200, 550),
@@ -464,7 +475,7 @@ def main(args: Args) -> None:
 
         # Append iteration cost info
         iter_str = f"# Iteration {iteration} "
-        real_cost = result.cost + args.num_stages * result.real_time * args.p2p_power
+        real_cost = result.cost + args.num_stages * result.real_time * p2p_power
         f_cfgs.write(iter_str + f"cost change: {result.cost_change}\n")
         f_cfgs.write(iter_str + f"total cost: {result.cost}\n")
         f_cfgs.write(iter_str + f"total cost with P2P: {real_cost}\n")

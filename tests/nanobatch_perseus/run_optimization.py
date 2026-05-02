@@ -27,6 +27,8 @@ Usage:
 
 from __future__ import annotations
 
+import os
+import sys
 import itertools
 import logging
 import time
@@ -60,6 +62,9 @@ from lowtime.graph_utils import DependencyResolver, add_sink_node, add_source_no
 from lowtime.perseus.schedule import Synchronous1F1B
 from lowtime.perseus.visualizer import ANNOTATE_ARGS, LINE_ARGS, PipelineVisualizer
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bayesian'))
+from common.model_config import DEFAULT_GPU, get_p2p_power
+
 logger = logging.getLogger()
 
 
@@ -73,8 +78,8 @@ class Args:
     num_mbs: int = 8
     # Number of pipeline stages
     num_stages: int = 2
-    # GPU power (W) while blocking on P2P communication
-    p2p_power: float = 85.0
+    # GPU type for P2P-wait/static power lookup
+    gpu_type: str = DEFAULT_GPU
     # Draw pipeline state every N iterations
     plot_interval: int = 100
     # Unit of time reduction per solver iteration (seconds)
@@ -95,6 +100,12 @@ def main(args: Args) -> None:
         handlers=[logging.FileHandler(log_path, mode="a"), logging.StreamHandler()],
     )
     logger.info("Arguments: %s", args)
+    p2p_power = get_p2p_power(args.gpu_type)
+    logger.info(
+        "Using P2P-wait/static power %.2f W for GPU type %s",
+        p2p_power,
+        args.gpu_type,
+    )
 
     inst_df = pd.read_csv(args.inst_profile)
 
@@ -122,7 +133,7 @@ def main(args: Args) -> None:
                 )
 
             for option in options:
-                option.cost -= args.p2p_power * option.quant_time * option.unit_time
+                option.cost -= p2p_power * option.quant_time * option.unit_time
 
             cand_options = CandidateExecutionOptions[int](options=options)
             if len(cand_options.options) <= 3:
@@ -198,7 +209,7 @@ def main(args: Args) -> None:
         vis.draw(
             ax,
             draw_time_axis=True,
-            p2p_power=args.p2p_power,
+            p2p_power=p2p_power,
             annotation_hook=annotation_hook,
             power_color="RdBu_r",
             normalizer_range=(-200, 550),
@@ -230,7 +241,7 @@ def main(args: Args) -> None:
             f.write("]\n")
 
             iter_str = f"# Iteration {iteration} "
-            real_cost = result.cost + args.num_stages * result.real_time * args.p2p_power
+            real_cost = result.cost + args.num_stages * result.real_time * p2p_power
             f.write(iter_str + f"cost change: {result.cost_change}\n")
             f.write(iter_str + f"total cost: {result.cost}\n")
             f.write(iter_str + f"total cost with P2P: {real_cost}\n")

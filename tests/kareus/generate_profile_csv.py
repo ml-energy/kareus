@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import warnings
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 import os
 
 import sys
@@ -26,7 +26,7 @@ import pandas as pd
 import tyro
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bayesian'))
-from common.model_config import get_model_config, GPU_CONFIGS, get_p2p_power
+from common.model_config import DEFAULT_GPU, get_model_config, get_p2p_power
 
 
 @dataclass
@@ -50,7 +50,7 @@ class Args:
     # Directory to write the output profile CSV into
     output_dir: str = "."
     # GPU type for p2p_power lookup
-    gpu_type: Literal["A40", "A100"] = "A100"
+    gpu_type: str = DEFAULT_GPU
     # Generate backward candidates with recompute-forward configs
     use_activation_checkpointing: bool = True
     # Scale sum_time and sum_energy by 1.15

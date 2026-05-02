@@ -11,10 +11,12 @@
 # GPU subsets.  Run it once on a node with 8 GPUs visible before invoking
 # tests/artifact/run_kareus.sh.
 #
-# Env var CONFIG_MODE (default full):
+# Env vars:
+#   CONFIG_MODE (default full):
 #   full   - full 3-phase sweep over all evaluation configs
 #   single - only profile Llama 3.2 3B CP=1 TP=8 MBS=8 SEQ=4096
 #            (matches run_kareus.sh CONFIG_MODE=single)
+#   GPU_TYPE (default A100, used for frequency range and P2P/static power)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +26,7 @@ BAYESIAN_DIR="${SCRIPT_DIR}/../bayesian"
 cd "$BAYESIAN_DIR"
 
 CONFIG_MODE="${CONFIG_MODE:-full}"
+GPU_TYPE="${GPU_TYPE:-A100}"
 case "${CONFIG_MODE}" in
     full|single) ;;
     *) echo "ERROR: CONFIG_MODE must be 'full' or 'single', got '${CONFIG_MODE}'" >&2; exit 1 ;;
@@ -52,7 +55,7 @@ run_tp_only() {
         local log_dir="logs/${model}/cp1-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
-            -m "$model" -w "$tp" -tp "$tp" -cp 1 -b "$bs" -s "$seq" \
+            -m "$model" -w "$tp" -tp "$tp" -cp 1 -b "$bs" -s "$seq" --gpu_type "$GPU_TYPE" \
             |& tee "${log_dir}/bo_${tag}.log"
     done
 }
@@ -64,7 +67,7 @@ run_cptp_tp() {
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
-            -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
+            -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" --gpu_type "$GPU_TYPE" \
             |& tee "${log_dir}/bo_${tag}.log"
     done
 }
@@ -76,7 +79,7 @@ run_cptp_cp() {
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
-            -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
+            -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" --gpu_type "$GPU_TYPE" \
             |& tee "${log_dir}/bo_${tag}.log"
     done
 }
@@ -91,7 +94,7 @@ run_cptp_cp_a() {
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
-            -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
+            -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" --gpu_type "$GPU_TYPE" \
             |& tee "${log_dir}/bo_${tag}.log"
     done
 }
@@ -103,7 +106,7 @@ run_cptp_cp_b() {
         local log_dir="logs/${model}/cp${cp}-tp${tp}-bs${bs}-seq${seq}/${part}"
         mkdir -p "$log_dir"
         CUDA_VISIBLE_DEVICES=$gpus python -u partitions/${part}/bo_search.py \
-            -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
+            -m "$model" -w "$cp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" --gpu_type "$GPU_TYPE" \
             |& tee "${log_dir}/bo_${tag}.log"
     done
 }
@@ -115,7 +118,7 @@ run_nonpartition() {
     mkdir -p "$log_dir"
     echo ">>> nonpartition: ${tag}  GPUs=${gpus}"
     CUDA_VISIBLE_DEVICES=$gpus python -u nonpartition/profile_nonpartition.py \
-        -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" \
+        -m "$model" -w "$tp" -tp "$tp" -cp "$cp" -b "$bs" -s "$seq" --gpu_type "$GPU_TYPE" \
         |& tee "${log_dir}/nonpartition_${tag}.log"
 }
 
@@ -123,7 +126,7 @@ run_nonpartition() {
 # CONFIG_MODE=single — only Llama 3.2 3B CP=1 TP=8 MBS=8 SEQ=4096
 ###############################################################################
 if [[ "${CONFIG_MODE}" == "single" ]]; then
-    echo "===== CONFIG_MODE=single: Llama 3.2 3B CP=1 TP=8 MBS=8 SEQ=4096 ====="
+    echo "===== CONFIG_MODE=single GPU_TYPE=${GPU_TYPE}: Llama 3.2 3B CP=1 TP=8 MBS=8 SEQ=4096 ====="
     # run_tp_only 0,1,2,3,4,5,6,7 llama3.2_3b 8 8 4096
     run_nonpartition 0,1,2,3,4,5,6,7 llama3.2_3b 8 1 8 4096
     echo ""
@@ -134,6 +137,7 @@ fi
 ###############################################################################
 # Phase 1 — TP-only (8 GPUs, sequential)
 ###############################################################################
+echo "===== CONFIG_MODE=full GPU_TYPE=${GPU_TYPE} ====="
 echo "===== Phase 1: TP-only (8 GPUs) ====="
 run_tp_only 0,1,2,3,4,5,6,7 llama3.2_3b 8 8  4096
 run_nonpartition 0,1,2,3,4,5,6,7 llama3.2_3b 8 1 8  4096

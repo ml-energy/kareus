@@ -115,7 +115,17 @@ def get_model_config(name: str) -> ModelConfig:
 
 
 def get_p2p_power(gpu_type: str) -> float:
-    """Return p2p power (W) for *gpu_type*, with a conservative fallback."""
-    return float(GPU_CONFIGS.get(gpu_type, {}).get("p2p_power_w", 70.0))
+    """Return P2P-wait power (W) for *gpu_type*.
+
+    This value is used as static power when converting measured energy into
+    effective/dynamic energy. Add new GPUs to GPU_CONFIGS before running on
+    hardware not listed here.
+    """
+    if gpu_type not in GPU_CONFIGS:
+        raise ValueError(
+            f"Unknown GPU type {gpu_type!r}. Add it to GPU_CONFIGS in "
+            f"{__file__}. Available: {list(GPU_CONFIGS)}"
+        )
+    return float(GPU_CONFIGS[gpu_type]["p2p_power_w"])
 
 

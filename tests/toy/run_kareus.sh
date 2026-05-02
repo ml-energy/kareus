@@ -10,6 +10,7 @@
 # Environment variables (all optional):
 #   MASTER_PORT   (default 6000)
 #   PFO_PORT      (default 7787)
+#   GPU_TYPE      (default A40)
 #
 # Per-config flow:
 #   1. BO profiling – kareus_run_bayesian.sh (skip if results ready)
@@ -30,6 +31,7 @@ cd "$SCRIPT_DIR"
 CFG="${1:-megatron_llama3.2_3b_config}"
 MASTER_PORT="${MASTER_PORT:-6000}"
 PFO_PORT="${PFO_PORT:-7787}"
+GPU_TYPE="${GPU_TYPE:-A40}"
 
 PP=2
 TP=2
@@ -56,7 +58,7 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 
 mkdir -p "${RESULTS_DIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
 
-echo "===== Toy Kareus 4-GPU Test (PP=${PP}, TP=${TP}, CP=${CP}, #microbatches=${NUM_MICROBATCHES}) ====="
+echo "===== Toy Kareus 4-GPU Test (GPU_TYPE=${GPU_TYPE}, PP=${PP}, TP=${TP}, CP=${CP}, #microbatches=${NUM_MICROBATCHES}) ====="
 echo "Config: ${CFG}  Model: ${MODEL_NAME}"
 echo ""
 
@@ -114,7 +116,7 @@ if (( bo_ready )); then
     echo "BO results already exist under ${BO_LOGS_DIR} — skipping Phase 1"
 else
     echo "Running Bayesian profiling (kareus_run_bayesian.sh)..."
-    bash "${SCRIPT_DIR}/kareus_run_bayesian.sh"
+    GPU_TYPE="${GPU_TYPE}" bash "${SCRIPT_DIR}/kareus_run_bayesian.sh"
 fi
 
 ########################################
@@ -134,7 +136,8 @@ if [[ ! -f "${PROFILE_CSV}" ]]; then
         --pipeline_parallel_size="${PP}" \
         --batch_size="${MBS}" \
         --seq_len="${SEQ}" \
-        --output_dir="${OUTPUT_DIR}"
+        --output_dir="${OUTPUT_DIR}" \
+        --gpu_type="${GPU_TYPE}"
 else
     echo "Profile CSV exists: ${PROFILE_CSV}"
 fi
@@ -149,7 +152,8 @@ if ! compgen -G "${RESULTS_DIR}/freqs_pipeline_*.py" > /dev/null 2>&1; then
         --inst_profile="${PROFILE_CSV}" \
         --output_dir="${RESULTS_DIR}" \
         --num_mbs="${NUM_MICROBATCHES}" \
-        --num_stages="${PP}"
+        --num_stages="${PP}" \
+        --gpu_type="${GPU_TYPE}"
 else
     echo "Optimisation results exist in: ${RESULTS_DIR}"
 fi

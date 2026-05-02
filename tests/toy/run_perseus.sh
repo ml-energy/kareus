@@ -13,6 +13,7 @@
 #   FREQ_START    (default 1740)
 #   FREQ_END      (default 900)
 #   FREQ_STEP     (default 60)
+#   GPU_TYPE      (default A40)
 #
 # Per-config flow:
 #   1. Profiling   – frequency sweep (skip if .profiling_complete exists)
@@ -33,6 +34,7 @@ cd "$SCRIPT_DIR"
 CFG="${1:-megatron_llama3.2_3b_config}"
 MASTER_PORT="${MASTER_PORT:-6000}"
 PFO_PORT="${PFO_PORT:-7787}"
+GPU_TYPE="${GPU_TYPE:-A40}"
 
 PP=2
 TP=2
@@ -55,7 +57,7 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 
 mkdir -p "${PROFILE_DIR}" "${RESULTS_DIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
 
-echo "===== Toy Perseus 4-GPU Test (PP=${PP}, TP=${TP}, #microbatches=${NUM_MICROBATCHES}) ====="
+echo "===== Toy Perseus 4-GPU Test (GPU_TYPE=${GPU_TYPE}, PP=${PP}, TP=${TP}, #microbatches=${NUM_MICROBATCHES}) ====="
 echo "Config: ${CFG}"
 echo ""
 
@@ -97,7 +99,7 @@ if ! compgen -G "${RESULTS_DIR}/freqs_pipeline_*.py" > /dev/null 2>&1; then
         --output_dir="${RESULTS_DIR}" \
         --num_mbs="${NUM_MICROBATCHES}" \
         --num_stages="${PP}" \
-        --p2p_power=70.0
+        --gpu_type="${GPU_TYPE}"
 else
     echo "Optimisation results exist in: ${RESULTS_DIR}"
 fi
