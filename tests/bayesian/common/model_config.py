@@ -10,6 +10,13 @@ import torch.nn.functional as F
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 
+GPU_CONFIGS: Dict[str, dict] = {
+    "A40":  {"p2p_power_w": 70.0, "freq_range": (900, 1740, 30)},
+    "A100": {"p2p_power_w": 85.0, "freq_range": (900, 1410, 30)},
+}
+DEFAULT_GPU = "A100"
+
+
 @dataclasses.dataclass(frozen=True)
 class ModelConfig:
     """Immutable model architecture definition.
@@ -105,12 +112,6 @@ def get_model_config(name: str) -> ModelConfig:
             f"Unknown model {name!r}. Available: {list(MODEL_REGISTRY)}"
         )
     return MODEL_REGISTRY[name]
-
-GPU_CONFIGS: Dict[str, dict] = {
-    "A40":  {"p2p_power_w": 70.0, "freq_range": (900, 1740, 30)},
-    "A100": {"p2p_power_w": 85.0, "freq_range": (900, 1410, 30)},
-}
-DEFAULT_GPU = "A100"
 
 
 def get_p2p_power(gpu_type: str) -> float:

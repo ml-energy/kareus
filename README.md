@@ -1,4 +1,4 @@
-# Kareus OSDI ’26 Artifact Evalutation
+# Kareus OSDI ’26 Artifact Evaluation
 
 Artifact release for the paper **"Kareus: Joint Reduction of Dynamic and Static
 Energy in Large Model Training"**.
@@ -58,11 +58,23 @@ A Kareus end-to-end run is three phases:
 
 ## Reproducing evaluation results
 
-> Hardware: experiments in the paper were generated on **2× AWS p4d.24xlarge instances** (16× NVIDIA A100 SXM4 40GB total). 
-> All defaults below assume A100 GPUs; for other GPU types, adjust `FREQ_START`, `FREQ_END`, `FREQ_STEP`, and the optimizer's `--p2p_power` (see "Common environment variables" in [tests/artifact/README.md](tests/artifact/README.md)).
+> [!NOTE]
+> Hardware: experiments in the paper were generated on **2× AWS p4d.24xlarge instances (2x8 NVIDIA A100 SXM4 40GB)**; all defaults below assume 2x8 A100 GPUs.
+>
+> For other GPU types, adjust `FREQ_START`, `FREQ_END`, `FREQ_STEP`, and the optimizer's `--p2p_power` (see "Common environment variables" in [tests/artifact/README.md](tests/artifact/README.md)).
+>
+> To change the parallelism dimensions, edit the `PP=` and `NUM_MICROBATCHES=` constants and the `CP/TP/MBS/SEQ` columns of the `CONFIGS_FULL` array near the top of each `tests/artifact/run_*.sh` script (and the matching arrays in [tests/data/prepare_data.sh](tests/data/prepare_data.sh) and [tests/artifact/kareus_run_bayesian.sh](tests/artifact/kareus_run_bayesian.sh)).
+>
 > For example, [tests/toy/](tests/toy/) shows a small sanity check on 4× NVIDIA A40 GPUs with PP=2, TP=2 (see [tests/toy/README.md](tests/toy/README.md)).
 
 ### 0. Environment setup
+
+**Clone the repository** on each node:
+
+```bash
+git clone -b osdi26ae https://github.com/ml-energy/kareus.git
+cd kareus
+```
 
 **Build the image** (or pull the prebuilt one):
 
@@ -106,7 +118,7 @@ export HF_TOKEN=<your_huggingface_token>
 ```
 
 **Prepare the dataset.** Kareus evaluates 10 model configurations; we
-recommend reviewers start with `CONFIG_MODE=single` (Llama 3.2 3B, TP=8,  
+recommend reviewers start with `CONFIG_MODE=single` (Llama 3.2 3B, TP=8,
 MBS=8, SEQ=4096), which is the first row of the configuration table in evaluation. 
 The same `CONFIG_MODE` threads through all run scripts.
 
@@ -115,9 +127,8 @@ The same `CONFIG_MODE` threads through all run scripts.
 CONFIG_MODE=single bash tests/data/prepare_data.sh
 ```
 
-This produces `tests/data/llama_dataset_text_document.{bin,idx}` plus the  
-per-config dataset-index files under `tests/data/`. See  
-[tests/data/README.md](tests/data/README.md) for what `CONFIG_MODE=full` adds.
+This produces `tests/data/llama_dataset_text_document.{bin,idx}` plus the 
+per-config dataset-index files under `tests/data/`.
 
 ---
 
