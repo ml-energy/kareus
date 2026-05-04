@@ -1,7 +1,7 @@
 # Kareus OSDI ’26 Artifact Evaluation
 
-Artifact release for the paper **"Kareus: Joint Reduction of Dynamic and Static
-Energy in Large Model Training"**.
+Artifact release for the paper **"[Kareus: Joint Reduction of Dynamic and Static
+Energy in Large Model Training](https://arxiv.org/abs/2601.17654)"**.
 
 This repository contains everything needed to reproduce the main
 end-to-end results in the paper:
