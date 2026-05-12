@@ -187,6 +187,14 @@ SKIP_PROFILING=true bash tests/artifact/run_perseus.sh 0
 SKIP_PROFILING=true bash tests/artifact/run_nanobatch_perseus.sh 0
 ```
 
+## Special Case: Qwen 3 1.7B, CP=2 + TP=4, MBS=8, SEQ=4096
+
+For this single configuration, the cost of nanobatching overlap exceeds its
+benefit and Kareus's optimal plan reduces to Perseus's sequential schedule.
+`run_kareus.sh` detects this row and loads Perseus's precomputed schedules 
+and runs them through the Perseus execution path (`megatron_gpt_pretraining.py` 
+with `enable_kareus_scheduler=False`).
+
 ## Outputs and Logs
 
 Training outputs are organized as:

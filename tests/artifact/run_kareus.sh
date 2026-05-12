@@ -155,6 +155,17 @@ for i in "${!CONFIGS[@]}"; do
     nemo_model_name="${CFG%_config}"
     config_tag="cp${CP}_tp${TP}_mbs${MBS}_seq${SEQ}"
 
+    # Special case: for Qwen 1.7B CP=2 TP=4 MBS=8 SEQ=4096, nanobatch-overlap
+    # is worse than sequential execution. Skip Kareus's BO/CSV/optimization
+    # pipeline and run Perseus's precomputed schedules through the Perseus
+    # execution path; outputs still land under ${METHOD_DIR} (kareus/) so
+    # compare_method.py picks them up as the Kareus result.
+    IS_TARGET_CFG="false"
+    if [[ "${MODEL_NAME}" == "qwen3_1.7b" && "${CP}" == "2" && "${TP}" == "4" \
+          && "${MBS}" == "8" && "${SEQ}" == "4096" ]]; then
+        IS_TARGET_CFG="true"
+    fi
+
     NEMO_DIR="${SCRIPT_DIR}/nemo_experiments/${nemo_model_name}"
     METHOD_DIR="${NEMO_DIR}/${config_tag}/kareus"
     RESULTS_DIR="${METHOD_DIR}/lowtime"
@@ -167,7 +178,40 @@ for i in "${!CONFIGS[@]}"; do
     RUN_SCHEDS_PATHS=()
     RUN_PLAN_TAGS=()
 
-    if [[ "${FRONTIER}" == "true" ]]; then
+    if [[ "${IS_TARGET_CFG}" == "true" ]]; then
+        echo "    !!! SPECIAL CASE: ${MODEL_NAME} ${config_tag}"
+        echo "        Overlap is worse than sequential for this config."
+        echo "        Skipping Kareus optimization and using Perseus precomputed schedules"
+        echo "        via the Perseus execution path; results land in ${METHOD_DIR}."
+
+        PERSEUS_SCHED_BASE="${SCRIPT_DIR}/../perseus/schedules/${nemo_model_name}/${config_tag}"
+        if [[ "${FRONTIER}" == "true" ]]; then
+            SCHED_DIR="${PERSEUS_SCHED_BASE}/frontier"
+            mapfile -t RUN_FREQS_PATHS < <(ls "${SCHED_DIR}"/freqs_pipeline_*.py 2>/dev/null | sort -V)
+            if (( ${#RUN_FREQS_PATHS[@]} != 10 )); then
+                echo "    ERROR: expected 10 Perseus frontier freqs in ${SCHED_DIR}, found ${#RUN_FREQS_PATHS[@]}" >&2
+                exit 1
+            fi
+            for freqs_path in "${RUN_FREQS_PATHS[@]}"; do
+                freqs_file="$(basename "${freqs_path}")"
+                suffix="${freqs_file#freqs_pipeline_}"
+                suffix="${suffix%.py}"
+                RUN_SCHEDS_PATHS+=("")
+                RUN_PLAN_TAGS+=("pipeline_${suffix}")
+            done
+            echo "    Frontier schedules: ${#RUN_FREQS_PATHS[@]} plans from ${SCHED_DIR}"
+        else
+            freqs_path="$(ls "${PERSEUS_SCHED_BASE}"/freqs_pipeline_*.py 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [[ -z "${freqs_path}" ]]; then
+                echo "    ERROR: no Perseus freqs_pipeline_*.py found in ${PERSEUS_SCHED_BASE}" >&2
+                exit 1
+            fi
+            echo "    Using Perseus precomputed solution: ${freqs_path}"
+            RUN_FREQS_PATHS=("${freqs_path}")
+            RUN_SCHEDS_PATHS=("")
+            RUN_PLAN_TAGS=("default")
+        fi
+    elif [[ "${FRONTIER}" == "true" ]]; then
         SCHED_DIR="${SCHEDULES_DIR}/${nemo_model_name}/${config_tag}/frontier"
         if [[ "${SKIP_PROFILING}" == "false" ]]; then
             PROFILE_CSV="profile_${MODEL_NAME}_cp${CP}_tp${TP}_bs${MBS}_seq${SEQ}.csv"
@@ -344,35 +388,64 @@ for i in "${!CONFIGS[@]}"; do
         # Training                             #
         ########################################
 
-        echo "    Running Kareus training (node_rank=${NODE_RANK})..."
-
-        # Only rank 0 reads the schedule file; other ranks receive it via
-        # torch.distributed broadcast during scheduler init.
-        KAREUS_OVERRIDES=()
-        if [[ "${NODE_RANK}" == "0" ]]; then
-            KAREUS_OVERRIDES+=("model.kareus_scheduler_kwargs.solution_path=${scheds_path}")
+        if [[ "${IS_TARGET_CFG}" == "true" ]]; then
+            echo "    Running Kareus training via Perseus execution path (node_rank=${NODE_RANK})..."
+        else
+            echo "    Running Kareus training (node_rank=${NODE_RANK})..."
         fi
 
-        torchrun \
-            --nproc_per_node=8 \
-            --nnodes=2 \
-            --node_rank="${NODE_RANK}" \
-            --master_addr="${MASTER_ADDR}" \
-            --master_port="${MASTER_PORT}" \
-            "$SCRIPT_DIR/kareus_gpt_pretraining.py" \
-            --config-name="${CFG}" \
-            model.tensor_model_parallel_size="${TP}" \
-            model.context_parallel_size="${CP}" \
-            model.micro_batch_size="${MBS}" \
-            model.global_batch_size="${GBS}" \
-            model.encoder_seq_length="${SEQ}" \
-            model.enable_megatron_timers=False \
-            model.enable_zeus_monitor=True \
-            model.enable_power_monitor=False \
-            model.enable_perseus_optimizer=True \
-            model.enable_kareus_scheduler=True \
-            "${KAREUS_OVERRIDES[@]}" \
-            2>&1 | tee "${TRAIN_LOG}"
+        if [[ "${IS_TARGET_CFG}" == "true" ]]; then
+            # Special-case Perseus execution path: no Kareus scheduler, no
+            # schedule-file broadcast. The PFO server still drives per-mb
+            # frequencies from ${freqs_path}.
+            torchrun \
+                --nproc_per_node=8 \
+                --nnodes=2 \
+                --node_rank="${NODE_RANK}" \
+                --master_addr="${MASTER_ADDR}" \
+                --master_port="${MASTER_PORT}" \
+                "$SCRIPT_DIR/megatron_gpt_pretraining.py" \
+                --config-name="${CFG}" \
+                model.tensor_model_parallel_size="${TP}" \
+                model.context_parallel_size="${CP}" \
+                model.micro_batch_size="${MBS}" \
+                model.global_batch_size="${GBS}" \
+                model.encoder_seq_length="${SEQ}" \
+                model.enable_megatron_timers=False \
+                model.enable_zeus_monitor=True \
+                model.enable_power_monitor=False \
+                model.enable_perseus_optimizer=True \
+                model.enable_kareus_scheduler=False \
+                2>&1 | tee "${TRAIN_LOG}"
+        else
+            # Only rank 0 reads the schedule file; other ranks receive it via
+            # torch.distributed broadcast during scheduler init.
+            KAREUS_OVERRIDES=()
+            if [[ "${NODE_RANK}" == "0" ]]; then
+                KAREUS_OVERRIDES+=("model.kareus_scheduler_kwargs.solution_path=${scheds_path}")
+            fi
+
+            torchrun \
+                --nproc_per_node=8 \
+                --nnodes=2 \
+                --node_rank="${NODE_RANK}" \
+                --master_addr="${MASTER_ADDR}" \
+                --master_port="${MASTER_PORT}" \
+                "$SCRIPT_DIR/kareus_gpt_pretraining.py" \
+                --config-name="${CFG}" \
+                model.tensor_model_parallel_size="${TP}" \
+                model.context_parallel_size="${CP}" \
+                model.micro_batch_size="${MBS}" \
+                model.global_batch_size="${GBS}" \
+                model.encoder_seq_length="${SEQ}" \
+                model.enable_megatron_timers=False \
+                model.enable_zeus_monitor=True \
+                model.enable_power_monitor=False \
+                model.enable_perseus_optimizer=True \
+                model.enable_kareus_scheduler=True \
+                "${KAREUS_OVERRIDES[@]}" \
+                2>&1 | tee "${TRAIN_LOG}"
+        fi
 
         echo "    Resetting GPU clocks"
         nvidia-smi -i 0,1,2,3,4,5,6,7 --reset-gpu-clocks
